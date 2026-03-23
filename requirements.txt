@@ -1,0 +1,11 @@
+beautifulsoup4
+boto3
+ebooklib
+fastapi
+httpx
+lxml
+python-dotenv
+python-multipart
+pypdf
+psycopg[binary]>=3.2,<4
+uvicorn[standard]

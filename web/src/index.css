@@ -1,0 +1,66 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Manrope:wght@400;500;600;700&display=swap');
+
+:root {
+  color-scheme: light;
+  font-family: 'Manrope', system-ui, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  --accent: #b5833a;
+  --accent-deep: #23414b;
+  --ink-strong: #162026;
+  --ink-soft: #5e6a6f;
+  background:
+    radial-gradient(circle at top, rgba(212, 181, 120, 0.3), transparent 35%),
+    linear-gradient(180deg, #f6efdf 0%, #eadfc7 42%, #efe5d2 100%);
+  color: var(--ink-strong);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at 15% 20%, rgba(255, 255, 255, 0.5), transparent 28%),
+    radial-gradient(circle at 90% 10%, rgba(35, 65, 75, 0.08), transparent 30%),
+    linear-gradient(180deg, #f6efdf 0%, #eadfc7 42%, #efe5d2 100%);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(circle at center, black 45%, transparent 100%);
+  opacity: 0.25;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+#root {
+  isolation: isolate;
+}

@@ -1,0 +1,16 @@
+{
+  "name": "Storybook Reader",
+  "short_name": "Storybook",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6efdf",
+  "theme_color": "#23414b",
+  "description": "Personal PDF to audiobook reader with local and cloud narration options.",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
