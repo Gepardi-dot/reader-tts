@@ -90,6 +90,7 @@ JOBS_ROOT = DATA_ROOT / "jobs"
 WEB_DIST = frontend_root()
 DEFAULT_AUDIO_DIR = RUNTIME_ROOT / "output"
 PREVIEW_ROOT = DATA_ROOT / "previews"
+VOICES_ROOT = ROOT / "voices"
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
 OPENAI_TTS_MODEL = env_value("OPENAI_TTS_MODEL") or "gpt-4o-mini-tts"
 GEMINI_TTS_MODEL = env_value("GEMINI_TTS_MODEL") or "gemini-2.5-flash-preview-tts"
@@ -213,7 +214,7 @@ PROVIDER_TEST_SNIPPET = (
 )
 SUPABASE_DB_URL = env_value("SUPABASE_POOLER_URL") or env_value("SUPABASE_DB_URL") or env_value("DATABASE_URL")
 
-for directory in (DATA_ROOT, BOOKS_ROOT, JOBS_ROOT, DEFAULT_AUDIO_DIR, PREVIEW_ROOT, ROOT / "voices"):
+for directory in (DATA_ROOT, BOOKS_ROOT, JOBS_ROOT, DEFAULT_AUDIO_DIR, PREVIEW_ROOT):
     directory.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Storybook Reader", version="0.1.0")
@@ -655,7 +656,7 @@ def job_path(job_id: str) -> Path:
 
 def get_voice_models() -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
-    for voice_path in sorted((ROOT / "voices").glob("*.onnx")):
+    for voice_path in sorted(VOICES_ROOT.glob("*.onnx")):
         results.append(
             {
                 "id": str(voice_path.resolve()),
