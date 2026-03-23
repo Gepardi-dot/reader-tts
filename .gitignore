@@ -8,3 +8,6 @@ server/__pycache__/
 .env
 *.log
 *.err.log
+
+.vercel
+public/

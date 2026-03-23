@@ -69,11 +69,26 @@ for env_name in (
         os.environ.pop(env_name, None)
 
 
-DATA_ROOT = ROOT / "library"
+def runtime_root() -> Path:
+    if os.environ.get("VERCEL"):
+        return Path(tempfile.gettempdir()) / "storybook-reader"
+    return ROOT
+
+
+def frontend_root() -> Path:
+    candidates = [ROOT / "web" / "dist", ROOT / "public"]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+RUNTIME_ROOT = runtime_root()
+DATA_ROOT = RUNTIME_ROOT / "library"
 BOOKS_ROOT = DATA_ROOT / "books"
 JOBS_ROOT = DATA_ROOT / "jobs"
-WEB_DIST = ROOT / "web" / "dist"
-DEFAULT_AUDIO_DIR = ROOT / "output"
+WEB_DIST = frontend_root()
+DEFAULT_AUDIO_DIR = RUNTIME_ROOT / "output"
 PREVIEW_ROOT = DATA_ROOT / "previews"
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
 OPENAI_TTS_MODEL = env_value("OPENAI_TTS_MODEL") or "gpt-4o-mini-tts"
