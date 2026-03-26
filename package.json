@@ -1,0 +1,10 @@
+{
+  "name": "storybook-reader",
+  "private": true,
+  "scripts": {
+    "build": "npm --prefix web run build",
+    "lint": "npm --prefix web run lint",
+    "dev": "npm --prefix web run dev",
+    "preview": "npm --prefix web run preview"
+  }
+}
