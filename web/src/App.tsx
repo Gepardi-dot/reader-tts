@@ -1,8 +1,16 @@
 import { Suspense, lazy, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { HighlightsShelf } from './components/HighlightsShelf'
-import { LibraryCover } from './components/LibraryCover'
+import { buildHighlightLocations } from './components/highlightLocations'
+import { LibraryScreen } from './components/LibraryScreen'
 import { ReaderDesk } from './components/ReaderDesk'
+import {
+  DEFAULT_READER_APPEARANCE,
+  READER_FONT_SCALE_MAX,
+  READER_FONT_SCALE_MIN,
+  type ReaderAppearance,
+} from './components/readerAppearance'
+import { extractReaderChapters, type ReaderChapter } from './components/readerChapters'
 import { paginateReaderText } from './components/readerPagination'
 import type {
   AudioTimingManifest,
@@ -51,6 +59,7 @@ type StoredSession = {
 
 type StoredUiPreferences = {
   readerForm: ReaderForm
+  readerAppearance: ReaderAppearance
   readerFontScales: Record<string, number>
   audioPlaybackRate: number
 }
@@ -118,6 +127,8 @@ const initialForm: ReaderForm = {
   lengthScale: 1,
   sentenceSilence: 0.2,
 }
+
+const initialReaderAppearance: ReaderAppearance = DEFAULT_READER_APPEARANCE
 
 const READING_PROGRESS_KEY = 'storybook-reader-progress'
 const SESSION_STATE_KEY = 'storybook-reader-session'
@@ -253,14 +264,6 @@ function patchBook(collection: Book[], bookId: string, changes: Partial<Book>) {
   return collection.map((book) => (book.id === bookId ? { ...book, ...changes } : book))
 }
 
-function chunkItems<T>(items: T[], size: number) {
-  const chunks: T[][] = []
-  for (let index = 0; index < items.length; index += size) {
-    chunks.push(items.slice(index, index + size))
-  }
-  return chunks
-}
-
 function parseRoute(pathname: string): AppRoute {
   const match = pathname.match(/^\/book\/([^/]+)$/)
   if (match) {
@@ -341,6 +344,22 @@ function isStoredOutputFormat(value: unknown): value is ReaderForm['outputFormat
   return value === 'mp3' || value === 'm4b' || value === 'wav'
 }
 
+function isStoredReaderFontFamily(value: unknown): value is ReaderAppearance['fontFamily'] {
+  return value === 'serif' || value === 'sans'
+}
+
+function isStoredReaderLineHeight(value: unknown): value is ReaderAppearance['lineHeight'] {
+  return value === 'compact' || value === 'comfortable' || value === 'airy'
+}
+
+function isStoredReaderPageWidth(value: unknown): value is ReaderAppearance['pageWidth'] {
+  return value === 'narrow' || value === 'balanced' || value === 'wide'
+}
+
+function isStoredReaderTextAlign(value: unknown): value is ReaderAppearance['textAlign'] {
+  return value === 'left' || value === 'justify'
+}
+
 function clampPreference(value: unknown, minimum: number, maximum: number, fallback: number) {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.min(maximum, Math.max(minimum, value))
@@ -350,6 +369,7 @@ function clampPreference(value: unknown, minimum: number, maximum: number, fallb
 function readStoredUiPreferences(): StoredUiPreferences {
   const fallback: StoredUiPreferences = {
     readerForm: initialForm,
+    readerAppearance: initialReaderAppearance,
     readerFontScales: {},
     audioPlaybackRate: 1,
   }
@@ -366,15 +386,17 @@ function readStoredUiPreferences(): StoredUiPreferences {
 
     const parsed = JSON.parse(raw) as Partial<StoredUiPreferences> & {
       readerForm?: Partial<ReaderForm>
+      readerAppearance?: Partial<ReaderAppearance>
     }
     const readerForm: Partial<ReaderForm> = parsed.readerForm ?? {}
+    const readerAppearance: Partial<ReaderAppearance> = parsed.readerAppearance ?? {}
     const readerFontScales: Record<string, number> = {}
 
     for (const [bookId, value] of Object.entries(parsed.readerFontScales ?? {})) {
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         continue
       }
-      readerFontScales[bookId] = clampPreference(value, 0.9, 1.25, 1)
+      readerFontScales[bookId] = clampPreference(value, READER_FONT_SCALE_MIN, READER_FONT_SCALE_MAX, 1)
     }
 
     return {
@@ -391,6 +413,20 @@ function readStoredUiPreferences(): StoredUiPreferences {
             : initialForm.narrationStyle,
         lengthScale: clampPreference(readerForm.lengthScale, 0.6, 1.5, initialForm.lengthScale),
         sentenceSilence: clampPreference(readerForm.sentenceSilence, 0, 1, initialForm.sentenceSilence),
+      },
+      readerAppearance: {
+        fontFamily: isStoredReaderFontFamily(readerAppearance.fontFamily)
+          ? readerAppearance.fontFamily
+          : initialReaderAppearance.fontFamily,
+        lineHeight: isStoredReaderLineHeight(readerAppearance.lineHeight)
+          ? readerAppearance.lineHeight
+          : initialReaderAppearance.lineHeight,
+        pageWidth: isStoredReaderPageWidth(readerAppearance.pageWidth)
+          ? readerAppearance.pageWidth
+          : initialReaderAppearance.pageWidth,
+        textAlign: isStoredReaderTextAlign(readerAppearance.textAlign)
+          ? readerAppearance.textAlign
+          : initialReaderAppearance.textAlign,
       },
       readerFontScales,
       audioPlaybackRate: clampPreference(parsed.audioPlaybackRate, 0.75, 2, fallback.audioPlaybackRate),
@@ -482,19 +518,6 @@ function readInitialRoute(pathname: string): AppRoute {
   }
 
   return readStoredSession().lastRoute
-}
-
-function getLibraryColumns() {
-  if (typeof window === 'undefined') {
-    return 3
-  }
-  if (window.innerWidth <= 720) {
-    return 1
-  }
-  if (window.innerWidth <= 1120) {
-    return 2
-  }
-  return 3
 }
 
 function trimTextRange(text: string, start: number, end: number) {
@@ -750,8 +773,10 @@ export default function App() {
   const [readingProgress, setReadingProgress] = useState<Record<string, ReadingProgress>>(() =>
     readStoredProgress(),
   )
-  const [libraryColumns, setLibraryColumns] = useState<number>(() => getLibraryColumns())
   const [form, setForm] = useState<ReaderForm>(() => readStoredUiPreferences().readerForm)
+  const [readerAppearance, setReaderAppearance] = useState<ReaderAppearance>(
+    () => readStoredUiPreferences().readerAppearance,
+  )
   const [readerFontScales, setReaderFontScales] = useState<Record<string, number>>(
     () => readStoredUiPreferences().readerFontScales,
   )
@@ -771,6 +796,14 @@ export default function App() {
   const [readerLoading, setReaderLoading] = useState(false)
   const [readerTab, setReaderTab] = useState<ReaderTab>('reader')
   const [narrationOpen, setNarrationOpen] = useState(false)
+  const [chapterNavOpen, setChapterNavOpen] = useState(false)
+  const [chapterQuery, setChapterQuery] = useState('')
+  const [floatingReaderMenuVisible, setFloatingReaderMenuVisible] = useState(false)
+  const [readerHighlightFocus, setReaderHighlightFocus] = useState<{
+    token: number
+    start: number
+    end: number
+  } | null>(null)
   const [removingHighlightId, setRemovingHighlightId] = useState<string | null>(null)
   const [deletingBookId, setDeletingBookId] = useState<string | null>(null)
   const [cancellingJob, setCancellingJob] = useState(false)
@@ -800,6 +833,10 @@ export default function App() {
   const liveAudioCurrentRef = useRef<LiveAudioSegment | null>(null)
   const liveAudioQueueRef = useRef<LiveAudioSegment[]>([])
   const liveRequestConfigRef = useRef<ResolvedLiveConfig | null>(null)
+  const chapterNavRef = useRef<HTMLDivElement | null>(null)
+  const lastReaderScrollYRef = useRef(0)
+  const floatingReaderMenuVisibleRef = useRef(false)
+  const floatingReaderMenuFrameRef = useRef<number | null>(null)
 
   const selectedBookId = route.kind === 'book' ? route.bookId : ''
   const selectedBook = route.kind === 'book' ? books.find((book) => book.id === route.bookId) ?? null : null
@@ -824,10 +861,10 @@ export default function App() {
   }, [form, providers, selectedProvider?.id])
   const liveReadUnavailableMessage = useMemo(() => {
     if (!selectedProvider) {
-      return 'Select a live voice provider in Audio controls before using Play here.'
+      return 'Select a live voice provider in Audio before using Play here.'
     }
     if (!selectedProvider.available) {
-      return `${selectedProvider.name} is not ready in Audio controls yet.`
+      return `${selectedProvider.name} is not ready in Audio yet.`
     }
     if (!selectedProvider.voices.length) {
       return `No voices are available for ${selectedProvider.name} yet.`
@@ -837,6 +874,21 @@ export default function App() {
   const sentenceCues = useMemo(() => buildSentenceCues(readerPayload?.text ?? ''), [readerPayload?.text])
   const weightedSentenceCues = useMemo(() => buildWeightedSentenceCues(sentenceCues), [sentenceCues])
   const readerPages = useMemo(() => paginateReaderText(readerPayload?.text ?? ''), [readerPayload?.text])
+  const readerChapters = useMemo(
+    () => extractReaderChapters(readerPayload?.text ?? '', readerPages),
+    [readerPayload?.text, readerPages],
+  )
+  const filteredReaderChapters = useMemo(() => {
+    const query = chapterQuery.trim().toLowerCase()
+    if (!query) {
+      return readerChapters
+    }
+
+    return readerChapters.filter((chapter) => {
+      const title = chapter.title.toLowerCase()
+      return title.includes(query) || `page ${chapter.pageNumber}`.includes(query)
+    })
+  }, [chapterQuery, readerChapters])
   const currentAudioSrc =
     liveAudioMode !== null ? liveAudioCurrent?.url : selectedBook?.latestAudio?.url
   const selectedReaderFontScale = selectedBookId ? readerFontScales[selectedBookId] ?? 1 : 1
@@ -849,6 +901,125 @@ export default function App() {
     audio.defaultPlaybackRate = audioPlaybackRate
     audio.playbackRate = audioPlaybackRate
   }, [audioPlaybackRate, currentAudioSrc])
+
+  useEffect(() => {
+    if (!narrationOpen) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setNarrationOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [narrationOpen])
+
+  useEffect(() => {
+    if (!chapterNavOpen) {
+      return
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) {
+        return
+      }
+
+      if (chapterNavRef.current?.contains(target)) {
+        return
+      }
+
+      setChapterNavOpen(false)
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setChapterNavOpen(false)
+      }
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown)
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown)
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [chapterNavOpen])
+
+  useEffect(() => {
+    floatingReaderMenuVisibleRef.current = floatingReaderMenuVisible
+  }, [floatingReaderMenuVisible])
+
+  const syncFloatingReaderMenuVisibility = useEffectEvent((nextVisible: boolean) => {
+    if (floatingReaderMenuVisibleRef.current === nextVisible) {
+      return
+    }
+
+    floatingReaderMenuVisibleRef.current = nextVisible
+    setFloatingReaderMenuVisible(nextVisible)
+  })
+
+  useEffect(() => {
+    if (route.kind !== 'book') {
+      syncFloatingReaderMenuVisibility(false)
+      lastReaderScrollYRef.current = 0
+      return
+    }
+
+    const updateVisibilityFromScroll = (currentY: number) => {
+      const previousY = lastReaderScrollYRef.current
+      const delta = currentY - previousY
+      let nextVisible = floatingReaderMenuVisibleRef.current
+
+      if (chapterNavOpen || narrationOpen) {
+        nextVisible = currentY > 48
+        lastReaderScrollYRef.current = currentY
+        syncFloatingReaderMenuVisibility(nextVisible)
+        return
+      }
+
+      if (currentY < 140) {
+        nextVisible = false
+      } else if (delta <= -8) {
+        nextVisible = true
+      } else if (delta >= 12) {
+        nextVisible = false
+      }
+
+      lastReaderScrollYRef.current = currentY
+      syncFloatingReaderMenuVisibility(nextVisible)
+    }
+
+    const handleScroll = () => {
+      if (floatingReaderMenuFrameRef.current !== null) {
+        return
+      }
+
+      floatingReaderMenuFrameRef.current = window.requestAnimationFrame(() => {
+        floatingReaderMenuFrameRef.current = null
+        updateVisibilityFromScroll(window.scrollY)
+      })
+    }
+
+    lastReaderScrollYRef.current = window.scrollY
+    updateVisibilityFromScroll(window.scrollY)
+    window.addEventListener('scroll', handleScroll, { passive: true })
+
+    return () => {
+      if (floatingReaderMenuFrameRef.current !== null) {
+        window.cancelAnimationFrame(floatingReaderMenuFrameRef.current)
+        floatingReaderMenuFrameRef.current = null
+      }
+      window.removeEventListener('scroll', handleScroll)
+    }
+  }, [chapterNavOpen, narrationOpen, route.kind])
 
   useEffect(() => {
     liveAudioCurrentRef.current = liveAudioCurrent
@@ -957,6 +1128,30 @@ export default function App() {
       textEnd: page.end,
       textLength: readerPayload?.text.length ?? page.end,
     })
+  }
+
+  function handleSelectChapter(chapter: ReaderChapter) {
+    setReaderTab('reader')
+    syncReaderToPage(chapter.pageNumber)
+    setChapterNavOpen(false)
+    setChapterQuery('')
+  }
+
+  function handleJumpToHighlight(highlight: Highlight) {
+    const location = highlightLocations[highlight.id]
+    if (!location) {
+      return
+    }
+
+    setReaderTab('reader')
+    setChapterNavOpen(false)
+    setNarrationOpen(false)
+    setReaderHighlightFocus((current) => ({
+      token: (current?.token ?? 0) + 1,
+      start: highlight.start,
+      end: highlight.end,
+    }))
+    syncReaderToPage(location.startPageNumber)
   }
 
   async function requestLiveAudio(request: LivePlaybackRequest, configOverride?: ResolvedLiveConfig | null) {
@@ -1323,12 +1518,6 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const handleResize = () => setLibraryColumns(getLibraryColumns())
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [])
-
-  useEffect(() => {
     window.localStorage.setItem(READING_PROGRESS_KEY, JSON.stringify(readingProgress))
   }, [readingProgress])
 
@@ -1342,10 +1531,11 @@ export default function App() {
   useEffect(() => {
     writeStoredValue(UI_PREFERENCES_KEY, {
       readerForm: form,
+      readerAppearance,
       readerFontScales,
       audioPlaybackRate,
     } satisfies StoredUiPreferences)
-  }, [audioPlaybackRate, form, readerFontScales])
+  }, [audioPlaybackRate, form, readerAppearance, readerFontScales])
 
   useEffect(() => {
     if (!selectedBookId) {
@@ -1403,9 +1593,17 @@ export default function App() {
   useEffect(() => {
     if (!selectedBookId) {
       setReaderPayload(null)
+      setChapterNavOpen(false)
+      setChapterQuery('')
+      setFloatingReaderMenuVisible(false)
+      setReaderHighlightFocus(null)
       return
     }
 
+    setChapterNavOpen(false)
+    setChapterQuery('')
+    setFloatingReaderMenuVisible(false)
+    setReaderHighlightFocus(null)
     void loadReaderPayload(selectedBookId)
   }, [selectedBookId])
 
@@ -1598,7 +1796,7 @@ export default function App() {
   }
 
   function updateReaderFontScale(bookId: string, fontScale: number) {
-    const nextScale = Math.min(1.25, Math.max(0.9, fontScale))
+    const nextScale = Math.min(READER_FONT_SCALE_MAX, Math.max(READER_FONT_SCALE_MIN, fontScale))
     setReaderFontScales((previous) =>
       previous[bookId] === nextScale
         ? previous
@@ -2034,13 +2232,10 @@ export default function App() {
     }
   }
 
-  async function handleUpload(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    const formData = new FormData(event.currentTarget)
-    const file = formData.get('pdf')
+  async function uploadBookFile(file: File) {
     if (!(file instanceof File)) {
       setErrorMessage('Choose a PDF first.')
-      return
+      return null
     }
 
     try {
@@ -2056,9 +2251,10 @@ export default function App() {
       setBooks((previous) => upsertBook(previous, book))
       navigateToLibrary()
       setStatusMessage(`Imported ${book.title}.`)
-      event.currentTarget.reset()
+      return book
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Upload failed.')
+      return null
     } finally {
       setUploading(false)
     }
@@ -2302,7 +2498,75 @@ export default function App() {
   const selectedModel = modelOptions.find((model) => model.id === selectedModelId) ?? null
   const voiceOptions: VoiceOption[] =
     currentProvider ? filterVoicesForModel(currentProvider.voices, selectedModelId) : []
+  const selectedVoice = voiceOptions.find((voice) => voice.id === form.voice) ?? null
+  const providerStatusTitle = (() => {
+    if (!currentProvider) {
+      return ''
+    }
+
+    if (currentProvider.id === 'polly' && pollyHealth) {
+      return pollyHealth.connected ? 'Amazon Polly is ready' : 'Amazon Polly needs attention'
+    }
+
+    return currentProvider.available ? `${currentProvider.name} is ready` : `${currentProvider.name} needs setup`
+  })()
+  const providerStatusMessage = (() => {
+    if (!currentProvider) {
+      return ''
+    }
+
+    if (currentProvider.id === 'polly' && pollyHealth) {
+      return pollyHealth.connected
+        ? `Connected in ${pollyHealth.region}. Use it for a steady, provider-native read with fast previews and exports.`
+        : pollyHealth.message
+    }
+
+    return currentProvider.description
+  })()
+  const providerStatusFacts = (() => {
+    if (!currentProvider) {
+      return []
+    }
+
+    const facts: string[] = []
+
+    if (currentProvider.id === 'polly' && pollyHealth) {
+      if (selectedVoice?.label) {
+        facts.push(selectedVoice.label)
+      } else if (pollyHealth.defaultVoice) {
+        facts.push(`Default ${pollyHealth.defaultVoice}`)
+      }
+
+      facts.push(`${pollyHealth.voiceCount} voices`)
+      facts.push(pollyHealth.engine)
+      facts.push(pollyHealth.region)
+      return facts
+    }
+
+    if (selectedVoice?.label) {
+      facts.push(selectedVoice.label)
+    }
+
+    if (selectedModel?.label) {
+      facts.push(selectedModel.label)
+    }
+
+    if (selectedModel?.storytelling) {
+      facts.push('Storytelling-ready')
+    }
+
+    return facts
+  })()
   const currentProgress = selectedBook ? readingProgress[selectedBook.id] : null
+  const readerFileLabel = selectedBook?.fileName.replace(/\.pdf$/i, '') ?? ''
+  const readingProgressLabel = currentProgress
+    ? `Page ${currentProgress.pageNumber} of ${currentProgress.totalPages}`
+    : 'Not started'
+  const audioStatusLabel = selectedBook?.latestAudio ? 'Audio ready' : 'No audio yet'
+  const highlightLocations = useMemo(
+    () => buildHighlightLocations(readerPayload?.text ?? '', readerPages, readerPayload?.highlights ?? []),
+    [readerPages, readerPayload?.highlights, readerPayload?.text],
+  )
   const liveReadAvailable = Boolean(selectedBook) && Boolean(resolvedLiveConfig) && readerPages.length > 0
   const canPlayFromReaderSelection = liveReadAvailable
   const showAudioDock =
@@ -2327,26 +2591,105 @@ export default function App() {
     activeJob.status !== 'completed' &&
     activeJob.status !== 'failed' &&
     activeJob.status !== 'cancelled'
-  const libraryTiles = [{ kind: 'upload' as const }, ...books.map((book) => ({ kind: 'book' as const, book }))]
-  const minimumShelfRows = 4
-  const paddedLibraryTiles = [
-    ...libraryTiles,
-    ...Array.from({ length: Math.max(0, minimumShelfRows * libraryColumns - libraryTiles.length) }, () => null),
-  ]
-  const shelfRows = chunkItems(paddedLibraryTiles, libraryColumns)
-  const resumeBook =
-    books
-      .map((book) => ({ book, progress: readingProgress[book.id] }))
-      .filter((item) => item.progress)
-      .sort((left, right) => (right.progress?.updatedAt ?? '').localeCompare(left.progress?.updatedAt ?? ''))[0]
-      ?.book ?? books[0] ?? null
+
+  function renderReaderControls(compact = false) {
+    return (
+      <div className={`reader-screen__controls ${compact ? 'reader-screen__controls--compact' : ''}`}>
+        <div className="view-toggle" role="tablist" aria-label="Reading views">
+          <button className={readerTab === 'reader' ? 'active' : ''} onClick={() => setReaderTab('reader')} type="button">
+            Reader
+          </button>
+          <button className={readerTab === 'pdf' ? 'active' : ''} onClick={() => setReaderTab('pdf')} type="button">
+            PDF
+          </button>
+          <button
+            className={readerTab === 'highlights' ? 'active' : ''}
+            onClick={() => setReaderTab('highlights')}
+            type="button"
+          >
+            Highlights
+          </button>
+        </div>
+        <div className="reader-screen__chapters" ref={chapterNavRef}>
+          <button
+            aria-expanded={chapterNavOpen}
+            aria-haspopup="dialog"
+            className="secondary-button secondary-button--compact reader-screen__utility-button"
+            disabled={!readerChapters.length}
+            onClick={() => {
+              setNarrationOpen(false)
+              setChapterNavOpen((open) => !open)
+            }}
+            type="button"
+          >
+            Chapters
+          </button>
+          {chapterNavOpen ? (
+            <div className="chapters-popover" role="dialog" aria-label="Chapter navigation">
+              <label className="chapters-popover__search">
+                <span className="sr-only">Search chapters</span>
+                <input
+                  autoFocus
+                  onChange={(event) => setChapterQuery(event.target.value)}
+                  placeholder="Search chapters"
+                  type="search"
+                  value={chapterQuery}
+                />
+              </label>
+              <div className="chapters-popover__list">
+                {filteredReaderChapters.length ? (
+                  filteredReaderChapters.map((chapter) => (
+                    <button
+                      className={`chapters-popover__item ${currentProgress?.pageNumber === chapter.pageNumber ? 'active' : ''}`}
+                      key={chapter.id}
+                      onClick={() => handleSelectChapter(chapter)}
+                      type="button"
+                    >
+                      <span className="chapters-popover__title">{chapter.title}</span>
+                      <span className="chapters-popover__page">Page {chapter.pageNumber}</span>
+                    </button>
+                  ))
+                ) : (
+                  <p className="chapters-popover__empty">No chapters match that search.</p>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </div>
+        <button
+          className="secondary-button secondary-button--compact reader-screen__utility-button"
+          onClick={() => {
+            setChapterNavOpen(false)
+            setNarrationOpen(true)
+          }}
+          type="button"
+        >
+          Audio
+        </button>
+      </div>
+    )
+  }
+
+  function renderReaderFacts(compact = false) {
+    return (
+      <div className={`reader-screen__facts ${compact ? 'reader-screen__facts--compact' : ''}`} aria-label="Book details">
+        <span className="reader-screen__fact">{selectedBook?.pageCount ?? 0} pages</span>
+        <span className="reader-screen__fact">{readingProgressLabel}</span>
+        <span className={`reader-screen__fact ${selectedBook?.latestAudio ? 'reader-screen__fact--ready' : ''}`}>
+          {audioStatusLabel}
+        </span>
+      </div>
+    )
+  }
   const narrationPanel = (
     <aside className="panel status-panel narration-panel">
       <div className="panel-heading narration-panel__heading">
         <div className="narration-panel__intro">
-          <p className="eyebrow">Audio</p>
-          <h2>Audio controls</h2>
-          {currentProvider ? <p className="narration-panel__summary">{currentProvider.description}</p> : null}
+          <p className="eyebrow">Narration</p>
+          <h2>Audio</h2>
+          <p className="narration-panel__summary">
+            Choose a voice, test it, or generate a clean listening track for this book.
+          </p>
         </div>
         <div className="narration-panel__header-actions">
           {currentProvider ? (
@@ -2373,7 +2716,7 @@ export default function App() {
             onClick={() => setProvider(provider.id)}
             type="button"
           >
-            <strong>{provider.id === 'google' ? 'Gemini' : provider.id === 'polly' ? 'Polly' : 'Qwen'}</strong>
+            <strong>{provider.name}</strong>
             <span>
               {provider.available ? 'Ready' : provider.id === 'polly' ? 'Setup AWS' : 'Needs key'}
             </span>
@@ -2381,71 +2724,56 @@ export default function App() {
         ))}
       </div>
 
-      {form.provider === 'polly' && pollyHealth ? (
-        <div className="health-card health-card--compact">
-          <div className="health-card__header">
-            <div>
-              <p className="eyebrow">AWS</p>
-              <strong>{pollyHealth.connected ? 'Polly connected' : 'Polly not ready'}</strong>
+      {currentProvider ? (
+        <div
+          className={`provider-brief ${
+            currentProvider.available ? 'provider-brief--ready' : 'provider-brief--muted'
+          }`}
+        >
+          <div className="provider-brief__copy">
+            <p className="eyebrow">Provider</p>
+            <strong>{providerStatusTitle}</strong>
+            <p>{providerStatusMessage}</p>
+          </div>
+
+          {providerStatusFacts.length ? (
+            <div className="provider-brief__facts">
+              {providerStatusFacts.map((fact) => (
+                <span className="provider-brief__fact" key={fact}>
+                  {fact}
+                </span>
+              ))}
             </div>
+          ) : null}
+
+          {form.provider === 'polly' ? (
             <button
-              className="secondary-button secondary-button--compact"
+              className="secondary-button secondary-button--compact provider-brief__action"
               disabled={pollyHealthLoading}
               onClick={() => void loadPollyHealth()}
               type="button"
             >
               {pollyHealthLoading ? 'Refreshing...' : 'Refresh'}
             </button>
-          </div>
-          <p className="sample-text">{pollyHealth.message}</p>
-          <div className="health-grid">
-            <div>
-              <span>Account</span>
-              <strong>{pollyHealth.accountId ?? 'Unavailable'}</strong>
-            </div>
-            <div>
-              <span>Region</span>
-              <strong>{pollyHealth.region}</strong>
-            </div>
-            <div>
-              <span>Engine</span>
-              <strong>{pollyHealth.engine}</strong>
-            </div>
-            <div>
-              <span>Voices</span>
-              <strong>{pollyHealth.voiceCount}</strong>
-            </div>
-          </div>
-          {pollyHealth.profile || pollyHealth.defaultVoice ? (
-            <div className="health-grid">
-              <div>
-                <span>Profile</span>
-                <strong>{pollyHealth.profile ?? 'default chain'}</strong>
-              </div>
-              <div>
-                <span>Default voice</span>
-                <strong>{pollyHealth.defaultVoice ?? 'Unavailable'}</strong>
-              </div>
-            </div>
           ) : null}
-          {pollyHealth.arn ? <small className="health-arn">{pollyHealth.arn}</small> : null}
         </div>
       ) : null}
 
-      <div className="voice-picker">
-        <div className="voice-picker__header">
-          <div className="voice-picker__title">
-            <div className="voice-picker__title-row">
-              <span>Voice</span>
-              <small className="voice-picker__selection">
-                {form.voice
-                  ? voiceOptions.find((voice) => voice.id === form.voice)?.label ?? form.voice
-                  : 'Select a voice'}
-              </small>
+      <section className="narration-block">
+        <div className="voice-picker">
+          <div className="voice-picker__header">
+            <div className="voice-picker__title">
+              <div className="voice-picker__title-row">
+                <span>Voice</span>
+                <small className="voice-picker__selection">
+                  {selectedVoice?.label || form.voice || 'Select a voice'}
+                </small>
+              </div>
+              {currentProvider?.voiceMetaNote ? <p className="voice-picker__note">{currentProvider.voiceMetaNote}</p> : null}
             </div>
-            {currentProvider?.voiceMetaNote ? <p className="voice-picker__note">{currentProvider.voiceMetaNote}</p> : null}
           </div>
         </div>
+
         <div className="voice-list">
           {voiceOptions.map((voice) => {
             const isActive = voice.id === form.voice
@@ -2491,156 +2819,170 @@ export default function App() {
             </div>
           ) : null}
         </div>
-      </div>
+      </section>
 
-      <div className="controls-grid controls-grid--compact">
-        {modelOptions.length ? (
+      <section className="narration-block">
+        <div className="narration-block__heading">
+          <p className="eyebrow">Settings</p>
+          <strong>Playback and export</strong>
+        </div>
+
+        <div className="controls-grid controls-grid--compact">
+          {modelOptions.length ? (
+            <label className="control-field">
+              <span>Model</span>
+              <select
+                onChange={(event) =>
+                  setForm((previous) => ({
+                    ...previous,
+                    model: event.target.value,
+                  }))
+                }
+                value={form.model}
+              >
+                {modelOptions.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label}
+                  </option>
+                ))}
+              </select>
+              {selectedModel ? (
+                <small>
+                  {selectedModel.description}
+                  {selectedModel.storytelling ? ' Storytelling-friendly.' : ''}
+                </small>
+              ) : null}
+            </label>
+          ) : null}
+
           <label className="control-field">
-            <span>Model</span>
+            <span>Output</span>
             <select
               onChange={(event) =>
                 setForm((previous) => ({
                   ...previous,
-                  model: event.target.value,
+                  outputFormat: event.target.value as ReaderForm['outputFormat'],
                 }))
               }
-              value={form.model}
+              value={form.outputFormat}
             >
-              {modelOptions.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.label}
-                </option>
-              ))}
+              <option value="mp3">MP3</option>
+              <option value="m4b">M4B</option>
+              <option value="wav">WAV</option>
             </select>
-            {selectedModel ? (
-              <small>
-                {selectedModel.description}
-                {selectedModel.storytelling ? ' Storytelling-friendly.' : ''}
-              </small>
-            ) : null}
           </label>
-        ) : null}
+        </div>
 
-        <label className="control-field">
-          <span>Output</span>
-          <select
+        <div className="tuning-grid">
+          <label className="control-field range-field">
+            <div className="range-field__header">
+              <span>Speech speed</span>
+              <strong>{form.lengthScale.toFixed(2)}x</strong>
+            </div>
+            <input
+              max={1.5}
+              min={0.6}
+              onChange={(event) =>
+                setForm((previous) => ({
+                  ...previous,
+                  lengthScale: Number(event.target.value),
+                }))
+              }
+              step={0.05}
+              type="range"
+              value={form.lengthScale}
+            />
+            <small>Longer phrasing and slower delivery.</small>
+          </label>
+
+          <label className="control-field range-field">
+            <div className="range-field__header">
+              <span>Sentence pause</span>
+              <strong>{form.sentenceSilence.toFixed(2)}s</strong>
+            </div>
+            <input
+              max={1}
+              min={0}
+              onChange={(event) =>
+                setForm((previous) => ({
+                  ...previous,
+                  sentenceSilence: Number(event.target.value),
+                }))
+              }
+              step={0.05}
+              type="range"
+              value={form.sentenceSilence}
+            />
+            <small>Extra breathing room between sentences.</small>
+          </label>
+        </div>
+
+        <label className="style-field control-field">
+          <span>Style direction</span>
+          <textarea
             onChange={(event) =>
               setForm((previous) => ({
                 ...previous,
-                outputFormat: event.target.value as ReaderForm['outputFormat'],
+                narrationStyle: event.target.value,
               }))
             }
-            value={form.outputFormat}
+            rows={3}
+            value={form.narrationStyle}
+          />
+          <small>
+            Gemini and Qwen follow this directly. Polly keeps a simpler provider-native read.
+          </small>
+        </label>
+      </section>
+
+      <section className="narration-block narration-block--actions">
+        <div className="narration-block__heading">
+          <p className="eyebrow">Actions</p>
+          <strong>Preview before you export</strong>
+        </div>
+
+        <div className="action-row">
+          <button
+            className="secondary-button"
+            disabled={testingProvider || submitting || jobBusy || !currentProvider?.available || !voiceOptions.length}
+            onClick={() => void handleProviderTest()}
+            type="button"
           >
-            <option value="mp3">MP3</option>
-            <option value="m4b">M4B</option>
-            <option value="wav">WAV</option>
-          </select>
-        </label>
-      </div>
+            {testingProvider ? 'Testing...' : 'Preview voice'}
+          </button>
 
-      <div className="tuning-grid">
-        <label className="control-field range-field">
-          <div className="range-field__header">
-            <span>Speech speed</span>
-            <strong>{form.lengthScale.toFixed(2)}x</strong>
-          </div>
-          <input
-            max={1.5}
-            min={0.6}
-            onChange={(event) =>
-              setForm((previous) => ({
-                ...previous,
-                lengthScale: Number(event.target.value),
-              }))
+          <button
+            className="secondary-button"
+            disabled={!liveReadAvailable || testingProvider || submitting || jobBusy}
+            onClick={() => void handleStartLiveReadCurrentPage()}
+            type="button"
+          >
+            {liveAudioLoading && liveAudioMode === 'page' ? 'Starting...' : 'Read current page'}
+          </button>
+
+          <button
+            className="primary-button action-row__primary"
+            disabled={
+              !selectedBook ||
+              submitting ||
+              jobBusy ||
+              testingProvider ||
+              !currentProvider?.available ||
+              !voiceOptions.length
             }
-            step={0.05}
-            type="range"
-            value={form.lengthScale}
-          />
-          <small>Longer phrasing and slower delivery.</small>
-        </label>
-
-        <label className="control-field range-field">
-          <div className="range-field__header">
-            <span>Sentence pause</span>
-            <strong>{form.sentenceSilence.toFixed(2)}s</strong>
-          </div>
-          <input
-            max={1}
-            min={0}
-            onChange={(event) =>
-              setForm((previous) => ({
-                ...previous,
-                sentenceSilence: Number(event.target.value),
-              }))
-            }
-            step={0.05}
-            type="range"
-            value={form.sentenceSilence}
-          />
-          <small>Extra breathing room between sentences.</small>
-        </label>
-      </div>
-
-      <label className="style-field control-field">
-        <span>Narration style</span>
-        <textarea
-          onChange={(event) =>
-            setForm((previous) => ({
-              ...previous,
-              narrationStyle: event.target.value,
-            }))
-          }
-          rows={3}
-          value={form.narrationStyle}
-        />
-        <small>
-          Gemini and Qwen follow this directly. Polly keeps a simpler provider-native read.
-        </small>
-      </label>
-
-      <div className="action-row">
-        <button
-          className="secondary-button"
-          disabled={testingProvider || submitting || jobBusy || !currentProvider?.available || !voiceOptions.length}
-          onClick={() => void handleProviderTest()}
-          type="button"
-        >
-          {testingProvider ? 'Testing...' : 'Test voice'}
-        </button>
-
-        <button
-          className="secondary-button"
-          disabled={!liveReadAvailable || testingProvider || submitting || jobBusy}
-          onClick={() => void handleStartLiveReadCurrentPage()}
-          type="button"
-        >
-          {liveAudioLoading && liveAudioMode === 'page' ? 'Starting...' : 'Live page'}
-        </button>
-
-        <button
-          className="primary-button action-row__primary"
-          disabled={
-            !selectedBook ||
-            submitting ||
-            jobBusy ||
-            testingProvider ||
-            !currentProvider?.available ||
-            !voiceOptions.length
-          }
-          onClick={() => void handleGenerate()}
-          type="button"
-        >
-          {submitting ? 'Starting...' : 'Generate book'}
-        </button>
-      </div>
+            onClick={() => void handleGenerate()}
+            type="button"
+          >
+            {submitting ? 'Starting...' : 'Generate audiobook'}
+          </button>
+        </div>
+      </section>
 
       {providerSample ? (
         <div className="audio-card">
           <div className="audio-card__header">
             <div>
-              <p className="eyebrow">Provider test</p>
+              <p className="eyebrow">Voice preview</p>
               <strong>
                 {providerSample.provider} • {providerSample.voice || 'default voice'}
               </strong>
@@ -2713,110 +3055,40 @@ export default function App() {
   return (
     <main className={`app-shell ${route.kind === 'library' ? 'app-shell--library' : ''}`}>
       {route.kind === 'library' ? (
-        <section className="library-screen">
-          <div className="library-appbar">
-            <button className="library-appbar__icon" type="button" aria-label="Menu">
-              <svg aria-hidden="true" viewBox="0 0 24 24">
-                <path d="M4 7h16M4 12h16M4 17h16" />
-              </svg>
-            </button>
-            <div className="library-appbar__title">
-              <strong>All Books</strong>
-              <span>▾</span>
-            </div>
-            <div className="library-appbar__actions">
-              <button className="library-appbar__icon" type="button" aria-label="Search">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <circle cx="11" cy="11" r="6.5" />
-                  <path d="M16 16l4.5 4.5" />
-                </svg>
-              </button>
-              <button className="library-appbar__icon" type="button" aria-label="Filter">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M4 6h16l-6.5 7.5V19l-3 1v-6.5z" />
-                </svg>
-              </button>
-              <button className="library-appbar__icon" type="button" aria-label="More options">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <circle cx="12" cy="5" r="1.75" />
-                  <circle cx="12" cy="12" r="1.75" />
-                  <circle cx="12" cy="19" r="1.75" />
-                </svg>
-              </button>
-            </div>
-          </div>
-
-          <div className="library-bookshelf">
-            {shelfRows.map((row, rowIndex) => (
-              <div className="bookshelf-row" key={`row-${rowIndex}`}>
-                <div className="bookshelf-row__items">
-                  {row.map((item, itemIndex) =>
-                    item === null ? (
-                      <div aria-hidden className="library-book library-book--ghost" key={`ghost-${rowIndex}-${itemIndex}`} />
-                    ) : item.kind === 'upload' ? (
-                      <form className="library-book library-book--upload" key="upload" onSubmit={handleUpload}>
-                        <label className="library-book__cover library-book__cover--upload" htmlFor="library-upload-input">
-                          <input accept=".pdf,application/pdf" id="library-upload-input" name="pdf" type="file" />
-                          <span className="library-book__plus">+</span>
-                          <span className="library-book__upload-title">
-                            {uploading ? 'Importing...' : 'Add Book'}
-                          </span>
-                          <small>Drop PDF or browse</small>
-                        </label>
-                        <button className="primary-button library-book__import" disabled={uploading} type="submit">
-                          {uploading ? 'Working...' : 'Import PDF'}
-                        </button>
-                      </form>
-                    ) : (
-                      <article className="library-book" key={item.book.id}>
-                        <button
-                          className="library-book__cover"
-                          onClick={() => navigateToBook(item.book.id)}
-                          type="button"
-                        >
-                          <LibraryCover sourceUrl={item.book.sourceUrl} title={item.book.title} />
-                          <span className="library-book__dots">
-                            <i />
-                            <i />
-                            <i />
-                          </span>
-                        </button>
-                        <button
-                          aria-label={`Delete ${item.book.title}`}
-                          className="library-book__delete"
-                          disabled={deletingBookId === item.book.id}
-                          onClick={() => void handleDeleteBook(item.book)}
-                          type="button"
-                        >
-                          {deletingBookId === item.book.id ? '...' : 'Delete'}
-                        </button>
-                      </article>
-                    )
-                  )}
-                </div>
-                <div aria-hidden className="bookshelf-row__plank" />
-              </div>
-            ))}
-
-            {!books.length && !loading ? (
-              <div className="empty-card empty-card--shelf">
-                <strong>Your shelf is empty</strong>
-                <p>Import a PDF to start building your personal library.</p>
-              </div>
-            ) : null}
-
-            {resumeBook ? (
-              <button className="library-fab" onClick={() => navigateToBook(resumeBook.id)} type="button">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M4.5 6.5c0-1.1.9-2 2-2H12v13H6.5c-1.1 0-2-.9-2-2z" />
-                  <path d="M19.5 6.5c0-1.1-.9-2-2-2H12v13h5.5c1.1 0 2-.9 2-2z" />
-                </svg>
-              </button>
-            ) : null}
-          </div>
-        </section>
+        <LibraryScreen
+          books={books}
+          deletingBookId={deletingBookId}
+          errorMessage={errorMessage}
+          loading={loading}
+          onDeleteBook={handleDeleteBook}
+          onOpenBook={navigateToBook}
+          onUploadFile={uploadBookFile}
+          readingProgress={readingProgress}
+          statusMessage={statusMessage}
+          uploading={uploading}
+        />
       ) : (
-        <section className={`reader-screen ${showAudioDock ? 'reader-screen--with-audio' : ''}`}>
+        <section
+          className={`reader-screen ${showAudioDock ? 'reader-screen--with-audio' : ''} ${
+            floatingReaderMenuVisible ? 'reader-screen--floating-menu' : ''
+          }`}
+        >
+          {selectedBook ? (
+            <div
+              aria-hidden={!floatingReaderMenuVisible}
+              className={`reader-floating-bar ${floatingReaderMenuVisible ? 'active' : ''}`}
+              aria-label="Reader controls"
+            >
+              <div className="reader-floating-bar__identity">
+                <span className="reader-floating-bar__eyebrow">Reading</span>
+                <strong className="reader-floating-bar__title">{selectedBook.title}</strong>
+              </div>
+              <div className="reader-screen__meta reader-screen__meta--compact">
+                {renderReaderControls(true)}
+                {renderReaderFacts(true)}
+              </div>
+            </div>
+          ) : null}
           <div className="reader-screen__topbar">
             <div className="reader-screen__topbar-main">
               <button className="secondary-button secondary-button--compact" onClick={navigateToLibrary} type="button">
@@ -2824,35 +3096,16 @@ export default function App() {
               </button>
               {selectedBook ? (
                 <div className="reader-screen__title">
-                  <p className="eyebrow">Now Reading</p>
+                  <p className="eyebrow">Reading</p>
                   <h2>{selectedBook.title}</h2>
-                  <p className="reader-screen__subtitle">{selectedBook.fileName.replace(/\.pdf$/i, '')}</p>
+                  <p className="reader-screen__subtitle">{readerFileLabel}</p>
                 </div>
               ) : null}
             </div>
-            {selectedBook ? (
+            {selectedBook && !floatingReaderMenuVisible ? (
               <div className="reader-screen__meta">
-                <button
-                  className="secondary-button secondary-button--compact reader-screen__audio-button"
-                  onClick={() => setNarrationOpen(true)}
-                  type="button"
-                >
-                  Audio controls
-                </button>
-                <span className="badge">{selectedBook.pageCount} pages</span>
-                <span className="badge">{selectedBook.highlightCount} highlights</span>
-                {currentProgress ? (
-                  <span className="badge ok">
-                    Page {currentProgress.pageNumber} of {currentProgress.totalPages}
-                  </span>
-                ) : (
-                  <span className="badge muted">Not started</span>
-                )}
-                {selectedBook.latestAudio ? (
-                  <span className="badge ok">Audio ready</span>
-                ) : (
-                  <span className="badge muted">No audio yet</span>
-                )}
+                {renderReaderControls()}
+                {renderReaderFacts()}
               </div>
             ) : null}
           </div>
@@ -2906,40 +3159,6 @@ export default function App() {
 
           <div className="reader-workspace reader-workspace--clean">
             <div className="panel preview-panel reader-panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="eyebrow">Read</p>
-                  <h2>{selectedBook?.title ?? 'Book not found'}</h2>
-                </div>
-                <div className="reader-panel__header">
-                  {selectedBook ? (
-                    <div className="view-toggle" role="tablist" aria-label="Reading views">
-                      <button
-                        className={readerTab === 'reader' ? 'active' : ''}
-                        onClick={() => setReaderTab('reader')}
-                        type="button"
-                      >
-                        Reader
-                      </button>
-                      <button
-                        className={readerTab === 'pdf' ? 'active' : ''}
-                        onClick={() => setReaderTab('pdf')}
-                        type="button"
-                      >
-                        PDF
-                      </button>
-                      <button
-                        className={readerTab === 'highlights' ? 'active' : ''}
-                        onClick={() => setReaderTab('highlights')}
-                        type="button"
-                      >
-                        Highlights
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-
               {selectedBook ? (
                 readerLoading ? (
                   <div className="empty-stage">
@@ -2949,22 +3168,27 @@ export default function App() {
                 ) : readerTab === 'reader' && readerPayload ? (
                   <ReaderDesk
                     canPlayFromSelection={canPlayFromReaderSelection}
+                    focusRange={readerHighlightFocus}
+                    focusRequest={readerHighlightFocus?.token ?? 0}
                     highlights={readerPayload.highlights}
+                    initialAppearance={readerAppearance}
                     initialFontScale={selectedReaderFontScale}
                     initialPageNumber={currentProgress?.pageNumber ?? 1}
                     narrationFocusRequest={readerNarrationFocusToken}
+                    onAppearanceChange={setReaderAppearance}
                     onCreateHighlight={handleCreateHighlight}
                     onFontScaleChange={(fontScale) => updateReaderFontScale(readerPayload.book.id, fontScale)}
                     onPlayFromSelection={handlePlayFromSelection}
                     onProgressChange={(payload) => updateReadingProgress(readerPayload.book.id, payload)}
                     spokenRange={spokenRange}
                     text={readerPayload.text}
-                    title={readerPayload.book.title}
                   />
                 ) : readerTab === 'highlights' && readerPayload ? (
                   <HighlightsShelf
                     highlights={readerPayload.highlights}
+                    highlightLocations={highlightLocations}
                     onDelete={handleDeleteHighlight}
+                    onJumpToHighlight={handleJumpToHighlight}
                     removingId={removingHighlightId}
                   />
                 ) : readerTab === 'pdf' ? (

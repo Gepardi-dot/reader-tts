@@ -1,5 +1,86 @@
+const LOCAL_HOST_PATTERN =
+  /^(localhost|127\.0\.0\.1|0\.0\.0\.0|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})$/
+
+function configuredApiOrigin() {
+  const configured = import.meta.env.VITE_API_ORIGIN?.trim()
+  return configured ? configured.replace(/\/$/, '') : null
+}
+
+function fallbackApiOrigin() {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  const { protocol, hostname, port } = window.location
+  if (!LOCAL_HOST_PATTERN.test(hostname)) {
+    return null
+  }
+
+  if (port === '8000') {
+    return null
+  }
+
+  return `${protocol}//${hostname}:8000`
+}
+
+function canUseFallbackOrigin(input: string) {
+  return input.startsWith('/api/') || input.startsWith('/library/')
+}
+
+function shouldRetryWithFallback(input: string, response: Response) {
+  if (!canUseFallbackOrigin(input)) {
+    return false
+  }
+
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
+  const looksLikeBackendResponse = contentType.includes('application/json') || contentType.includes('audio/')
+  return !looksLikeBackendResponse && [404, 405, 502, 503, 504].includes(response.status)
+}
+
 export async function apiRequest<T>(input: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, init)
+  const explicitOrigin = configuredApiOrigin()
+  const fallbackOrigin = explicitOrigin ?? fallbackApiOrigin()
+  const primaryUrl = explicitOrigin && input.startsWith('/') ? `${explicitOrigin}${input}` : input
+  let response: Response | null = null
+
+  try {
+    response = await fetch(primaryUrl, init)
+  } catch {
+    if (!explicitOrigin && fallbackOrigin && input.startsWith('/')) {
+      try {
+        response = await fetch(`${fallbackOrigin}${input}`, init)
+      } catch {
+        const hint = ` Make sure the API is running at ${fallbackOrigin}.`
+        throw new Error(`Failed to reach Storybook Reader.${hint}`)
+      }
+    } else {
+      const hint = fallbackOrigin
+        ? ` Make sure the API is running at ${fallbackOrigin}.`
+        : ' Make sure the API server is running and reachable from this browser.'
+      throw new Error(`Failed to reach Storybook Reader.${hint}`)
+    }
+  }
+
+  if (
+    response &&
+    !response.ok &&
+    !explicitOrigin &&
+    fallbackOrigin &&
+    input.startsWith('/') &&
+    shouldRetryWithFallback(input, response)
+  ) {
+    try {
+      response = await fetch(`${fallbackOrigin}${input}`, init)
+    } catch {
+      const hint = ` Make sure the API is running at ${fallbackOrigin}.`
+      throw new Error(`Failed to reach Storybook Reader.${hint}`)
+    }
+  }
+
+  if (!response) {
+    throw new Error('Failed to reach Storybook Reader.')
+  }
+
   const isJson = response.headers.get('content-type')?.includes('application/json')
   const payload = isJson ? await response.json() : null
 

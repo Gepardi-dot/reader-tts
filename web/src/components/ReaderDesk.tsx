@@ -1,18 +1,31 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { Highlight, HighlightColor } from '../types'
+import {
+  DEFAULT_READER_APPEARANCE,
+  READER_FONT_SCALE_MAX,
+  READER_FONT_SCALE_MIN,
+  type ReaderAppearance,
+} from './readerAppearance'
 import { paginateReaderText, type ReaderPage } from './readerPagination'
+
+const READER_FONT_SCALE_STEP = 0.05
 
 type ReaderDeskProps = {
   text: string
   highlights: Highlight[]
   canPlayFromSelection?: boolean
   initialFontScale?: number
+  initialAppearance?: ReaderAppearance
+  focusRequest?: number
+  focusRange?: {
+    start: number
+    end: number
+  } | null
   narrationFocusRequest?: number
   spokenRange?: {
     start: number
     end: number
   } | null
-  title: string
   initialPageNumber?: number
   onProgressChange?: (payload: {
     pageNumber: number
@@ -22,6 +35,7 @@ type ReaderDeskProps = {
     textLength: number
   }) => void
   onFontScaleChange?: (fontScale: number) => void
+  onAppearanceChange?: (appearance: ReaderAppearance) => void
   onCreateHighlight: (payload: {
     start: number
     end: number
@@ -210,10 +224,15 @@ function buildSegments(
     start: number
     end: number
   } | null,
+  focusRange?: {
+    start: number
+    end: number
+  } | null,
 ) {
   const segments: Array<{
     text: string
     color: HighlightColor | null
+    focus: boolean
     spoken: boolean
     key: string
   }> = []
@@ -222,6 +241,8 @@ function buildSegments(
     .sort((left, right) => left.start - right.start)
   const spokenStart = spokenRange ? Math.max(spokenRange.start, page.start) : null
   const spokenEnd = spokenRange ? Math.min(spokenRange.end, page.end) : null
+  const focusStart = focusRange ? Math.max(focusRange.start, page.start) : null
+  const focusEnd = focusRange ? Math.min(focusRange.end, page.end) : null
   const boundaries = new Set([page.start, page.end])
 
   for (const item of relevant) {
@@ -232,6 +253,11 @@ function buildSegments(
   if (spokenStart !== null && spokenEnd !== null && spokenEnd > spokenStart) {
     boundaries.add(spokenStart)
     boundaries.add(spokenEnd)
+  }
+
+  if (focusStart !== null && focusEnd !== null && focusEnd > focusStart) {
+    boundaries.add(focusStart)
+    boundaries.add(focusEnd)
   }
 
   const sorted = [...boundaries].sort((left, right) => left - right)
@@ -249,10 +275,16 @@ function buildSegments(
       spokenEnd !== null &&
       spokenStart < segmentEnd &&
       spokenEnd > segmentStart
+    const focus =
+      focusStart !== null &&
+      focusEnd !== null &&
+      focusStart < segmentEnd &&
+      focusEnd > segmentStart
 
     segments.push({
       text: page.text.slice(segmentStart - page.start, segmentEnd - page.start),
       color,
+      focus,
       spoken,
       key: `${page.start}-${segmentStart}-${segmentEnd}`,
     })
@@ -266,17 +298,21 @@ export function ReaderDesk({
   highlights,
   canPlayFromSelection = false,
   initialFontScale = 1,
+  initialAppearance = DEFAULT_READER_APPEARANCE,
+  focusRequest = 0,
+  focusRange = null,
   narrationFocusRequest = 0,
   spokenRange,
-  title,
   initialPageNumber = 1,
   onProgressChange,
   onFontScaleChange,
+  onAppearanceChange,
   onCreateHighlight,
   onPlayFromSelection,
 }: ReaderDeskProps) {
   const [pageNumber, setPageNumber] = useState(1)
   const [fontScale, setFontScale] = useState(initialFontScale)
+  const [appearance, setAppearance] = useState(initialAppearance)
   const [draft, setDraft] = useState<HighlightDraft | null>(null)
   const [savingColor, setSavingColor] = useState<HighlightColor | null>(null)
   const [playingSelection, setPlayingSelection] = useState(false)
@@ -290,9 +326,26 @@ export function ReaderDesk({
   const hasAutoScrolledRef = useRef(false)
   const progressChangeRef = useRef<typeof onProgressChange>(onProgressChange)
   const fontScaleChangeRef = useRef<typeof onFontScaleChange>(onFontScaleChange)
+  const appearanceChangeRef = useRef<typeof onAppearanceChange>(onAppearanceChange)
 
   const pages = useMemo(() => paginateReaderText(text), [text])
-  const lastVisiblePage = pages.length
+  const readerDeskStyle = useMemo<CSSProperties>(() => {
+    const pageWidth =
+      appearance.pageWidth === 'narrow' ? 640 : appearance.pageWidth === 'wide' ? 980 : 840
+    const lineHeight =
+      appearance.lineHeight === 'compact' ? 1.72 : appearance.lineHeight === 'airy' ? 2.06 : 1.9
+    const fontFamily =
+      appearance.fontFamily === 'sans'
+        ? "'Avenir Next', 'Segoe UI', sans-serif"
+        : "'Cormorant Garamond', Georgia, serif"
+
+    return {
+      '--reader-page-width': `${pageWidth}px`,
+      '--reader-line-height': `${lineHeight}`,
+      '--reader-font-family': fontFamily,
+      '--reader-text-align': appearance.textAlign,
+    } as CSSProperties
+  }, [appearance])
 
   useEffect(() => {
     setPageNumber(Math.min(Math.max(1, initialPageNumber), Math.max(1, pages.length)))
@@ -304,6 +357,10 @@ export function ReaderDesk({
   }, [initialFontScale])
 
   useEffect(() => {
+    setAppearance(initialAppearance)
+  }, [initialAppearance])
+
+  useEffect(() => {
     progressChangeRef.current = onProgressChange
   }, [onProgressChange])
 
@@ -312,8 +369,16 @@ export function ReaderDesk({
   }, [onFontScaleChange])
 
   useEffect(() => {
+    appearanceChangeRef.current = onAppearanceChange
+  }, [onAppearanceChange])
+
+  useEffect(() => {
     fontScaleChangeRef.current?.(fontScale)
   }, [fontScale])
+
+  useEffect(() => {
+    appearanceChangeRef.current?.(appearance)
+  }, [appearance])
 
   useEffect(() => {
     pageRefs.current = pageRefs.current.slice(0, pages.length)
@@ -443,6 +508,51 @@ export function ReaderDesk({
   }, [narrationFocusRequest, pages, spokenRange])
 
   useEffect(() => {
+    if (!focusRequest || !focusRange || !pages.length) {
+      return
+    }
+
+    const targetPageIndex = pages.findIndex((page) => focusRange.start < page.end && focusRange.end > page.start)
+    if (targetPageIndex < 0) {
+      return
+    }
+
+    let innerFrame = 0
+    const outerFrame = window.requestAnimationFrame(() => {
+      innerFrame = window.requestAnimationFrame(() => {
+        const page = pages[targetPageIndex]
+        const pageNode = pageRefs.current[targetPageIndex]
+        const contentNode = pageNode?.querySelector('.reader-sheet__content') as HTMLDivElement | null
+        if (!pageNode || !contentNode) {
+          return
+        }
+
+        const focusNode = pageNode.querySelector('.reader-highlight-focus') as HTMLElement | null
+        const start = Math.max(0, focusRange.start - page.start)
+        const end = Math.max(start + 1, Math.min(page.end, focusRange.end) - page.start)
+        const range = focusNode ? null : buildRangeFromOffsets(contentNode, start, end)
+        const targetTop =
+          (focusNode?.getBoundingClientRect().top ?? range?.getBoundingClientRect().top ?? pageNode.getBoundingClientRect().top) +
+          window.scrollY -
+          168
+
+        window.scrollTo({
+          top: Math.max(0, targetTop),
+          behavior: 'smooth',
+        })
+        hasAutoScrolledRef.current = true
+      })
+    })
+
+    return () => {
+      window.cancelAnimationFrame(outerFrame)
+      if (innerFrame) {
+        window.cancelAnimationFrame(innerFrame)
+      }
+    }
+  }, [focusRequest, focusRange, pages])
+
+  useEffect(() => {
     if (!draft) {
       return
     }
@@ -475,21 +585,6 @@ export function ReaderDesk({
     setNoteText('')
     setNoteColor('amber')
     setPlayingSelection(false)
-  }
-
-  function scrollToPage(targetPage: number) {
-    const safePage = Math.min(Math.max(1, targetPage), pages.length)
-    const node = pageRefs.current[safePage - 1]
-    if (!node) {
-      return
-    }
-
-    const top = node.getBoundingClientRect().top + window.scrollY - 112
-    window.scrollTo({
-      top: Math.max(0, top),
-      behavior: 'smooth',
-    })
-    setPageNumber(safePage)
   }
 
   function applyDraftFromRange(page: ReaderPage, container: HTMLDivElement, range: Range) {
@@ -651,58 +746,169 @@ export function ReaderDesk({
     await saveHighlight(noteColor, noteText)
   }
 
+  function updateAppearance(nextPartial: Partial<ReaderAppearance>) {
+    setAppearance((current) => {
+      const next = {
+        ...current,
+        ...nextPartial,
+      }
+
+      return Object.keys(nextPartial).every(
+        (key) => current[key as keyof ReaderAppearance] === next[key as keyof ReaderAppearance],
+      )
+        ? current
+        : next
+    })
+  }
+
+  function adjustFontScale(delta: number) {
+    setFontScale((current) => {
+      const next = Number((current + delta).toFixed(2))
+      return Math.min(READER_FONT_SCALE_MAX, Math.max(READER_FONT_SCALE_MIN, next))
+    })
+  }
+
   const visiblePages = pages
 
   return (
-    <div className="reader-desk">
+    <div className="reader-desk" style={readerDeskStyle}>
       <div className="book-stage__desk" />
-      <div className="book-stage__meta">
-        <div>
-          <strong>{title}</strong>
-          <p>Reader page {pageNumber} of {pages.length}</p>
-        </div>
 
-        <div className="reader-desk__actions">
-          <label className="reader-desk__scale">
-            <span>Type size</span>
-            <input
-              max={1.25}
-              min={0.9}
-              onChange={(event) => setFontScale(Number(event.target.value))}
-              step={0.05}
-              type="range"
-              value={fontScale}
-            />
-          </label>
-
-          <div className="book-stage__actions">
+      <div className="reader-settings" role="toolbar" aria-label="Reader appearance">
+        <div className="reader-settings__group">
+          <span className="reader-settings__label">Format</span>
+          <div className="reader-settings__segmented">
             <button
-              disabled={pageNumber <= 1}
-              onClick={() => scrollToPage(pageNumber - 1)}
+              aria-pressed={appearance.fontFamily === 'serif'}
+              className={appearance.fontFamily === 'serif' ? 'active' : ''}
+              onClick={() => updateAppearance({ fontFamily: 'serif' })}
               type="button"
             >
-              Previous
+              Serif
             </button>
             <button
-              disabled={pageNumber >= lastVisiblePage}
-              onClick={() => scrollToPage(pageNumber + 1)}
+              aria-pressed={appearance.fontFamily === 'sans'}
+              className={appearance.fontFamily === 'sans' ? 'active' : ''}
+              onClick={() => updateAppearance({ fontFamily: 'sans' })}
               type="button"
             >
-              Next
+              Sans
             </button>
           </div>
         </div>
-      </div>
 
-      <div className="reader-tip">
-        <strong>{draft ? 'Selection ready' : 'Reader mode'}</strong>
-        <p>
-          {draft
-            ? canPlayFromSelection
-              ? 'Use the floating menu to play from here, highlight, attach a note, or open a quick definition search.'
-              : 'Set up a ready voice in Audio controls to use Play here. You can still highlight, add a note, or open a quick definition search.'
-            : 'Scroll naturally through the book, then click a word or select a passage to open the playback and highlight menu.'}
-        </p>
+        <div className="reader-settings__group reader-settings__group--size">
+          <span className="reader-settings__label">Size</span>
+          <div className="reader-settings__size">
+            <button
+              aria-label="Decrease text size"
+              disabled={fontScale <= READER_FONT_SCALE_MIN}
+              onClick={() => adjustFontScale(-READER_FONT_SCALE_STEP)}
+              type="button"
+            >
+              A-
+            </button>
+            <input
+              aria-label="Text size"
+              max={READER_FONT_SCALE_MAX}
+              min={READER_FONT_SCALE_MIN}
+              onChange={(event) => setFontScale(Number(event.target.value))}
+              step={READER_FONT_SCALE_STEP}
+              type="range"
+              value={fontScale}
+            />
+            <button
+              aria-label="Increase text size"
+              disabled={fontScale >= READER_FONT_SCALE_MAX}
+              onClick={() => adjustFontScale(READER_FONT_SCALE_STEP)}
+              type="button"
+            >
+              A+
+            </button>
+          </div>
+        </div>
+
+        <div className="reader-settings__group">
+          <span className="reader-settings__label">Page</span>
+          <div className="reader-settings__segmented">
+            <button
+              aria-pressed={appearance.pageWidth === 'narrow'}
+              className={appearance.pageWidth === 'narrow' ? 'active' : ''}
+              onClick={() => updateAppearance({ pageWidth: 'narrow' })}
+              type="button"
+            >
+              Narrow
+            </button>
+            <button
+              aria-pressed={appearance.pageWidth === 'balanced'}
+              className={appearance.pageWidth === 'balanced' ? 'active' : ''}
+              onClick={() => updateAppearance({ pageWidth: 'balanced' })}
+              type="button"
+            >
+              Balanced
+            </button>
+            <button
+              aria-pressed={appearance.pageWidth === 'wide'}
+              className={appearance.pageWidth === 'wide' ? 'active' : ''}
+              onClick={() => updateAppearance({ pageWidth: 'wide' })}
+              type="button"
+            >
+              Wide
+            </button>
+          </div>
+        </div>
+
+        <div className="reader-settings__group">
+          <span className="reader-settings__label">Text</span>
+          <div className="reader-settings__segmented">
+            <button
+              aria-pressed={appearance.textAlign === 'left'}
+              className={appearance.textAlign === 'left' ? 'active' : ''}
+              onClick={() => updateAppearance({ textAlign: 'left' })}
+              type="button"
+            >
+              Left
+            </button>
+            <button
+              aria-pressed={appearance.textAlign === 'justify'}
+              className={appearance.textAlign === 'justify' ? 'active' : ''}
+              onClick={() => updateAppearance({ textAlign: 'justify' })}
+              type="button"
+            >
+              Justify
+            </button>
+          </div>
+        </div>
+
+        <div className="reader-settings__group">
+          <span className="reader-settings__label">Spacing</span>
+          <div className="reader-settings__segmented">
+            <button
+              aria-pressed={appearance.lineHeight === 'compact'}
+              className={appearance.lineHeight === 'compact' ? 'active' : ''}
+              onClick={() => updateAppearance({ lineHeight: 'compact' })}
+              type="button"
+            >
+              Tight
+            </button>
+            <button
+              aria-pressed={appearance.lineHeight === 'comfortable'}
+              className={appearance.lineHeight === 'comfortable' ? 'active' : ''}
+              onClick={() => updateAppearance({ lineHeight: 'comfortable' })}
+              type="button"
+            >
+              Comfort
+            </button>
+            <button
+              aria-pressed={appearance.lineHeight === 'airy'}
+              className={appearance.lineHeight === 'airy' ? 'active' : ''}
+              onClick={() => updateAppearance({ lineHeight: 'airy' })}
+              type="button"
+            >
+              Airy
+            </button>
+          </div>
+        </div>
       </div>
 
       {draft && menuPosition ? (
@@ -825,10 +1031,11 @@ export function ReaderDesk({
               }
               style={{ fontSize: `${fontScale}rem` }}
             >
-              {buildSegments(page, highlights, spokenRange).map((segment) => (
+              {buildSegments(page, highlights, spokenRange, focusRange).map((segment) => (
                 <span
                   className={[
                     segment.color ? colorClass(segment.color) : '',
+                    segment.focus ? 'reader-highlight-focus' : '',
                     segment.spoken ? 'narration-current' : '',
                   ]
                     .filter(Boolean)
