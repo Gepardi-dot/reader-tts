@@ -69,7 +69,7 @@ export function LibraryToolbar({
           <input
             aria-label="Search books"
             onChange={(event) => onSearchChange(event.target.value)}
-            placeholder="Search title, file name, or excerpt"
+            placeholder="Search books"
             ref={searchInputRef}
             type="search"
             value={searchQuery}

@@ -40,9 +40,11 @@ import {
   fetchBooks,
   fetchPollyHealth,
   fetchProviders,
+  HOSTED_UPLOAD_BODY_LIMIT_BYTES,
   testProvider,
   updateBookAudioProgress,
   updateBookReadingProgress,
+  usesHostedFunctionUploadLimit,
 } from './api'
 
 const BookStage = lazy(async () =>
@@ -2235,6 +2237,13 @@ export default function App() {
   async function uploadBookFile(file: File) {
     if (!(file instanceof File)) {
       setErrorMessage('Choose a PDF first.')
+      return null
+    }
+
+    if (usesHostedFunctionUploadLimit() && file.size > HOSTED_UPLOAD_BODY_LIMIT_BYTES) {
+      setErrorMessage(
+        'This PDF is larger than the current production upload limit on Vercel (4.5 MB). A direct-to-storage upload flow is needed for larger books.',
+      )
       return null
     }
 

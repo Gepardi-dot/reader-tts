@@ -1,5 +1,6 @@
 const LOCAL_HOST_PATTERN =
   /^(localhost|127\.0\.0\.1|0\.0\.0\.0|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})$/
+export const HOSTED_UPLOAD_BODY_LIMIT_BYTES = Math.floor(4.5 * 1024 * 1024)
 
 function configuredApiOrigin() {
   const configured = import.meta.env.VITE_API_ORIGIN?.trim()
@@ -25,6 +26,14 @@ function fallbackApiOrigin() {
 
 function canUseFallbackOrigin(input: string) {
   return input.startsWith('/api/') || input.startsWith('/library/')
+}
+
+export function usesHostedFunctionUploadLimit() {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  return !configuredApiOrigin() && !LOCAL_HOST_PATTERN.test(window.location.hostname)
 }
 
 function shouldRetryWithFallback(input: string, response: Response) {
@@ -85,6 +94,12 @@ export async function apiRequest<T>(input: string, init?: RequestInit): Promise<
   const payload = isJson ? await response.json() : null
 
   if (!response.ok) {
+    if (response.status === 413) {
+      throw new Error(
+        'This PDF is too large for the current production upload path. Vercel only allows 4.5 MB request bodies, so larger books need direct-to-storage uploads.',
+      )
+    }
+
     const detail =
       typeof payload?.detail === 'string'
         ? payload.detail
