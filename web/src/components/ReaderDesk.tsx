@@ -66,6 +66,27 @@ function normalizeText(value: string) {
   return value.replace(/\s+/g, ' ').trim()
 }
 
+function formatSegmentText(pageText: string, startOffset: number, endOffset: number) {
+  let formatted = ''
+
+  for (let index = startOffset; index < endOffset; index += 1) {
+    const character = pageText[index]
+
+    if (
+      character === '\n' &&
+      (pageText[index - 1] ?? '') !== '\n' &&
+      (pageText[index + 1] ?? '') !== '\n'
+    ) {
+      formatted += ' '
+      continue
+    }
+
+    formatted += character
+  }
+
+  return formatted
+}
+
 function isWordCharacter(value: string) {
   return /[0-9A-Za-z\u00C0-\u024F\u0400-\u04FF]/.test(value) || value === "'" || value === '-' || value === '\u2019'
 }
@@ -282,7 +303,7 @@ function buildSegments(
       focusEnd > segmentStart
 
     segments.push({
-      text: page.text.slice(segmentStart - page.start, segmentEnd - page.start),
+      text: formatSegmentText(page.text, segmentStart - page.start, segmentEnd - page.start),
       color,
       focus,
       spoken,
@@ -909,6 +930,8 @@ export function ReaderDesk({
             </button>
           </div>
         </div>
+
+        <div aria-hidden="true" className="reader-settings__tail" />
       </div>
 
       {draft && menuPosition ? (

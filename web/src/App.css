@@ -1353,9 +1353,9 @@
   display: flex;
   align-items: center;
   gap: 0.7rem 1rem;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   margin: 0 -0.18rem;
-  padding: 0.5rem 0.9rem 0.95rem;
+  padding: 0.5rem 1.45rem 0.95rem 0.9rem;
   border-bottom: 1px solid rgba(15, 42, 52, 0.08);
   border-radius: 22px 22px 18px 18px;
   background: linear-gradient(
@@ -1366,13 +1366,24 @@
   );
   box-shadow: inset 0 0 0 1px rgba(15, 42, 52, 0.04);
   backdrop-filter: blur(12px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  overscroll-behavior-x: contain;
+}
+
+.reader-settings::-webkit-scrollbar {
+  display: none;
 }
 
 .reader-settings__group {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
   gap: 0.55rem;
-  min-width: 0;
+  min-width: max-content;
 }
 
 .reader-settings__group--size {
@@ -1388,14 +1399,22 @@
   white-space: nowrap;
 }
 
+.reader-settings__tail {
+  flex: 0 0 1.2rem;
+  min-width: 1.2rem;
+  pointer-events: none;
+}
+
 .reader-settings__segmented {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 0.2rem;
   padding: 0.2rem;
   border-radius: 999px;
   background: rgba(15, 42, 52, 0.05);
   box-shadow: inset 0 0 0 1px rgba(15, 42, 52, 0.06);
+  white-space: nowrap;
 }
 
 .reader-settings__segmented button,
@@ -1424,8 +1443,9 @@
 .reader-settings__size {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 0.35rem;
-  min-width: 0;
+  min-width: 13rem;
   padding: 0.12rem 0.2rem;
   border-radius: 999px;
   background: rgba(15, 42, 52, 0.05);
@@ -1516,6 +1536,8 @@
   font-family: var(--reader-font-family, 'Cormorant Garamond', Georgia, serif);
   font-size: 1rem;
   text-align: var(--reader-text-align, justify);
+  text-justify: inter-word;
+  hyphens: auto;
   user-select: text;
 }
 
@@ -2848,10 +2870,11 @@
 
   .reader-settings {
     gap: 0.6rem 0.85rem;
+    padding-right: 1.6rem;
   }
 
   .reader-settings__group {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .reader-settings__group--size {
@@ -3034,17 +3057,18 @@
   }
 
   .reader-settings {
-    align-items: stretch;
+    align-items: center;
+    padding-right: 1.8rem;
   }
 
   .reader-settings__group {
-    width: 100%;
-    justify-content: space-between;
+    width: auto;
+    justify-content: flex-start;
   }
 
   .reader-settings__segmented {
-    flex-wrap: wrap;
-    justify-content: flex-end;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
   }
 
   .reader-settings__group--size {
@@ -3052,12 +3076,12 @@
   }
 
   .reader-settings__size {
-    flex: 1;
+    flex: 0 0 auto;
   }
 
   .reader-settings__size input {
-    flex: 1;
-    width: auto;
+    flex: 0 0 auto;
+    width: 7rem;
   }
 
   .highlights-shelf {
