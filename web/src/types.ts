@@ -5,6 +5,7 @@ export type VoiceOption = {
   genderSource?: 'provider' | 'estimated'
   style?: string
   tags?: string[]
+  models?: string[]
 }
 
 export type ProviderModelOption = {
@@ -15,7 +16,7 @@ export type ProviderModelOption = {
 }
 
 export type ProviderCatalog = {
-  id: 'piper' | 'google' | 'openai' | 'polly'
+  id: 'piper' | 'google' | 'openai' | 'polly' | 'qwen'
   name: string
   available: boolean
   recommended: boolean
@@ -28,7 +29,7 @@ export type ProviderCatalog = {
 }
 
 export type ProviderTestResult = {
-  provider: 'piper' | 'google' | 'openai' | 'polly'
+  provider: 'piper' | 'google' | 'openai' | 'polly' | 'qwen'
   voice: string | null
   model?: string | null
   sampleText: string
@@ -68,10 +69,26 @@ export type AudioVersion = {
   format: string
   createdAt: string
   url: string
+  timingUrl?: string | null
+}
+
+export type AudioTimingCue = {
+  start: number
+  end: number
+  timeStart: number
+  timeEnd: number
+}
+
+export type AudioTimingManifest = {
+  version: number
+  audioUrl: string
+  textLength: number
+  duration: number
+  cues: AudioTimingCue[]
 }
 
 export type LiveAudioSegment = {
-  provider: 'piper' | 'google' | 'openai' | 'polly'
+  provider: 'piper' | 'google' | 'openai' | 'polly' | 'qwen'
   voice: string | null
   model?: string | null
   format: 'mp3' | 'wav'

@@ -7,6 +7,7 @@ type ReaderDeskProps = {
   highlights: Highlight[]
   canPlayFromSelection?: boolean
   initialFontScale?: number
+  narrationFocusRequest?: number
   spokenRange?: {
     start: number
     end: number
@@ -193,6 +194,15 @@ function colorClass(color: HighlightColor) {
   return 'highlight-amber'
 }
 
+function isTextEntryTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  )
+}
+
 function buildSegments(
   page: ReaderPage,
   highlights: Highlight[],
@@ -256,6 +266,7 @@ export function ReaderDesk({
   highlights,
   canPlayFromSelection = false,
   initialFontScale = 1,
+  narrationFocusRequest = 0,
   spokenRange,
   title,
   initialPageNumber = 1,
@@ -264,7 +275,6 @@ export function ReaderDesk({
   onCreateHighlight,
   onPlayFromSelection,
 }: ReaderDeskProps) {
-  const [compact, setCompact] = useState(window.innerWidth < 920)
   const [pageNumber, setPageNumber] = useState(1)
   const [fontScale, setFontScale] = useState(initialFontScale)
   const [draft, setDraft] = useState<HighlightDraft | null>(null)
@@ -275,20 +285,14 @@ export function ReaderDesk({
   const [noteText, setNoteText] = useState('')
   const [noteColor, setNoteColor] = useState<HighlightColor>('amber')
   const menuRef = useRef<HTMLDivElement | null>(null)
+  const pageRefs = useRef<Array<HTMLDivElement | null>>([])
+  const lastReportedPageRef = useRef<number | null>(null)
+  const hasAutoScrolledRef = useRef(false)
   const progressChangeRef = useRef<typeof onProgressChange>(onProgressChange)
   const fontScaleChangeRef = useRef<typeof onFontScaleChange>(onFontScaleChange)
 
   const pages = useMemo(() => paginateReaderText(text), [text])
-  const lastVisiblePage = compact ? pages.length : Math.max(1, pages.length - 1)
-  const nextPage = Math.min(pageNumber + 1, pages.length)
-
-  useEffect(() => {
-    const media = window.matchMedia('(max-width: 920px)')
-    setCompact(media.matches)
-    const listener = (event: MediaQueryListEvent) => setCompact(event.matches)
-    media.addEventListener('change', listener)
-    return () => media.removeEventListener('change', listener)
-  }, [])
+  const lastVisiblePage = pages.length
 
   useEffect(() => {
     setPageNumber(Math.min(Math.max(1, initialPageNumber), Math.max(1, pages.length)))
@@ -312,10 +316,15 @@ export function ReaderDesk({
   }, [fontScale])
 
   useEffect(() => {
+    pageRefs.current = pageRefs.current.slice(0, pages.length)
+  }, [pages.length])
+
+  useEffect(() => {
     if (!pages.length) {
       return
     }
     const currentPage = pages[Math.max(0, Math.min(pageNumber - 1, pages.length - 1))]
+    lastReportedPageRef.current = pageNumber
     progressChangeRef.current?.({
       pageNumber,
       totalPages: pages.length,
@@ -324,6 +333,114 @@ export function ReaderDesk({
       textLength: text.length,
     })
   }, [pageNumber, pages, text.length])
+
+  useEffect(() => {
+    if (!pages.length) {
+      return
+    }
+
+    const visibilityByPage = new Map<number, number>()
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const nextPage = Number((entry.target as HTMLElement).dataset.pageNumber)
+          if (!nextPage) {
+            continue
+          }
+          visibilityByPage.set(nextPage, entry.isIntersecting ? entry.intersectionRatio : 0)
+        }
+
+        let mostVisiblePage = 0
+        let highestRatio = 0
+
+        for (const [nextPage, ratio] of visibilityByPage) {
+          if (ratio > highestRatio) {
+            highestRatio = ratio
+            mostVisiblePage = nextPage
+          }
+        }
+
+        if (mostVisiblePage > 0) {
+          setPageNumber((current) => (current === mostVisiblePage ? current : mostVisiblePage))
+        }
+      },
+      {
+        threshold: [0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9],
+        rootMargin: '-10% 0px -35% 0px',
+      },
+    )
+
+    for (const node of pageRefs.current) {
+      if (node) {
+        observer.observe(node)
+      }
+    }
+
+    return () => observer.disconnect()
+  }, [pages.length])
+
+  useEffect(() => {
+    if (!pages.length) {
+      return
+    }
+
+    const targetPage = Math.min(Math.max(1, initialPageNumber), pages.length)
+    if (targetPage === lastReportedPageRef.current) {
+      return
+    }
+
+    const node = pageRefs.current[targetPage - 1]
+    if (!node) {
+      return
+    }
+
+    const top = node.getBoundingClientRect().top + window.scrollY - 112
+    window.scrollTo({
+      top: Math.max(0, top),
+      behavior: hasAutoScrolledRef.current ? 'smooth' : 'auto',
+    })
+    setPageNumber(targetPage)
+    hasAutoScrolledRef.current = true
+  }, [initialPageNumber, pages.length, text])
+
+  useEffect(() => {
+    if (!narrationFocusRequest || !spokenRange || !pages.length) {
+      return
+    }
+
+    const targetPageIndex = pages.findIndex(
+      (page) => spokenRange.start < page.end && spokenRange.end > page.start,
+    )
+    if (targetPageIndex < 0) {
+      return
+    }
+
+    let innerFrame = 0
+    const outerFrame = window.requestAnimationFrame(() => {
+      innerFrame = window.requestAnimationFrame(() => {
+        const pageNode = pageRefs.current[targetPageIndex]
+        if (!pageNode) {
+          return
+        }
+
+        const spokenNode = pageNode.querySelector('.narration-current') as HTMLElement | null
+        const targetNode = spokenNode ?? pageNode
+        const top = targetNode.getBoundingClientRect().top + window.scrollY - 148
+        window.scrollTo({
+          top: Math.max(0, top),
+          behavior: hasAutoScrolledRef.current ? 'smooth' : 'auto',
+        })
+        hasAutoScrolledRef.current = true
+      })
+    })
+
+    return () => {
+      window.cancelAnimationFrame(outerFrame)
+      if (innerFrame) {
+        window.cancelAnimationFrame(innerFrame)
+      }
+    }
+  }, [narrationFocusRequest, pages, spokenRange])
 
   useEffect(() => {
     if (!draft) {
@@ -358,6 +475,21 @@ export function ReaderDesk({
     setNoteText('')
     setNoteColor('amber')
     setPlayingSelection(false)
+  }
+
+  function scrollToPage(targetPage: number) {
+    const safePage = Math.min(Math.max(1, targetPage), pages.length)
+    const node = pageRefs.current[safePage - 1]
+    if (!node) {
+      return
+    }
+
+    const top = node.getBoundingClientRect().top + window.scrollY - 112
+    window.scrollTo({
+      top: Math.max(0, top),
+      behavior: 'smooth',
+    })
+    setPageNumber(safePage)
   }
 
   function applyDraftFromRange(page: ReaderPage, container: HTMLDivElement, range: Range) {
@@ -519,9 +651,7 @@ export function ReaderDesk({
     await saveHighlight(noteColor, noteText)
   }
 
-  const visiblePages = compact
-    ? pages.slice(pageNumber - 1, pageNumber)
-    : pages.slice(pageNumber - 1, Math.min(pageNumber + 1, pages.length))
+  const visiblePages = pages
 
   return (
     <div className="reader-desk">
@@ -529,10 +659,7 @@ export function ReaderDesk({
       <div className="book-stage__meta">
         <div>
           <strong>{title}</strong>
-          <p>
-            Reader page {pageNumber}
-            {!compact ? `-${nextPage}` : ''} of {pages.length}
-          </p>
+          <p>Reader page {pageNumber} of {pages.length}</p>
         </div>
 
         <div className="reader-desk__actions">
@@ -551,16 +678,14 @@ export function ReaderDesk({
           <div className="book-stage__actions">
             <button
               disabled={pageNumber <= 1}
-              onClick={() => setPageNumber((current) => Math.max(1, current - (compact ? 1 : 2)))}
+              onClick={() => scrollToPage(pageNumber - 1)}
               type="button"
             >
               Previous
             </button>
             <button
               disabled={pageNumber >= lastVisiblePage}
-              onClick={() =>
-                setPageNumber((current) => Math.min(lastVisiblePage, current + (compact ? 1 : 2)))
-              }
+              onClick={() => scrollToPage(pageNumber + 1)}
               type="button"
             >
               Next
@@ -575,15 +700,19 @@ export function ReaderDesk({
           {draft
             ? canPlayFromSelection
               ? 'Use the floating menu to play from here, highlight, attach a note, or open a quick definition search.'
-              : 'Audio is not ready for this book yet. You can still highlight, add a note, or open a quick definition search.'
-            : 'Click a word or select a passage to open the playback and highlight menu.'}
+              : 'Set up a ready voice in Audio controls to use Play here. You can still highlight, add a note, or open a quick definition search.'
+            : 'Scroll naturally through the book, then click a word or select a passage to open the playback and highlight menu.'}
         </p>
       </div>
 
       {draft && menuPosition ? (
         <div
           className={`selection-menu selection-menu--${menuPosition.placement}`}
-          onMouseDown={(event) => event.preventDefault()}
+          onMouseDown={(event) => {
+            if (!isTextEntryTarget(event.target)) {
+              event.preventDefault()
+            }
+          }}
           ref={menuRef}
           style={{ left: menuPosition.left, top: menuPosition.top }}
         >
@@ -592,10 +721,10 @@ export function ReaderDesk({
             <button
               disabled={!canPlayFromSelection || playingSelection}
               onClick={() => void playFromSelection()}
-              title={canPlayFromSelection ? 'Start playback from this selection' : 'Generate audio for this book first'}
+              title={canPlayFromSelection ? 'Start playback from this selection' : 'Set up a ready voice in Audio controls first'}
               type="button"
             >
-              {canPlayFromSelection ? (playingSelection ? 'Starting...' : 'Play here') : 'Audio not ready'}
+              {canPlayFromSelection ? (playingSelection ? 'Starting...' : 'Play here') : 'Live not ready'}
             </button>
             <button onClick={() => void copySelection()} type="button">
               Copy
@@ -637,6 +766,7 @@ export function ReaderDesk({
           {noteOpen ? (
             <div className="selection-note">
               <textarea
+                autoFocus
                 maxLength={500}
                 onChange={(event) => setNoteText(event.target.value)}
                 placeholder="Add a short note for this highlight..."
@@ -678,9 +808,16 @@ export function ReaderDesk({
         </div>
       ) : null}
 
-      <div className={`page-spread ${compact ? 'compact' : ''}`}>
+      <div className="page-spread page-spread--continuous">
         {visiblePages.map((page, index) => (
-          <div className={`paper-sheet ${index === 1 ? 'right' : ''}`} key={`${page.start}-${page.end}`}>
+          <div
+            className={`paper-sheet ${index % 2 === 1 ? 'right' : ''}`}
+            data-page-number={index + 1}
+            key={`${page.start}-${page.end}`}
+            ref={(node) => {
+              pageRefs.current[index] = node
+            }}
+          >
             <div
               className="reader-sheet__content"
               onMouseUp={(event) =>

@@ -5,6 +5,7 @@ import { LibraryCover } from './components/LibraryCover'
 import { ReaderDesk } from './components/ReaderDesk'
 import { paginateReaderText } from './components/readerPagination'
 import type {
+  AudioTimingManifest,
   Book,
   BookProgress,
   Highlight,
@@ -51,6 +52,7 @@ type StoredSession = {
 type StoredUiPreferences = {
   readerForm: ReaderForm
   readerFontScales: Record<string, number>
+  audioPlaybackRate: number
 }
 
 type SentenceCue = {
@@ -65,8 +67,18 @@ type SpokenRange = {
   text: string
 }
 
+type AudioTextPosition = {
+  offset: number
+  range: SpokenRange | null
+}
+
+type WeightedSentenceCue = SentenceCue & {
+  weightStart: number
+  weightEnd: number
+}
+
 type ReaderForm = {
-  provider: 'piper' | 'google' | 'openai' | 'polly'
+  provider: 'piper' | 'google' | 'openai' | 'polly' | 'qwen'
   voice: string
   model: string
   outputFormat: 'mp3' | 'm4b' | 'wav'
@@ -84,8 +96,21 @@ type LivePlaybackRequest = {
   text: string
 }
 
+type AudioControlProviderId = Extract<ReaderForm['provider'], 'google' | 'polly' | 'qwen'>
+
+type ResolvedLiveConfig = {
+  provider: ReaderForm['provider']
+  providerName: string
+  voice?: string
+  model?: string
+  outputFormat: 'mp3' | 'wav'
+  narrationStyle: string
+  lengthScale: number
+  sentenceSilence: number
+}
+
 const initialForm: ReaderForm = {
-  provider: 'piper',
+  provider: 'polly',
   voice: '',
   model: '',
   outputFormat: 'mp3',
@@ -99,6 +124,118 @@ const SESSION_STATE_KEY = 'storybook-reader-session'
 const AUDIO_PROGRESS_KEY = 'storybook-audio-progress'
 const UI_PREFERENCES_KEY = 'storybook-ui-preferences'
 const LIVE_PREFETCH_PAGES = 2
+const AUDIO_PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2] as const
+
+function resolveProviderModel(provider: ProviderCatalog | null, requestedModel?: string | null) {
+  if (!provider?.models.length) {
+    return undefined
+  }
+
+  if (requestedModel && provider.models.some((model) => model.id === requestedModel)) {
+    return requestedModel
+  }
+
+  return provider.defaultModel ?? provider.models[0]?.id ?? undefined
+}
+
+function filterVoicesForModel(voices: VoiceOption[], modelId?: string | null) {
+  if (!modelId) {
+    return voices
+  }
+
+  return voices.filter((voice) => !voice.models?.length || voice.models.includes(modelId))
+}
+
+function resolveProviderVoice(
+  provider: ProviderCatalog | null,
+  requestedVoice?: string | null,
+  modelId?: string | null,
+) {
+  if (!provider) {
+    return undefined
+  }
+
+  const availableVoices = filterVoicesForModel(provider.voices, modelId)
+  if (!availableVoices.length) {
+    return undefined
+  }
+
+  if (requestedVoice && availableVoices.some((voice) => voice.id === requestedVoice)) {
+    return requestedVoice
+  }
+
+  if (provider.defaultVoice && availableVoices.some((voice) => voice.id === provider.defaultVoice)) {
+    return provider.defaultVoice
+  }
+
+  return availableVoices[0]?.id
+}
+
+function resolveLiveConfigForProvider(
+  provider: ProviderCatalog | null,
+  form: Pick<
+    ReaderForm,
+    'voice' | 'model' | 'outputFormat' | 'narrationStyle' | 'lengthScale' | 'sentenceSilence'
+  >,
+): ResolvedLiveConfig | null {
+  if (!provider || !provider.available || !provider.voices.length) {
+    return null
+  }
+
+  const chosenModel = resolveProviderModel(provider, form.model)
+  const chosenVoice = resolveProviderVoice(provider, form.voice, chosenModel)
+
+  if (!chosenVoice) {
+    return null
+  }
+
+  return {
+    provider: provider.id,
+    providerName: provider.name,
+    voice: chosenVoice,
+    model: chosenModel,
+    outputFormat: form.outputFormat === 'wav' ? 'wav' : 'mp3',
+    narrationStyle: form.narrationStyle,
+    lengthScale: form.lengthScale,
+    sentenceSilence: form.sentenceSilence,
+  }
+}
+
+function isLiveProviderTemporaryError(error: unknown) {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  return (
+    message.includes('quota') ||
+    message.includes('rate limit') ||
+    message.includes('rate-limit') ||
+    message.includes('too many requests') ||
+    message.includes('retry in') ||
+    message.includes('status 429')
+  )
+}
+
+function liveProviderFallbackMessage(error: unknown, providerName: string, fallbackProviderName: string) {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  if (message.includes('quota')) {
+    return `${providerName} hit its current API quota. Retrying with ${fallbackProviderName}...`
+  }
+  return `${providerName} is temporarily unavailable. Retrying with ${fallbackProviderName}...`
+}
+
+function liveProviderFallbackStatus(error: unknown, providerName: string, fallbackProviderName: string) {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  if (message.includes('quota')) {
+    return `${providerName} hit its current API quota or rate limit. Retrying with ${fallbackProviderName}.`
+  }
+  return `${providerName} hit a temporary quota or rate limit. Retrying with ${fallbackProviderName}.`
+}
+
+function isAudioControlProviderId(value: unknown): value is AudioControlProviderId {
+  return value === 'google' || value === 'polly' || value === 'qwen'
+}
+
+function filterAudioControlProviders(items: ProviderCatalog[]) {
+  return items.filter((provider) => isAudioControlProviderId(provider.id))
+}
 
 function formatDate(iso: string) {
   return new Intl.DateTimeFormat(undefined, {
@@ -197,7 +334,7 @@ function readStoredAudioProgress(): Record<string, StoredAudioProgress> {
 }
 
 function isStoredProvider(value: unknown): value is ReaderForm['provider'] {
-  return value === 'piper' || value === 'google' || value === 'openai' || value === 'polly'
+  return isAudioControlProviderId(value)
 }
 
 function isStoredOutputFormat(value: unknown): value is ReaderForm['outputFormat'] {
@@ -214,6 +351,7 @@ function readStoredUiPreferences(): StoredUiPreferences {
   const fallback: StoredUiPreferences = {
     readerForm: initialForm,
     readerFontScales: {},
+    audioPlaybackRate: 1,
   }
 
   if (typeof window === 'undefined') {
@@ -255,6 +393,7 @@ function readStoredUiPreferences(): StoredUiPreferences {
         sentenceSilence: clampPreference(readerForm.sentenceSilence, 0, 1, initialForm.sentenceSilence),
       },
       readerFontScales,
+      audioPlaybackRate: clampPreference(parsed.audioPlaybackRate, 0.75, 2, fallback.audioPlaybackRate),
     }
   } catch {
     return fallback
@@ -438,6 +577,128 @@ function findSentenceCueAtOffset(cues: SentenceCue[], offset: number) {
   return cues[Math.max(0, Math.min(low, cues.length - 1))]
 }
 
+function estimateSentenceTimingWeight(text: string) {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return 1
+  }
+
+  const tokenCount = normalized.split(/\s+/).length
+  const commaCount = (normalized.match(/,/g) ?? []).length
+  const pauseMarkCount = (normalized.match(/[;:]/g) ?? []).length
+  return Math.max(1, tokenCount + commaCount * 0.35 + pauseMarkCount * 0.5 + 0.25)
+}
+
+function buildWeightedSentenceCues(cues: SentenceCue[]) {
+  if (!cues.length) {
+    return [] as WeightedSentenceCue[]
+  }
+
+  const weights = cues.map((cue) => estimateSentenceTimingWeight(cue.text))
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0) || cues.length
+  let weightCursor = 0
+
+  return cues.map((cue, index) => {
+    const weightStart = weightCursor / totalWeight
+    weightCursor += weights[index]
+    const weightEnd = weightCursor / totalWeight
+    return {
+      ...cue,
+      weightStart,
+      weightEnd,
+    }
+  })
+}
+
+function findWeightedSentenceCueAtFraction(cues: WeightedSentenceCue[], fraction: number) {
+  let low = 0
+  let high = cues.length - 1
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2)
+    const cue = cues[middle]
+
+    if (fraction < cue.weightStart) {
+      high = middle - 1
+      continue
+    }
+
+    if (fraction >= cue.weightEnd) {
+      low = middle + 1
+      continue
+    }
+
+    return cue
+  }
+
+  if (!cues.length) {
+    return null
+  }
+
+  return cues[Math.max(0, Math.min(low, cues.length - 1))]
+}
+
+function findTimingCueAtTime(manifest: AudioTimingManifest, time: number) {
+  const cues = manifest.cues
+  let low = 0
+  let high = cues.length - 1
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2)
+    const cue = cues[middle]
+
+    if (time < cue.timeStart) {
+      high = middle - 1
+      continue
+    }
+
+    if (time >= cue.timeEnd) {
+      low = middle + 1
+      continue
+    }
+
+    return cue
+  }
+
+  if (!cues.length) {
+    return null
+  }
+
+  return cues[Math.max(0, Math.min(low, cues.length - 1))]
+}
+
+function clampUnitInterval(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.max(0, Math.min(1, value))
+}
+
+function interpolateTextOffset(start: number, end: number, fraction: number) {
+  if (end <= start) {
+    return start
+  }
+
+  return Math.max(
+    start,
+    Math.min(Math.max(start, end - 1), start + Math.floor((end - start) * clampUnitInterval(fraction))),
+  )
+}
+
+function createSpokenRange(text: string, start: number, end: number): SpokenRange | null {
+  const safeStart = Math.max(0, Math.min(text.length, start))
+  const safeEnd = Math.max(safeStart, Math.min(text.length, end))
+  if (safeEnd <= safeStart) {
+    return null
+  }
+
+  return {
+    start: safeStart,
+    end: safeEnd,
+    text: text.slice(safeStart, safeEnd),
+  }
+}
+
 function formatPlaybackTime(seconds: number) {
   const totalSeconds = Math.max(0, Math.floor(seconds))
   const hours = Math.floor(totalSeconds / 3600)
@@ -494,6 +755,7 @@ export default function App() {
   const [readerFontScales, setReaderFontScales] = useState<Record<string, number>>(
     () => readStoredUiPreferences().readerFontScales,
   )
+  const [audioPlaybackRate, setAudioPlaybackRate] = useState<number>(() => readStoredUiPreferences().audioPlaybackRate)
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -513,12 +775,16 @@ export default function App() {
   const [deletingBookId, setDeletingBookId] = useState<string | null>(null)
   const [cancellingJob, setCancellingJob] = useState(false)
   const [audioDockOpen, setAudioDockOpen] = useState(false)
+  const [audioPlaying, setAudioPlaying] = useState(false)
   const [audioJumpMessage, setAudioJumpMessage] = useState('')
   const [pendingAudioSeek, setPendingAudioSeek] = useState<number | null>(null)
   const [pendingAudioPlay, setPendingAudioPlay] = useState(false)
   const [spokenRange, setSpokenRange] = useState<SpokenRange | null>(null)
+  const [readerNarrationFocusToken, setReaderNarrationFocusToken] = useState(0)
+  const [audioTimingManifest, setAudioTimingManifest] = useState<AudioTimingManifest | null>(null)
   const [liveAudioMode, setLiveAudioMode] = useState<LivePlaybackMode>(null)
   const [liveAudioLoading, setLiveAudioLoading] = useState(false)
+  const [liveAudioError, setLiveAudioError] = useState('')
   const [liveAudioCurrent, setLiveAudioCurrent] = useState<LiveAudioSegment | null>(null)
   const [liveAudioQueue, setLiveAudioQueue] = useState<LiveAudioSegment[]>([])
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null)
@@ -533,24 +799,56 @@ export default function App() {
   const livePrefetchingRef = useRef(false)
   const liveAudioCurrentRef = useRef<LiveAudioSegment | null>(null)
   const liveAudioQueueRef = useRef<LiveAudioSegment[]>([])
-  const liveRequestConfigRef = useRef<{
-    provider: ReaderForm['provider']
-    voice?: string
-    model?: string
-    narrationStyle: string
-    lengthScale: number
-    sentenceSilence: number
-  } | null>(null)
+  const liveRequestConfigRef = useRef<ResolvedLiveConfig | null>(null)
 
   const selectedBookId = route.kind === 'book' ? route.bookId : ''
   const selectedBook = route.kind === 'book' ? books.find((book) => book.id === route.bookId) ?? null : null
+  const selectedProvider = providers.find((provider) => provider.id === form.provider) ?? null
   const currentProvider =
     providers.find((provider) => provider.id === form.provider) ?? providers[0] ?? null
+  const resolvedLiveConfig = useMemo(
+    () => resolveLiveConfigForProvider(selectedProvider, form),
+    [form, selectedProvider],
+  )
+  const fallbackLiveConfig = useMemo(() => {
+    for (const provider of providers) {
+      if (provider.id === selectedProvider?.id) {
+        continue
+      }
+      const resolved = resolveLiveConfigForProvider(provider, form)
+      if (resolved) {
+        return resolved
+      }
+    }
+    return null
+  }, [form, providers, selectedProvider?.id])
+  const liveReadUnavailableMessage = useMemo(() => {
+    if (!selectedProvider) {
+      return 'Select a live voice provider in Audio controls before using Play here.'
+    }
+    if (!selectedProvider.available) {
+      return `${selectedProvider.name} is not ready in Audio controls yet.`
+    }
+    if (!selectedProvider.voices.length) {
+      return `No voices are available for ${selectedProvider.name} yet.`
+    }
+    return 'Live audio settings are not ready yet.'
+  }, [selectedProvider])
   const sentenceCues = useMemo(() => buildSentenceCues(readerPayload?.text ?? ''), [readerPayload?.text])
+  const weightedSentenceCues = useMemo(() => buildWeightedSentenceCues(sentenceCues), [sentenceCues])
   const readerPages = useMemo(() => paginateReaderText(readerPayload?.text ?? ''), [readerPayload?.text])
   const currentAudioSrc =
     liveAudioMode !== null ? liveAudioCurrent?.url : selectedBook?.latestAudio?.url
   const selectedReaderFontScale = selectedBookId ? readerFontScales[selectedBookId] ?? 1 : 1
+
+  useEffect(() => {
+    const audio = audioPlayerRef.current
+    if (!audio) {
+      return
+    }
+    audio.defaultPlaybackRate = audioPlaybackRate
+    audio.playbackRate = audioPlaybackRate
+  }, [audioPlaybackRate, currentAudioSrc])
 
   useEffect(() => {
     liveAudioCurrentRef.current = liveAudioCurrent
@@ -559,6 +857,20 @@ export default function App() {
   useEffect(() => {
     liveAudioQueueRef.current = liveAudioQueue
   }, [liveAudioQueue])
+
+  useEffect(() => {
+    if (liveAudioMode === null || !pendingAudioPlay || !currentAudioSrc) {
+      return
+    }
+
+    const audio = audioPlayerRef.current
+    if (!audio) {
+      return
+    }
+
+    audio.pause()
+    audio.load()
+  }, [currentAudioSrc, liveAudioMode, pendingAudioPlay])
 
   function cancelLivePlayback() {
     audioPlayerRef.current?.pause()
@@ -570,8 +882,10 @@ export default function App() {
     liveAudioQueueRef.current = []
     setLiveAudioMode(null)
     setLiveAudioLoading(false)
+    setLiveAudioError('')
     setLiveAudioCurrent(null)
     setLiveAudioQueue([])
+    setAudioPlaying(false)
     setPendingAudioPlay(false)
     setPendingAudioSeek(null)
   }
@@ -645,12 +959,12 @@ export default function App() {
     })
   }
 
-  async function requestLiveAudio(request: LivePlaybackRequest) {
+  async function requestLiveAudio(request: LivePlaybackRequest, configOverride?: ResolvedLiveConfig | null) {
     if (!selectedBookId) {
       throw new Error('Open a book first.')
     }
 
-    const config = liveRequestConfigRef.current
+    const config = configOverride ?? liveRequestConfigRef.current
     if (!config) {
       throw new Error('Live audio settings are unavailable.')
     }
@@ -659,7 +973,7 @@ export default function App() {
       provider: config.provider,
       voice: config.voice,
       model: config.model,
-      output_format: 'mp3',
+      output_format: config.outputFormat,
       narration_style: config.narrationStyle,
       length_scale: config.lengthScale,
       sentence_silence: config.sentenceSilence,
@@ -735,34 +1049,28 @@ export default function App() {
       return
     }
 
-    if (!currentProvider?.available || !voiceOptions.length) {
-      setErrorMessage('Choose a ready voice provider in Audio controls before starting Live read.')
+    if (!resolvedLiveConfig) {
+      setErrorMessage(liveReadUnavailableMessage)
       return
     }
 
     cancelLivePlayback()
     const sessionId = liveSessionIdRef.current
     liveNextPageIndexRef.current = options.nextPageIndex
-    liveRequestConfigRef.current = {
-      provider: form.provider,
-      voice: form.voice || undefined,
-      model: form.model || undefined,
-      narrationStyle: form.narrationStyle,
-      lengthScale: form.lengthScale,
-      sentenceSilence: form.sentenceSilence,
-    }
+    liveRequestConfigRef.current = resolvedLiveConfig
 
     restoreAudioProgressRef.current = null
     setLiveAudioMode(options.mode)
     setLiveAudioLoading(true)
+    setLiveAudioError('')
     setNarrationOpen(false)
     setAudioDockOpen(true)
-    setAudioJumpMessage(`Generating live audio for ${options.label}...`)
-    setStatusMessage(`Generating live audio for ${options.label}...`)
+    setAudioJumpMessage(`Generating live audio for ${options.label} with ${resolvedLiveConfig.providerName}...`)
+    setStatusMessage(`Generating live audio for ${options.label} with ${resolvedLiveConfig.providerName}.`)
     setErrorMessage('')
 
     try {
-      const segment = await requestLiveAudio(request)
+      const segment = await requestLiveAudio(request, resolvedLiveConfig)
       if (sessionId !== liveSessionIdRef.current) {
         return
       }
@@ -776,11 +1084,45 @@ export default function App() {
         return
       }
 
-      setLiveAudioMode(null)
+      let finalError: unknown = error
+      if (fallbackLiveConfig && isLiveProviderTemporaryError(error)) {
+        liveRequestConfigRef.current = fallbackLiveConfig
+        setAudioJumpMessage(liveProviderFallbackMessage(error, resolvedLiveConfig.providerName, fallbackLiveConfig.providerName))
+        setStatusMessage(liveProviderFallbackStatus(error, resolvedLiveConfig.providerName, fallbackLiveConfig.providerName))
+
+        try {
+          const fallbackSegment = await requestLiveAudio(request, fallbackLiveConfig)
+          if (sessionId !== liveSessionIdRef.current) {
+            return
+          }
+
+          activateLiveSegment(
+            fallbackSegment,
+            `Reading ${options.label} with ${fallbackLiveConfig.providerName}.`,
+          )
+          setStatusMessage(
+            `${resolvedLiveConfig.providerName} was unavailable, so playback continued with ${fallbackLiveConfig.providerName}.`,
+          )
+          if (options.nextPageIndex < readerPages.length) {
+            void prefetchLiveSegments(sessionId)
+          }
+          return
+        } catch (fallbackError) {
+          if (sessionId !== liveSessionIdRef.current) {
+            return
+          }
+          finalError = fallbackError
+        }
+      }
+
+      const message = finalError instanceof Error ? finalError.message : 'Live audio could not be generated.'
       setLiveAudioLoading(false)
+      setLiveAudioError(message)
       setLiveAudioCurrent(null)
       setLiveAudioQueue([])
-      setErrorMessage(error instanceof Error ? error.message : 'Live audio could not be generated.')
+      setAudioDockOpen(true)
+      setAudioJumpMessage('Live read could not start.')
+      setErrorMessage(message)
     }
   }
 
@@ -1001,8 +1343,9 @@ export default function App() {
     writeStoredValue(UI_PREFERENCES_KEY, {
       readerForm: form,
       readerFontScales,
+      audioPlaybackRate,
     } satisfies StoredUiPreferences)
-  }, [form, readerFontScales])
+  }, [audioPlaybackRate, form, readerFontScales])
 
   useEffect(() => {
     if (!selectedBookId) {
@@ -1033,14 +1376,8 @@ export default function App() {
       return
     }
 
-    const nextVoice =
-      form.voice && currentProvider.voices.some((voice) => voice.id === form.voice)
-        ? form.voice
-        : currentProvider.defaultVoice ?? ''
-    const nextModel =
-      form.model && currentProvider.models.some((model) => model.id === form.model)
-        ? form.model
-        : currentProvider.defaultModel ?? ''
+    const nextModel = resolveProviderModel(currentProvider, form.model) ?? ''
+    const nextVoice = resolveProviderVoice(currentProvider, form.voice, nextModel) ?? ''
 
     if (nextVoice !== form.voice || nextModel !== form.model) {
       setForm((previous) => ({
@@ -1071,6 +1408,35 @@ export default function App() {
 
     void loadReaderPayload(selectedBookId)
   }, [selectedBookId])
+
+  useEffect(() => {
+    const timingUrl = selectedBook?.latestAudio?.timingUrl
+    const audioUrl = selectedBook?.latestAudio?.url
+    if (!timingUrl || !audioUrl) {
+      setAudioTimingManifest(null)
+      return
+    }
+
+    let cancelled = false
+    void apiRequest<AudioTimingManifest>(timingUrl)
+      .then((manifest) => {
+        if (cancelled) {
+          return
+        }
+        setAudioTimingManifest(manifest.audioUrl === audioUrl ? manifest : null)
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return
+        }
+        console.error('Failed to load audio timing manifest.', error)
+        setAudioTimingManifest(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedBook?.latestAudio?.timingUrl, selectedBook?.latestAudio?.url])
 
   useEffect(() => {
     const handlePageHide = () => pageHidePersistRef.current()
@@ -1151,7 +1517,7 @@ export default function App() {
     setStatusMessage('Returned to the library because the last open book is no longer available.')
   }, [books, loading, route])
 
-  async function bootstrap() {
+  const bootstrap = useEffectEvent(async () => {
     try {
       setLoading(true)
       const [providerResponse, bookResponse] = await Promise.all([
@@ -1159,11 +1525,12 @@ export default function App() {
         fetchBooks(),
       ])
 
-      setProviders(providerResponse.providers)
+      const nextProviders = filterAudioControlProviders(providerResponse.providers)
+      setProviders(nextProviders)
       setBooks(bookResponse.items)
       const resolvedProvider =
-        providerResponse.providers.find((provider) => provider.id === form.provider) ??
-        providerResponse.providers[0] ??
+        nextProviders.find((provider) => provider.id === form.provider) ??
+        nextProviders[0] ??
         null
       setForm((previous) => ({
         ...previous,
@@ -1175,7 +1542,7 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }
+  })
 
   function navigateToLibrary() {
     persistCurrentAudioProgress(true)
@@ -1242,41 +1609,6 @@ export default function App() {
     )
   }
 
-  function currentReadingFraction() {
-    if (!currentProgress) {
-      return 0
-    }
-
-    if (
-      typeof currentProgress.textStart === 'number' &&
-      typeof currentProgress.textLength === 'number' &&
-      currentProgress.textLength > 0
-    ) {
-      return Math.max(0, Math.min(1, currentProgress.textStart / currentProgress.textLength))
-    }
-
-    if (currentProgress.totalPages <= 0) {
-      return 0
-    }
-
-    return Math.max(0, Math.min(1, (currentProgress.pageNumber - 1) / currentProgress.totalPages))
-  }
-
-  function currentReadingLabel() {
-    return currentProgress
-      ? `page ${currentProgress.pageNumber} of ${currentProgress.totalPages}`
-      : 'the beginning of the book'
-  }
-
-  function readingFractionFromOffset(textOffset: number) {
-    const textLength = readerPayload?.text.length ?? currentProgress?.textLength ?? 0
-    if (textLength <= 0) {
-      return currentReadingFraction()
-    }
-
-    return Math.max(0, Math.min(1, textOffset / textLength))
-  }
-
   function applyAudioSeek(audio: HTMLAudioElement, fraction: number) {
     if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
       return false
@@ -1287,25 +1619,84 @@ export default function App() {
     return true
   }
 
-  function syncAudioToDisplayedPage(audio: HTMLAudioElement | null) {
-    if (!audio || !currentProgress || !Number.isFinite(audio.duration) || audio.duration <= 0) {
+  const resolveAudioTextPosition = (audio: HTMLAudioElement | null): AudioTextPosition | null => {
+    const text = readerPayload?.text ?? ''
+    const textLength = text.length
+    if (!audio || textLength <= 0 || !Number.isFinite(audio.duration) || audio.duration <= 0) {
+      return null
+    }
+
+    const playbackFraction = clampUnitInterval(audio.currentTime / audio.duration)
+    const liveSegment = liveAudioCurrentRef.current
+
+    if (liveSegment) {
+      const offset = interpolateTextOffset(liveSegment.start, liveSegment.end, playbackFraction)
+      const cue = sentenceCues.length ? findSentenceCueAtOffset(sentenceCues, offset) : null
+      return {
+        offset,
+        range: cue ?? createSpokenRange(text, liveSegment.start, liveSegment.end),
+      }
+    }
+
+    if (audioTimingManifest?.cues.length) {
+      const timingCue = findTimingCueAtTime(audioTimingManifest, audio.currentTime)
+      if (timingCue) {
+        const cueDuration = Math.max(0, timingCue.timeEnd - timingCue.timeStart)
+        const cueFraction =
+          cueDuration > 0 ? clampUnitInterval((audio.currentTime - timingCue.timeStart) / cueDuration) : 0
+        const offset = interpolateTextOffset(timingCue.start, timingCue.end, cueFraction)
+        return {
+          offset,
+          range: createSpokenRange(text, timingCue.start, timingCue.end),
+        }
+      }
+    }
+
+    if (weightedSentenceCues.length) {
+      const cue = findWeightedSentenceCueAtFraction(weightedSentenceCues, playbackFraction)
+      if (cue) {
+        const cueFractionSpan = cue.weightEnd - cue.weightStart
+        const cueFraction =
+          cueFractionSpan > 0 ? clampUnitInterval((playbackFraction - cue.weightStart) / cueFractionSpan) : 0
+        return {
+          offset: interpolateTextOffset(cue.start, cue.end, cueFraction),
+          range: cue,
+        }
+      }
+    }
+
+    const estimatedOffset = Math.min(
+      Math.max(0, textLength - 1),
+      Math.max(0, Math.floor(textLength * playbackFraction)),
+    )
+    const cue = findSentenceCueAtOffset(sentenceCues, estimatedOffset)
+    return {
+      offset: estimatedOffset,
+      range: cue,
+    }
+  }
+
+  function syncReaderToAudioPosition(audio: HTMLAudioElement | null) {
+    if (!audio || !readerPages.length) {
       return false
     }
 
-    const targetFraction = currentReadingFraction()
-    const targetTime = Math.max(0, audio.duration * targetFraction)
-    if (Math.abs(audio.currentTime - targetTime) < 1.5) {
+    const position = resolveAudioTextPosition(audio)
+    if (!position) {
       return false
     }
 
-    if (!applyAudioSeek(audio, targetFraction)) {
+    const pageIndex = findReaderPageIndexForOffset(position.offset)
+    if (pageIndex < 0) {
       return false
     }
 
-    const pageLabel = currentReadingLabel()
-    setAudioDockOpen(true)
-    setAudioJumpMessage(`Starting from ${pageLabel}.`)
-    setStatusMessage(`Starting playback from ${pageLabel}.`)
+    const pageNumber = pageIndex + 1
+    if (currentProgress?.pageNumber === pageNumber) {
+      return false
+    }
+
+    syncReaderToPage(pageNumber)
     return true
   }
 
@@ -1416,72 +1807,25 @@ export default function App() {
     return savedProgress.wasPlaying
   }
 
-  async function startPlaybackAtFraction(fraction: number, label: string, missingAudioMessage: string) {
-    if (!selectedBook?.latestAudio) {
-      setErrorMessage(missingAudioMessage)
-      setStatusMessage('Use Audio controls if you want to generate narration for this book.')
-      return
-    }
-
-    cancelLivePlayback()
-    setNarrationOpen(false)
-    setAudioDockOpen(true)
-    setAudioJumpMessage(`Starting from ${label}.`)
-    setStatusMessage(`Starting playback from ${label}.`)
-    setErrorMessage('')
-
-    const audio = audioPlayerRef.current
-    if (!audio) {
-      setPendingAudioSeek(fraction)
-      setPendingAudioPlay(true)
-      return
-    }
-
-    if (!applyAudioSeek(audio, fraction)) {
-      setPendingAudioSeek(fraction)
-      setPendingAudioPlay(true)
-      if (audio.readyState === 0) {
-        audio.load()
-      }
-      return
-    }
-
-    setPendingAudioSeek(null)
-    setPendingAudioPlay(false)
-
-    try {
-      skipDisplayedPageSyncOnNextPlayRef.current = true
-      await audio.play()
-    } catch {
-      setErrorMessage('Playback could not start automatically. Use the player controls to continue.')
-    }
-  }
-
   async function handlePlayFromSelection(payload: { start: number; end: number; text: string }) {
-    if (!selectedBook?.latestAudio) {
-      const selectionRequest = liveRequestFromSelection(payload.start)
-      if (!selectionRequest) {
-        setErrorMessage('The selected text could not be mapped to a readable live segment.')
-        return
-      }
-
-      await startLivePlayback(
-        selectionRequest.request,
-        {
-          mode: 'selection',
-          label: summarizeSelection(payload.text),
-          nextPageIndex: selectionRequest.pageIndex + 1,
-        },
-      )
+    const selectionRequest = liveRequestFromSelection(payload.start)
+    if (!selectionRequest) {
+      setErrorMessage('This selection does not map to readable page text yet.')
       return
     }
 
-    const fraction = readingFractionFromOffset(payload.start)
-    const label = summarizeSelection(payload.text)
-    await startPlaybackAtFraction(
-      fraction,
-      label,
-      'Generate an audiobook first, then you can start playback from the selected text.',
+    if (!resolvedLiveConfig) {
+      setErrorMessage(liveReadUnavailableMessage)
+      return
+    }
+
+    await startLivePlayback(
+      selectionRequest.request,
+      {
+        mode: 'selection',
+        label: summarizeSelection(payload.text),
+        nextPageIndex: selectionRequest.pageIndex + 1,
+      },
     )
   }
 
@@ -1555,64 +1899,50 @@ export default function App() {
   }
 
   function syncSpokenRangeFromAudio() {
-    const audio = audioPlayerRef.current
-    const textLength = readerPayload?.text.length ?? 0
-    const liveSegment = liveAudioCurrentRef.current
-
-    if (!audio || !sentenceCues.length || textLength <= 0 || !Number.isFinite(audio.duration) || audio.duration <= 0) {
+    const position = resolveAudioTextPosition(audioPlayerRef.current)
+    if (!position?.range) {
       setSpokenRange(null)
       return
     }
 
-    const fraction = Math.max(0, Math.min(1, audio.currentTime / audio.duration))
-    const estimatedOffset = liveSegment
-      ? Math.max(
-          liveSegment.start,
-          Math.min(
-            Math.max(liveSegment.start, liveSegment.end - 1),
-            liveSegment.start + Math.floor((liveSegment.end - liveSegment.start) * fraction),
-          ),
-        )
-      : Math.min(
-          Math.max(0, textLength - 1),
-          Math.max(0, Math.floor(textLength * fraction)),
-        )
-    const cue = findSentenceCueAtOffset(sentenceCues, estimatedOffset)
-
-    if (!cue) {
-      setSpokenRange(null)
-      return
-    }
+    const range = position.range
 
     setSpokenRange((current) =>
-      current && current.start === cue.start && current.end === cue.end && current.text === cue.text
+      current &&
+      current.start === range.start &&
+      current.end === range.end &&
+      current.text === range.text
         ? current
-        : cue,
+        : range,
     )
   }
 
   function handleAudioPlay() {
     setNarrationOpen(false)
     setAudioDockOpen(true)
+    setAudioPlaying(true)
     syncSpokenRangeFromAudio()
+    setReaderNarrationFocusToken((current) => current + 1)
 
     if (liveAudioMode !== null) {
       if (skipDisplayedPageSyncOnNextPlayRef.current) {
         skipDisplayedPageSyncOnNextPlayRef.current = false
       }
+      syncReaderToAudioPosition(audioPlayerRef.current)
       return
     }
 
     if (skipDisplayedPageSyncOnNextPlayRef.current) {
       skipDisplayedPageSyncOnNextPlayRef.current = false
-    } else {
-      syncAudioToDisplayedPage(audioPlayerRef.current)
     }
+
+    syncReaderToAudioPosition(audioPlayerRef.current)
 
     persistCurrentAudioProgress(true)
   }
 
   function handleAudioPause() {
+    setAudioPlaying(false)
     syncSpokenRangeFromAudio()
     if (liveAudioMode !== null) {
       return
@@ -1625,6 +1955,7 @@ export default function App() {
     if (liveAudioMode !== null) {
       return
     }
+    syncReaderToAudioPosition(audioPlayerRef.current)
     persistCurrentAudioProgress()
   }
 
@@ -1633,10 +1964,12 @@ export default function App() {
     if (liveAudioMode !== null) {
       return
     }
+    syncReaderToAudioPosition(audioPlayerRef.current)
     persistCurrentAudioProgress(true)
   }
 
   function handleAudioEnded() {
+    setAudioPlaying(false)
     if (liveAudioMode !== null) {
       setSpokenRange(null)
 
@@ -1743,6 +2076,8 @@ export default function App() {
     }
 
     try {
+      const chosenModel = resolveProviderModel(currentProvider, form.model)
+      const chosenVoice = resolveProviderVoice(currentProvider, form.voice, chosenModel)
       setSubmitting(true)
       setErrorMessage('')
       setStatusMessage('Starting narration job.')
@@ -1753,8 +2088,8 @@ export default function App() {
         },
         body: JSON.stringify({
           provider: form.provider,
-          voice: form.voice || undefined,
-          model: form.model || undefined,
+          voice: chosenVoice,
+          model: chosenModel,
           output_format: form.outputFormat,
           narration_style: form.narrationStyle,
           length_scale: form.lengthScale,
@@ -1775,7 +2110,8 @@ export default function App() {
       return
     }
 
-    const chosenVoice = voiceId || form.voice || undefined
+    const chosenModel = resolveProviderModel(currentProvider, form.model)
+    const chosenVoice = resolveProviderVoice(currentProvider, voiceId || form.voice, chosenModel)
 
     try {
       setTestingProvider(true)
@@ -1788,7 +2124,7 @@ export default function App() {
       const payload = await testProvider({
         provider: form.provider,
         voice: chosenVoice,
-        model: form.model || undefined,
+        model: chosenModel,
         narration_style: form.narrationStyle,
         length_scale: form.lengthScale,
         sentence_silence: form.sentenceSilence,
@@ -1949,28 +2285,35 @@ export default function App() {
     }
   }
 
-  function setProvider(provider: 'piper' | 'google' | 'openai' | 'polly') {
+  function setProvider(provider: 'piper' | 'google' | 'openai' | 'polly' | 'qwen') {
     const match = providers.find((item) => item.id === provider)
+    const nextModel = resolveProviderModel(match ?? null, match?.defaultModel)
+    const nextVoice = resolveProviderVoice(match ?? null, match?.defaultVoice, nextModel)
     setForm((previous) => ({
       ...previous,
       provider,
-      voice: match?.defaultVoice ?? '',
-      model: match?.defaultModel ?? '',
+      voice: nextVoice ?? '',
+      model: nextModel ?? '',
     }))
   }
 
-  const voiceOptions: VoiceOption[] = currentProvider?.voices ?? []
   const modelOptions = currentProvider?.models ?? []
-  const selectedModel = modelOptions.find((model) => model.id === form.model) ?? null
+  const selectedModelId = resolveProviderModel(currentProvider, form.model) ?? null
+  const selectedModel = modelOptions.find((model) => model.id === selectedModelId) ?? null
+  const voiceOptions: VoiceOption[] =
+    currentProvider ? filterVoicesForModel(currentProvider.voices, selectedModelId) : []
   const currentProgress = selectedBook ? readingProgress[selectedBook.id] : null
-  const liveReadAvailable =
-    Boolean(selectedBook) && Boolean(currentProvider?.available) && voiceOptions.length > 0 && readerPages.length > 0
-  const canPlayFromReaderSelection = Boolean(selectedBook?.latestAudio) || liveReadAvailable
+  const liveReadAvailable = Boolean(selectedBook) && Boolean(resolvedLiveConfig) && readerPages.length > 0
+  const canPlayFromReaderSelection = liveReadAvailable
   const showAudioDock =
-    audioDockOpen && (Boolean(currentAudioSrc) || liveAudioLoading || (liveAudioMode !== null && !selectedBook?.latestAudio))
+    (audioDockOpen || audioPlaying) &&
+    (Boolean(currentAudioSrc) ||
+      liveAudioLoading ||
+      Boolean(liveAudioError) ||
+      (liveAudioMode !== null && !selectedBook?.latestAudio))
   const audioBarTitle =
     liveAudioMode !== null
-      ? `${liveAudioCurrent?.provider ?? form.provider} • live`
+      ? `${liveAudioCurrent?.provider ?? liveRequestConfigRef.current?.provider ?? form.provider} • live`
       : selectedBook?.latestAudio
         ? `${selectedBook.latestAudio.provider} • ${selectedBook.latestAudio.format}`
         : 'Narration'
@@ -1999,10 +2342,11 @@ export default function App() {
       ?.book ?? books[0] ?? null
   const narrationPanel = (
     <aside className="panel status-panel narration-panel">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">Narration</p>
+      <div className="panel-heading narration-panel__heading">
+        <div className="narration-panel__intro">
+          <p className="eyebrow">Audio</p>
           <h2>Audio controls</h2>
+          {currentProvider ? <p className="narration-panel__summary">{currentProvider.description}</p> : null}
         </div>
         <div className="narration-panel__header-actions">
           {currentProvider ? (
@@ -2029,17 +2373,19 @@ export default function App() {
             onClick={() => setProvider(provider.id)}
             type="button"
           >
-            <strong>{provider.name}</strong>
-            <small>{provider.description}</small>
+            <strong>{provider.id === 'google' ? 'Gemini' : provider.id === 'polly' ? 'Polly' : 'Qwen'}</strong>
+            <span>
+              {provider.available ? 'Ready' : provider.id === 'polly' ? 'Setup AWS' : 'Needs key'}
+            </span>
           </button>
         ))}
       </div>
 
       {form.provider === 'polly' && pollyHealth ? (
-        <div className="health-card">
+        <div className="health-card health-card--compact">
           <div className="health-card__header">
             <div>
-              <p className="eyebrow">AWS Status</p>
+              <p className="eyebrow">AWS</p>
               <strong>{pollyHealth.connected ? 'Polly connected' : 'Polly not ready'}</strong>
             </div>
             <button
@@ -2048,7 +2394,7 @@ export default function App() {
               onClick={() => void loadPollyHealth()}
               type="button"
             >
-              {pollyHealthLoading ? 'Refreshing...' : 'Refresh AWS status'}
+              {pollyHealthLoading ? 'Refreshing...' : 'Refresh'}
             </button>
           </div>
           <p className="sample-text">{pollyHealth.message}</p>
@@ -2088,13 +2434,17 @@ export default function App() {
 
       <div className="voice-picker">
         <div className="voice-picker__header">
-          <span>Voice</span>
-          {form.voice ? (
-            <small>
-              Selected:{' '}
-              {voiceOptions.find((voice) => voice.id === form.voice)?.label ?? form.voice}
-            </small>
-          ) : null}
+          <div className="voice-picker__title">
+            <div className="voice-picker__title-row">
+              <span>Voice</span>
+              <small className="voice-picker__selection">
+                {form.voice
+                  ? voiceOptions.find((voice) => voice.id === form.voice)?.label ?? form.voice
+                  : 'Select a voice'}
+              </small>
+            </div>
+            {currentProvider?.voiceMetaNote ? <p className="voice-picker__note">{currentProvider.voiceMetaNote}</p> : null}
+          </div>
         </div>
         <div className="voice-list">
           {voiceOptions.map((voice) => {
@@ -2129,7 +2479,7 @@ export default function App() {
                   title={`Play a sample for ${voice.label}`}
                   type="button"
                 >
-                  {isPreviewing ? 'Playing...' : 'Play sample'}
+                  {isPreviewing ? 'Playing' : 'Sample'}
                 </button>
               </div>
             )
@@ -2141,12 +2491,11 @@ export default function App() {
             </div>
           ) : null}
         </div>
-        {currentProvider?.voiceMetaNote ? <small className="voice-picker__note">{currentProvider.voiceMetaNote}</small> : null}
       </div>
 
-      <div className="controls-grid">
+      <div className="controls-grid controls-grid--compact">
         {modelOptions.length ? (
-          <label>
+          <label className="control-field">
             <span>Model</span>
             <select
               onChange={(event) =>
@@ -2172,7 +2521,7 @@ export default function App() {
           </label>
         ) : null}
 
-        <label>
+        <label className="control-field">
           <span>Output</span>
           <select
             onChange={(event) =>
@@ -2188,9 +2537,14 @@ export default function App() {
             <option value="wav">WAV</option>
           </select>
         </label>
+      </div>
 
-        <label>
-          <span>Speech speed</span>
+      <div className="tuning-grid">
+        <label className="control-field range-field">
+          <div className="range-field__header">
+            <span>Speech speed</span>
+            <strong>{form.lengthScale.toFixed(2)}x</strong>
+          </div>
           <input
             max={1.5}
             min={0.6}
@@ -2204,11 +2558,14 @@ export default function App() {
             type="range"
             value={form.lengthScale}
           />
-          <small>{form.lengthScale.toFixed(2)}x length scale</small>
+          <small>Longer phrasing and slower delivery.</small>
         </label>
 
-        <label>
-          <span>Sentence pause</span>
+        <label className="control-field range-field">
+          <div className="range-field__header">
+            <span>Sentence pause</span>
+            <strong>{form.sentenceSilence.toFixed(2)}s</strong>
+          </div>
           <input
             max={1}
             min={0}
@@ -2222,11 +2579,11 @@ export default function App() {
             type="range"
             value={form.sentenceSilence}
           />
-          <small>{form.sentenceSilence.toFixed(2)} seconds</small>
+          <small>Extra breathing room between sentences.</small>
         </label>
       </div>
 
-      <label className="style-field">
+      <label className="style-field control-field">
         <span>Narration style</span>
         <textarea
           onChange={(event) =>
@@ -2235,12 +2592,11 @@ export default function App() {
               narrationStyle: event.target.value,
             }))
           }
-          rows={4}
+          rows={3}
           value={form.narrationStyle}
         />
         <small>
-          Google and OpenAI use this directly. Piper and Polly ignore narration prompting and
-          read the cleaned text with provider-native controls.
+          Gemini and Qwen follow this directly. Polly keeps a simpler provider-native read.
         </small>
       </label>
 
@@ -2251,7 +2607,7 @@ export default function App() {
           onClick={() => void handleProviderTest()}
           type="button"
         >
-          {testingProvider ? 'Testing voice...' : 'Test current voice'}
+          {testingProvider ? 'Testing...' : 'Test voice'}
         </button>
 
         <button
@@ -2260,11 +2616,11 @@ export default function App() {
           onClick={() => void handleStartLiveReadCurrentPage()}
           type="button"
         >
-          {liveAudioLoading && liveAudioMode === 'page' ? 'Starting live...' : 'Live read current page'}
+          {liveAudioLoading && liveAudioMode === 'page' ? 'Starting...' : 'Live page'}
         </button>
 
         <button
-          className="primary-button"
+          className="primary-button action-row__primary"
           disabled={
             !selectedBook ||
             submitting ||
@@ -2276,7 +2632,7 @@ export default function App() {
           onClick={() => void handleGenerate()}
           type="button"
         >
-          {submitting ? 'Starting...' : 'Generate audiobook'}
+          {submitting ? 'Starting...' : 'Generate book'}
         </button>
       </div>
 
@@ -2510,18 +2866,37 @@ export default function App() {
               </div>
               <div className="reader-audio-bar__controls">
                 {currentAudioSrc ? (
-                  <audio
-                    controls
-                    onEnded={handleAudioEnded}
-                    onLoadedMetadata={() => void handleAudioMetadataReady()}
-                    onPause={handleAudioPause}
-                    onPlay={handleAudioPlay}
-                    onSeeked={handleAudioSeeked}
-                    onTimeUpdate={handleAudioTimeUpdate}
-                    preload="metadata"
-                    ref={audioPlayerRef}
-                    src={currentAudioSrc}
-                  />
+                  <>
+                    <audio
+                      controls
+                      key={currentAudioSrc}
+                      onEnded={handleAudioEnded}
+                      onLoadedMetadata={() => void handleAudioMetadataReady()}
+                      onPause={handleAudioPause}
+                      onPlay={handleAudioPlay}
+                      onSeeked={handleAudioSeeked}
+                      onTimeUpdate={handleAudioTimeUpdate}
+                      preload="metadata"
+                      ref={audioPlayerRef}
+                      src={currentAudioSrc}
+                    />
+                    <label className="reader-audio-bar__speed">
+                      <span>Speed</span>
+                      <select
+                        aria-label="Playback speed"
+                        onChange={(event) => setAudioPlaybackRate(Number(event.target.value))}
+                        value={audioPlaybackRate}
+                      >
+                        {AUDIO_PLAYBACK_RATES.map((rate) => (
+                          <option key={rate} value={rate}>
+                            {rate}x
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </>
+                ) : liveAudioError ? (
+                  <div className="reader-audio-bar__loading reader-audio-bar__loading--error">{liveAudioError}</div>
                 ) : (
                   <div className="reader-audio-bar__loading">Preparing audio...</div>
                 )}
@@ -2577,6 +2952,7 @@ export default function App() {
                     highlights={readerPayload.highlights}
                     initialFontScale={selectedReaderFontScale}
                     initialPageNumber={currentProgress?.pageNumber ?? 1}
+                    narrationFocusRequest={readerNarrationFocusToken}
                     onCreateHighlight={handleCreateHighlight}
                     onFontScaleChange={(fontScale) => updateReaderFontScale(readerPayload.book.id, fontScale)}
                     onPlayFromSelection={handlePlayFromSelection}
