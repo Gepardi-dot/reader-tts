@@ -4,6 +4,7 @@ dashscope>=1.24.6
 ebooklib
 fastapi
 httpx
+imageio-ffmpeg
 lxml
 python-dotenv
 python-multipart

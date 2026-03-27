@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import wave
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -36,33 +37,55 @@ SUPPORTED_EXTENSIONS = {".pdf", ".epub", ".txt"}
 
 
 def find_binary(explicit: str | None, env_name: str, fallback: Path, glob_pattern: Path | None = None) -> Path:
-    if explicit:
-        candidate = Path(explicit).expanduser()
+    def resolve_candidate(raw_value: str) -> Path | None:
+        candidate = Path(raw_value).expanduser()
         if candidate.exists():
             return candidate
-        raise FileNotFoundError(f"{env_name} path does not exist: {candidate}")
+
+        located = shutil.which(raw_value)
+        if located:
+            return Path(located)
+
+        return None
+
+    if explicit:
+        candidate = resolve_candidate(explicit)
+        if candidate is not None:
+            return candidate
+        raise FileNotFoundError(f"{env_name} path does not exist: {explicit}")
 
     env_value = os.environ.get(env_name)
     if env_value:
-        candidate = Path(env_value).expanduser()
-        if candidate.exists():
+        candidate = resolve_candidate(env_value)
+        if candidate is not None:
             return candidate
-        raise FileNotFoundError(f"{env_name} path does not exist: {candidate}")
 
     if fallback.exists():
         return fallback
 
-    which_name = fallback.name
-    located = shutil.which(which_name)
-    if located:
-        return Path(located)
+    which_names = [fallback.name]
+    if fallback.suffix.lower() == ".exe":
+        which_names.append(fallback.stem)
+
+    for which_name in which_names:
+        located = shutil.which(which_name)
+        if located:
+            return Path(located)
 
     if glob_pattern is not None:
         matches = sorted(Path(match) for match in glob.glob(str(glob_pattern)))
         if matches:
             return matches[-1]
 
-    raise FileNotFoundError(f"Unable to locate {which_name}.")
+    if fallback.stem == "ffmpeg":
+        try:
+            import imageio_ffmpeg
+
+            return Path(imageio_ffmpeg.get_ffmpeg_exe())
+        except Exception:
+            pass
+
+    raise FileNotFoundError(f"Unable to locate {which_names[0]}.")
 
 
 def collect_inputs(input_paths: list[str]) -> list[Path]:
@@ -330,6 +353,26 @@ def concat_with_ffmpeg(
         run_subprocess(command)
     finally:
         list_path.unlink(missing_ok=True)
+
+
+def concat_wav_files(wav_paths: list[Path], *, output_path: Path) -> None:
+    if not wav_paths:
+        raise ValueError("No WAV chunks were provided.")
+
+    with wave.open(str(wav_paths[0]), "rb") as first:
+        params = first.getparams()
+        chunks = [first.readframes(first.getnframes())]
+
+    for wav_path in wav_paths[1:]:
+        with wave.open(str(wav_path), "rb") as handle:
+            if handle.getparams()[:4] != params[:4]:
+                raise ValueError("WAV chunks do not share the same audio format.")
+            chunks.append(handle.readframes(handle.getnframes()))
+
+    with wave.open(str(output_path), "wb") as output:
+        output.setparams(params)
+        for chunk in chunks:
+            output.writeframes(chunk)
 
 
 def convert_file(

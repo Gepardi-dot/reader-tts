@@ -2249,7 +2249,12 @@ def synthesize_piper(
         raise RuntimeError(f"Piper voice config not found: {config_path}")
 
     piper_exe = pdf_to_audio.find_binary(None, "PIPER_EXE", pdf_to_audio.DEFAULT_PIPER_EXE)
-    ffmpeg_exe = pdf_to_audio.find_binary(None, "FFMPEG_EXE", Path("ffmpeg.exe"), pdf_to_audio.DEFAULT_FFMPEG_GLOB)
+    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
     espeak_data = Path(env_value("PIPER_ESPEAK_DATA") or str(pdf_to_audio.DEFAULT_ESPEAK_DATA)).expanduser().resolve()
 
     with tempfile.TemporaryDirectory(prefix="storybook_piper_", dir=str(output_path.parent)) as temp_dir:
@@ -2292,7 +2297,10 @@ def synthesize_piper(
             )
 
         raise_if_job_cancelled(job_id)
-        pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
+        if output_format == "wav":
+            pdf_to_audio.concat_wav_files(wav_paths, output_path=output_path)
+        else:
+            pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
 
 
 def synthesize_openai(
@@ -2310,7 +2318,12 @@ def synthesize_openai(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
 
-    ffmpeg_exe = pdf_to_audio.find_binary(None, "FFMPEG_EXE", Path("ffmpeg.exe"), pdf_to_audio.DEFAULT_FFMPEG_GLOB)
+    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
     chosen_model = resolve_openai_tts_model(model)
     chosen_voice = voice or "coral"
 
@@ -2349,7 +2362,10 @@ def synthesize_openai(
                 )
 
         raise_if_job_cancelled(job_id)
-        pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
+        if output_format == "wav":
+            pdf_to_audio.concat_wav_files(wav_paths, output_path=output_path)
+        else:
+            pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
 
 
 def synthesize_google(
@@ -2369,7 +2385,12 @@ def synthesize_google(
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
-    ffmpeg_exe = pdf_to_audio.find_binary(None, "FFMPEG_EXE", Path("ffmpeg.exe"), pdf_to_audio.DEFAULT_FFMPEG_GLOB)
+    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
     chosen_model = resolve_google_tts_model(model)
     chosen_voice = voice or "Kore"
 
@@ -2405,7 +2426,10 @@ def synthesize_google(
                 )
 
         raise_if_job_cancelled(job_id)
-        pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
+        if output_format == "wav":
+            pdf_to_audio.concat_wav_files(wav_paths, output_path=output_path)
+        else:
+            pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
 
 
 def synthesize_qwen(
@@ -2426,7 +2450,12 @@ def synthesize_qwen(
         raise RuntimeError("DASHSCOPE_API_KEY is not configured.")
 
     dashscope = load_dashscope()
-    ffmpeg_exe = pdf_to_audio.find_binary(None, "FFMPEG_EXE", Path("ffmpeg.exe"), pdf_to_audio.DEFAULT_FFMPEG_GLOB)
+    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
     chosen_model = resolve_qwen_tts_model(model)
     chosen_voice = resolve_qwen_tts_voice(voice, chosen_model)
     use_instructions = "instruct" in chosen_model
@@ -2484,7 +2513,10 @@ def synthesize_qwen(
                 )
 
         raise_if_job_cancelled(job_id)
-        pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
+        if output_format == "wav":
+            pdf_to_audio.concat_wav_files(wav_paths, output_path=output_path)
+        else:
+            pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
 
 
 def synthesize_polly(
@@ -2499,7 +2531,12 @@ def synthesize_polly(
     job_id: str | None,
 ) -> None:
     client = create_polly_client()
-    ffmpeg_exe = pdf_to_audio.find_binary(None, "FFMPEG_EXE", Path("ffmpeg.exe"), pdf_to_audio.DEFAULT_FFMPEG_GLOB)
+    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
     chosen_voice = voice or POLLY_VOICE_ID
 
     with tempfile.TemporaryDirectory(prefix="storybook_polly_", dir=str(output_path.parent)) as temp_dir:
@@ -2539,7 +2576,10 @@ def synthesize_polly(
             )
 
         raise_if_job_cancelled(job_id)
-        pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
+        if output_format == "wav":
+            pdf_to_audio.concat_wav_files(wav_paths, output_path=output_path)
+        else:
+            pdf_to_audio.concat_with_ffmpeg(wav_paths, ffmpeg_exe=ffmpeg_exe, output_path=output_path, codec=output_format)
 
 
 def synthesize_provider_audio(
@@ -2663,12 +2703,14 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
     elif request.provider == "openai":
         chosen_model = resolve_openai_tts_model(request.model)
 
+    playback_format = "wav"
+
     cache_key = {
         "bookId": book_id,
         "provider": request.provider,
         "voice": chosen_voice,
         "model": chosen_model or request.model,
-        "outputFormat": request.output_format,
+        "outputFormat": playback_format,
         "narrationStyle": request.narration_style,
         "lengthScale": request.length_scale,
         "sentenceSilence": request.sentence_silence,
@@ -2678,7 +2720,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
     digest = hashlib.sha1(json.dumps(cache_key, sort_keys=True).encode("utf-8")).hexdigest()[:20]
     output_dir = book_live_audio_dir(book_id)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{request.provider}-{digest}.{request.output_format}"
+    output_path = output_dir / f"{request.provider}-{digest}.{playback_format}"
     cached = output_path.exists() and output_path.stat().st_size > 0
 
     resolved_model = chosen_model or ""
@@ -2692,7 +2734,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
             voice=chosen_voice,
             model=request.model,
             narration_style=request.narration_style,
-            output_format=request.output_format,
+            output_format=playback_format,
             length_scale=request.length_scale,
             sentence_silence=request.sentence_silence,
             job_id=None,
@@ -2702,7 +2744,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         "provider": request.provider,
         "voice": chosen_voice,
         "model": resolved_model or None,
-        "format": request.output_format,
+        "format": playback_format,
         "url": relative_url(output_path),
         "start": request.start,
         "end": request.end,
@@ -2874,7 +2916,7 @@ def run_provider_test(request: ProviderTestRequest) -> dict[str, Any]:
             detail=f"{provider['name']} is not configured yet.",
         )
 
-    preview_path = PREVIEW_ROOT / f"provider-test-{request.provider}-{uuid.uuid4().hex[:10]}.mp3"
+    preview_path = PREVIEW_ROOT / f"provider-test-{request.provider}-{uuid.uuid4().hex[:10]}.wav"
     chosen_model: str | None = None
     chosen_voice = request.voice or provider.get("defaultVoice")
     if request.provider == "google":
@@ -2897,7 +2939,7 @@ def run_provider_test(request: ProviderTestRequest) -> dict[str, Any]:
             voice=chosen_voice,
             model=request.model,
             narration_style=request.narration_style,
-            output_format="mp3",
+            output_format="wav",
             length_scale=request.length_scale,
             sentence_silence=request.sentence_silence,
             job_id=None,
