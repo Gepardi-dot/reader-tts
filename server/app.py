@@ -2104,7 +2104,7 @@ def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dic
             raise HTTPException(status_code=500, detail=f"Failed to import the uploaded PDF: {exc}") from exc
 
 
-def source_file_response(book_id: str) -> FileResponse | StreamingResponse:
+def source_file_response(book_id: str):
     meta = load_book_or_404(book_id)
     source_storage = meta.get("sourceStorage")
     if source_storage:
@@ -3025,8 +3025,8 @@ def finalize_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dic
     return complete_direct_book_upload(request)
 
 
-@app.get("/api/books/{book_id}/source")
-def book_source(book_id: str) -> FileResponse | StreamingResponse:
+@app.get("/api/books/{book_id}/source", response_model=None)
+def book_source(book_id: str):
     return source_file_response(book_id)
 
 
