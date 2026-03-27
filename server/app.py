@@ -831,6 +831,14 @@ def book_highlights_storage_key(book_id: str) -> str:
     return f"{book_storage_base_prefix(book_id)}/highlights.json"
 
 
+def book_live_audio_storage_key(book_id: str, file_name: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/live-audio/{file_name}"
+
+
+def preview_audio_storage_key(file_name: str) -> str:
+    return storage_key("previews", file_name)
+
+
 def read_storage_bytes(key: str) -> bytes | None:
     if not BOOK_STORAGE_BUCKET:
         raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
@@ -1075,6 +1083,21 @@ def create_polly_client():
 
 def create_book_storage_client():
     return create_aws_client("s3", region_name=BOOK_STORAGE_REGION)
+
+
+def generate_book_storage_download_url(key: str, *, expires_in: int = 3600) -> str:
+    if not BOOK_STORAGE_BUCKET:
+        raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
+
+    client = create_book_storage_client()
+    try:
+        return client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": BOOK_STORAGE_BUCKET, "Key": key},
+            ExpiresIn=expires_in,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to prepare a download URL for {key}: {exc}") from exc
 
 
 def regional_book_storage_upload_url() -> str:
@@ -1938,6 +1961,15 @@ def pcm_to_wav(pcm_bytes: bytes, wav_path: Path, *, channels: int = 1, rate: int
         wav_file.writeframes(pcm_bytes)
 
 
+def restore_file_from_storage(key: str, destination: Path) -> bool:
+    payload = read_storage_bytes(key)
+    if payload is None:
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+    return True
+
+
 def cleanup_preview_files(limit: int = 20) -> None:
     previews = sorted(PREVIEW_ROOT.glob("provider-test-*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
     for stale_file in previews[limit:]:
@@ -2721,7 +2753,10 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
     output_dir = book_live_audio_dir(book_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{request.provider}-{digest}.{playback_format}"
+    storage_key = book_live_audio_storage_key(book_id, output_path.name) if book_storage_enabled() else None
     cached = output_path.exists() and output_path.stat().st_size > 0
+    if not cached and storage_key:
+        cached = restore_file_from_storage(storage_key, output_path)
 
     resolved_model = chosen_model or ""
     if not cached:
@@ -2739,13 +2774,15 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
             sentence_silence=request.sentence_silence,
             job_id=None,
         )
+    if storage_key and output_path.exists():
+        write_storage_bytes(storage_key, output_path.read_bytes(), content_type="audio/wav")
 
     return {
         "provider": request.provider,
         "voice": chosen_voice,
         "model": resolved_model or None,
         "format": playback_format,
-        "url": relative_url(output_path),
+        "url": generate_book_storage_download_url(storage_key) if storage_key else relative_url(output_path),
         "start": request.start,
         "end": request.end,
         "pageNumber": request.pageNumber,
@@ -2959,12 +2996,15 @@ def run_provider_test(request: ProviderTestRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     cleanup_preview_files()
+    preview_storage_key = preview_audio_storage_key(preview_path.name) if book_storage_enabled() else None
+    if preview_storage_key:
+        write_storage_bytes(preview_storage_key, preview_path.read_bytes(), content_type="audio/wav")
     return {
         "provider": request.provider,
         "voice": chosen_voice,
         "model": resolved_model,
         "sampleText": PROVIDER_TEST_SNIPPET,
-        "audioUrl": relative_url(preview_path),
+        "audioUrl": generate_book_storage_download_url(preview_storage_key) if preview_storage_key else relative_url(preview_path),
         "message": f"{provider['name']} generated a short sample successfully.",
     }
 
