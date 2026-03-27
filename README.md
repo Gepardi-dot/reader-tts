@@ -150,6 +150,34 @@ cd C:\Users\miroa\storybook-reader
 
 When `web/dist` exists, the FastAPI server will serve the built frontend too.
 
+## Hosted uploads on Vercel
+
+The Vercel-hosted site cannot safely store uploaded books on the function filesystem, and large PDFs exceed the request-body limit for hosted functions. For production uploads, configure durable S3 storage and let the browser upload PDFs there directly.
+
+Required environment variables:
+
+```text
+BOOK_STORAGE_BUCKET=your-s3-bucket
+BOOK_STORAGE_PREFIX=storybook-reader
+BOOK_STORAGE_REGION=us-east-1
+```
+
+The same AWS credential chain used for Polly can be reused here, but it also needs S3 permissions for the configured bucket.
+
+Minimum S3 bucket CORS for direct browser uploads:
+
+```json
+[
+  {
+    "AllowedHeaders": ["*"],
+    "AllowedMethods": ["POST"],
+    "AllowedOrigins": ["https://your-app.vercel.app"]
+  }
+]
+```
+
+On hosted deployments, the web app will automatically switch to the direct-to-storage upload flow.
+
 ## CLI converter
 
 ```powershell

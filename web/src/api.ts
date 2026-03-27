@@ -123,6 +123,59 @@ export function fetchBooks() {
   return apiRequest<{ items: import('./types').Book[] }>('/api/books')
 }
 
+export async function uploadBookDirectToStorage(file: File) {
+  const init = await apiRequest<{
+    bookId: string
+    upload: {
+      url: string
+      fields: Record<string, string>
+    }
+  }>('/api/books/direct-upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      fileName: file.name,
+      contentType: file.type || 'application/pdf',
+      size: file.size,
+    }),
+  })
+
+  const payload = new FormData()
+  for (const [key, value] of Object.entries(init.upload.fields)) {
+    payload.append(key, value)
+  }
+  payload.append('file', file)
+
+  let uploadResponse: Response
+  try {
+    uploadResponse = await fetch(init.upload.url, {
+      method: 'POST',
+      body: payload,
+    })
+  } catch {
+    throw new Error(
+      'Direct storage upload failed before the file reached the API. Check the storage bucket CORS settings and the network connection.',
+    )
+  }
+
+  if (!uploadResponse.ok) {
+    throw new Error(`Direct storage upload failed with status ${uploadResponse.status}.`)
+  }
+
+  return apiRequest<import('./types').Book>('/api/books/direct-upload/complete', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      bookId: init.bookId,
+      fileName: file.name,
+    }),
+  })
+}
+
 export function deleteBook(bookId: string) {
   return apiRequest<{ ok: boolean }>(`/api/books/${bookId}`, {
     method: 'DELETE',

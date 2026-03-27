@@ -22,7 +22,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -68,6 +68,9 @@ for env_name in (
     "DATABASE_URL",
     "SUPABASE_URL",
     "SUPABASE_ANON_KEY",
+    "BOOK_STORAGE_BUCKET",
+    "BOOK_STORAGE_PREFIX",
+    "BOOK_STORAGE_REGION",
 ):
     if env_name in os.environ and env_value(env_name) is None:
         os.environ.pop(env_name, None)
@@ -108,6 +111,10 @@ POLLY_PCM_SAMPLE_RATE = "16000"
 POLLY_CACHE_TTL_SECONDS = 300
 GEMINI_MAX_RETRY_ATTEMPTS = 3
 GEMINI_MAX_RETRY_DELAY_SECONDS = 75.0
+BOOK_STORAGE_BUCKET = env_value("BOOK_STORAGE_BUCKET")
+BOOK_STORAGE_PREFIX = (env_value("BOOK_STORAGE_PREFIX") or "storybook-reader").strip("/")
+BOOK_STORAGE_REGION = env_value("BOOK_STORAGE_REGION") or env_value("AWS_REGION") or env_value("AWS_DEFAULT_REGION")
+BOOK_STORAGE_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 
 
 def voice_option(
@@ -423,6 +430,17 @@ class AudioProgressRequest(BaseModel):
     currentTime: float = Field(ge=0)
     wasPlaying: bool
     updatedAt: str | None = None
+
+
+class DirectBookUploadInitRequest(BaseModel):
+    fileName: str = Field(min_length=1, max_length=260)
+    contentType: str = Field(default="application/pdf", max_length=200)
+    size: int = Field(gt=0, le=BOOK_STORAGE_MAX_UPLOAD_BYTES)
+
+
+class DirectBookUploadCompleteRequest(BaseModel):
+    bookId: str = Field(min_length=12, max_length=12)
+    fileName: str = Field(min_length=1, max_length=260)
 
 
 def utc_now() -> str:
@@ -782,6 +800,188 @@ def job_path(job_id: str) -> Path:
     return JOBS_ROOT / f"{job_id}.json"
 
 
+def book_storage_enabled() -> bool:
+    return BOOK_STORAGE_BUCKET is not None
+
+
+def storage_key(*parts: str) -> str:
+    cleaned = [part.strip("/") for part in parts if part and part.strip("/")]
+    if BOOK_STORAGE_PREFIX:
+        cleaned.insert(0, BOOK_STORAGE_PREFIX)
+    return "/".join(cleaned)
+
+
+def book_storage_base_prefix(book_id: str) -> str:
+    return storage_key("books", book_id)
+
+
+def book_source_storage_key(book_id: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/source.pdf"
+
+
+def book_meta_storage_key(book_id: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/meta.json"
+
+
+def book_text_storage_key(book_id: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/cleaned.txt"
+
+
+def book_highlights_storage_key(book_id: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/highlights.json"
+
+
+def read_storage_bytes(key: str) -> bytes | None:
+    if not BOOK_STORAGE_BUCKET:
+        raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
+
+    client = create_book_storage_client()
+    _, _, _, ClientError, _, _, _ = load_boto3()
+
+    try:
+        response = client.get_object(Bucket=BOOK_STORAGE_BUCKET, Key=key)
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return None
+        raise RuntimeError(f"Failed to read book storage object {key}: {exc}") from exc
+
+    return response["Body"].read()
+
+
+def write_storage_bytes(key: str, payload: bytes, *, content_type: str) -> None:
+    if not BOOK_STORAGE_BUCKET:
+        raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
+
+    client = create_book_storage_client()
+    try:
+        client.put_object(
+            Bucket=BOOK_STORAGE_BUCKET,
+            Key=key,
+            Body=payload,
+            ContentType=content_type,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write book storage object {key}: {exc}") from exc
+
+
+def read_storage_json(key: str) -> dict[str, Any] | None:
+    payload = read_storage_bytes(key)
+    if payload is None:
+        return None
+    return json.loads(payload.decode("utf-8"))
+
+
+def write_storage_json(key: str, payload: dict[str, Any]) -> None:
+    write_storage_bytes(key, json.dumps(payload, indent=2).encode("utf-8"), content_type="application/json")
+
+
+def list_storage_meta_payloads() -> list[dict[str, Any]]:
+    if not BOOK_STORAGE_BUCKET:
+        return []
+
+    client = create_book_storage_client()
+    prefix = f"{storage_key('books')}/"
+    paginator = client.get_paginator("list_objects_v2")
+    results: list[dict[str, Any]] = []
+
+    try:
+        for page in paginator.paginate(Bucket=BOOK_STORAGE_BUCKET, Prefix=prefix):
+            for item in page.get("Contents", []):
+                key = str(item.get("Key", ""))
+                if not key.endswith("/meta.json"):
+                    continue
+                payload = read_storage_json(key)
+                if payload is not None:
+                    results.append(payload)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to list stored books: {exc}") from exc
+
+    return results
+
+
+def delete_storage_prefix(prefix: str) -> None:
+    if not BOOK_STORAGE_BUCKET:
+        return
+
+    client = create_book_storage_client()
+    paginator = client.get_paginator("list_objects_v2")
+    keys: list[dict[str, str]] = []
+
+    for page in paginator.paginate(Bucket=BOOK_STORAGE_BUCKET, Prefix=prefix.rstrip("/") + "/"):
+        for item in page.get("Contents", []):
+            key = item.get("Key")
+            if key:
+                keys.append({"Key": str(key)})
+
+    if not keys:
+        return
+
+    for start in range(0, len(keys), 1000):
+        batch = keys[start : start + 1000]
+        client.delete_objects(Bucket=BOOK_STORAGE_BUCKET, Delete={"Objects": batch, "Quiet": True})
+
+
+def download_storage_object(key: str, destination: Path) -> None:
+    payload = read_storage_bytes(key)
+    if payload is None:
+        raise FileNotFoundError(key)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+
+
+def read_book_meta(book_id: str) -> dict[str, Any] | None:
+    if book_storage_enabled():
+        return read_storage_json(book_meta_storage_key(book_id))
+
+    path = book_meta_path(book_id)
+    if not path.exists():
+        return None
+    return read_json(path)
+
+
+def write_book_meta(book_id: str, payload: dict[str, Any]) -> None:
+    if book_storage_enabled():
+        write_storage_json(book_meta_storage_key(book_id), payload)
+        return
+
+    write_json(book_meta_path(book_id), payload)
+
+
+def read_book_text(book_id: str) -> str:
+    if book_storage_enabled():
+        payload = read_storage_bytes(book_text_storage_key(book_id))
+        if payload is None:
+            raise FileNotFoundError(book_id)
+        return payload.decode("utf-8")
+
+    return book_text_path(book_id).read_text(encoding="utf-8")
+
+
+def write_book_text(book_id: str, text: str) -> None:
+    if book_storage_enabled():
+        write_storage_bytes(book_text_storage_key(book_id), text.encode("utf-8"), content_type="text/plain; charset=utf-8")
+        return
+
+    book_text_path(book_id).write_text(text, encoding="utf-8")
+
+
+def source_url_for_book(meta: dict[str, Any]) -> str:
+    if meta.get("sourceStorage"):
+        return f"/api/books/{meta['id']}/source"
+    return relative_url(Path(meta["sourcePath"]))
+
+
+def list_book_meta_payloads() -> list[dict[str, Any]]:
+    if book_storage_enabled():
+        return list_storage_meta_payloads()
+
+    results: list[dict[str, Any]] = []
+    for meta_file in BOOKS_ROOT.glob("*/meta.json"):
+        results.append(read_json(meta_file))
+    return results
+
+
 def get_voice_models() -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     for voice_path in sorted(VOICES_ROOT.glob("*.onnx")):
@@ -829,12 +1029,12 @@ def load_dashscope():
     return dashscope
 
 
-def create_polly_session():
+def create_aws_session(*, region_name: str | None = None):
     boto3, _, _, _, _, _, ProfileNotFound = load_boto3()
 
     session_kwargs: dict[str, Any] = {}
-    if POLLY_REGION:
-        session_kwargs["region_name"] = POLLY_REGION
+    if region_name:
+        session_kwargs["region_name"] = region_name
     aws_profile = env_value("AWS_PROFILE")
     if aws_profile:
         session_kwargs["profile_name"] = aws_profile
@@ -854,8 +1054,12 @@ def create_polly_session():
     return session
 
 
-def create_aws_client(service_name: str):
-    session = create_polly_session()
+def create_polly_session():
+    return create_aws_session(region_name=POLLY_REGION)
+
+
+def create_aws_client(service_name: str, *, region_name: str | None = None):
+    session = create_aws_session(region_name=region_name)
     _, Config, _, _, _, _, _ = load_boto3()
     client_config = Config(
         connect_timeout=3,
@@ -866,7 +1070,11 @@ def create_aws_client(service_name: str):
 
 
 def create_polly_client():
-    return create_aws_client("polly")
+    return create_aws_client("polly", region_name=POLLY_REGION)
+
+
+def create_book_storage_client():
+    return create_aws_client("s3", region_name=BOOK_STORAGE_REGION)
 
 
 def gender_label(value: str | None) -> str:
@@ -1032,10 +1240,13 @@ def provider_details(provider_id: str) -> dict[str, Any]:
 
 
 def read_highlights(book_id: str) -> list[dict[str, Any]]:
-    path = book_highlights_path(book_id)
-    if not path.exists():
-        return []
-    payload = read_json(path)
+    if book_storage_enabled():
+        payload = read_storage_json(book_highlights_storage_key(book_id)) or {"items": []}
+    else:
+        path = book_highlights_path(book_id)
+        if not path.exists():
+            return []
+        payload = read_json(path)
     items = payload.get("items")
     if isinstance(items, list):
         return items
@@ -1043,7 +1254,12 @@ def read_highlights(book_id: str) -> list[dict[str, Any]]:
 
 
 def write_highlights(book_id: str, items: list[dict[str, Any]]) -> None:
-    write_json(book_highlights_path(book_id), {"items": items})
+    payload = {"items": items}
+    if book_storage_enabled():
+        write_storage_json(book_highlights_storage_key(book_id), payload)
+        return
+
+    write_json(book_highlights_path(book_id), payload)
 
 
 def normalize_highlight_text(value: str) -> str:
@@ -1086,7 +1302,7 @@ def serialize_book(meta: dict[str, Any]) -> dict[str, Any]:
         "uploadedAt": meta["uploadedAt"],
         "pageCount": meta["pageCount"],
         "textCharacters": meta["textCharacters"],
-        "sourceUrl": relative_url(Path(meta["sourcePath"])),
+        "sourceUrl": source_url_for_book(meta),
         "excerpt": meta["excerpt"],
         "highlightCount": highlight_count,
         "latestAudio": latest_audio,
@@ -1094,9 +1310,7 @@ def serialize_book(meta: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_books() -> list[dict[str, Any]]:
-    books: list[dict[str, Any]] = []
-    for meta_file in BOOKS_ROOT.glob("*/meta.json"):
-        books.append(serialize_book(read_json(meta_file)))
+    books = [serialize_book(meta) for meta in list_book_meta_payloads()]
     books.sort(key=lambda item: item["uploadedAt"], reverse=True)
     return books
 
@@ -1723,10 +1937,57 @@ def cleanup_preview_files(limit: int = 20) -> None:
 
 
 def load_book_or_404(book_id: str) -> dict[str, Any]:
-    path = book_meta_path(book_id)
-    if not path.exists():
+    payload = read_book_meta(book_id)
+    if payload is None:
         raise HTTPException(status_code=404, detail="Book not found.")
-    return read_json(path)
+    return payload
+
+
+def import_book_source(
+    book_id: str,
+    file_name: str,
+    source_path: Path,
+    *,
+    source_storage: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    try:
+        raw_text = pdf_to_audio.extract_text(source_path)
+        cleaned_text = pdf_to_audio.clean_text(raw_text)
+        page_count = len(PdfReader(str(source_path)).pages)
+    except Exception:
+        if not book_storage_enabled():
+            shutil.rmtree(book_dir(book_id), ignore_errors=True)
+        raise
+
+    if not cleaned_text:
+        if not book_storage_enabled():
+            shutil.rmtree(book_dir(book_id), ignore_errors=True)
+        raise HTTPException(
+            status_code=422,
+            detail="No extractable text was found in this PDF. Scanned PDFs need OCR first.",
+        )
+
+    write_book_text(book_id, cleaned_text)
+
+    title = Path(file_name).stem
+    meta = {
+        "id": book_id,
+        "title": title,
+        "fileName": file_name,
+        "uploadedAt": utc_now(),
+        "pageCount": page_count,
+        "textCharacters": len(cleaned_text),
+        "excerpt": cleaned_text[:260],
+        "latestAudio": None,
+        "audioHistory": [],
+    }
+    if source_storage:
+        meta["sourceStorage"] = source_storage
+    else:
+        meta["sourcePath"] = str(source_path.resolve())
+
+    write_book_meta(book_id, meta)
+    return serialize_book(meta)
 
 
 def save_uploaded_book(upload: UploadFile) -> dict[str, Any]:
@@ -1745,54 +2006,149 @@ def save_uploaded_book(upload: UploadFile) -> dict[str, Any]:
     with source_path.open("wb") as handle:
         shutil.copyfileobj(upload.file, handle)
 
+    source_storage: dict[str, str] | None = None
     try:
-        raw_text = pdf_to_audio.extract_text(source_path)
-        cleaned_text = pdf_to_audio.clean_text(raw_text)
-        page_count = len(PdfReader(str(source_path)).pages)
+        if book_storage_enabled():
+            object_key = book_source_storage_key(book_id)
+            write_storage_bytes(object_key, source_path.read_bytes(), content_type="application/pdf")
+            source_storage = {
+                "bucket": BOOK_STORAGE_BUCKET,
+                "key": object_key,
+            }
+
+        return import_book_source(book_id, upload.filename, source_path, source_storage=source_storage)
     except Exception:
+        if book_storage_enabled():
+            delete_storage_prefix(book_storage_base_prefix(book_id))
         shutil.rmtree(target_dir, ignore_errors=True)
         raise
     finally:
         upload.file.close()
 
-    if not cleaned_text:
-        shutil.rmtree(target_dir, ignore_errors=True)
+
+def create_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str, Any]:
+    if not book_storage_enabled():
         raise HTTPException(
-            status_code=422,
-            detail="No extractable text was found in this PDF. Scanned PDFs need OCR first.",
+            status_code=503,
+            detail="Direct book uploads are not configured. Set BOOK_STORAGE_BUCKET and AWS credentials for durable hosted uploads.",
         )
 
-    cleaned_path = book_text_path(book_id)
-    cleaned_path.write_text(cleaned_text, encoding="utf-8")
+    suffix = Path(request.fileName).suffix.lower()
+    if suffix != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF uploads are supported in the web app.")
 
-    title = Path(upload.filename).stem
-    meta = {
-        "id": book_id,
-        "title": title,
-        "fileName": upload.filename,
-        "uploadedAt": utc_now(),
-        "pageCount": page_count,
-        "textCharacters": len(cleaned_text),
-        "excerpt": cleaned_text[:260],
-        "sourcePath": str(source_path.resolve()),
-        "latestAudio": None,
-        "audioHistory": [],
+    book_id = uuid.uuid4().hex[:12]
+    object_key = book_source_storage_key(book_id)
+    client = create_book_storage_client()
+
+    try:
+        upload = client.generate_presigned_post(
+            Bucket=BOOK_STORAGE_BUCKET,
+            Key=object_key,
+            Fields={
+                "Content-Type": "application/pdf",
+            },
+            Conditions=[
+                {"Content-Type": "application/pdf"},
+                ["content-length-range", 1, BOOK_STORAGE_MAX_UPLOAD_BYTES],
+            ],
+            ExpiresIn=3600,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to prepare direct upload: {exc}") from exc
+
+    return {
+        "bookId": book_id,
+        "upload": {
+            "url": upload["url"],
+            "fields": upload["fields"],
+        },
     }
-    write_json(book_meta_path(book_id), meta)
-    return serialize_book(meta)
+
+
+def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dict[str, Any]:
+    if not book_storage_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Direct book uploads are not configured. Set BOOK_STORAGE_BUCKET and AWS credentials for durable hosted uploads.",
+        )
+
+    suffix = Path(request.fileName).suffix.lower()
+    if suffix != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF uploads are supported in the web app.")
+
+    object_key = book_source_storage_key(request.bookId)
+    temp_root = RUNTIME_ROOT / "direct-imports"
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="storybook_import_", dir=str(temp_root)) as temp_dir:
+        temp_source = Path(temp_dir) / f"source{suffix}"
+        try:
+            download_storage_object(object_key, temp_source)
+            return import_book_source(
+                request.bookId,
+                request.fileName,
+                temp_source,
+                source_storage={
+                    "bucket": BOOK_STORAGE_BUCKET,
+                    "key": object_key,
+                },
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Uploaded PDF was not found in storage.") from exc
+        except HTTPException:
+            delete_storage_prefix(book_storage_base_prefix(request.bookId))
+            raise
+        except Exception as exc:
+            delete_storage_prefix(book_storage_base_prefix(request.bookId))
+            raise HTTPException(status_code=500, detail=f"Failed to import the uploaded PDF: {exc}") from exc
+
+
+def source_file_response(book_id: str) -> FileResponse | StreamingResponse:
+    meta = load_book_or_404(book_id)
+    source_storage = meta.get("sourceStorage")
+    if source_storage:
+        key = source_storage.get("key")
+        if not isinstance(key, str) or not key:
+            raise HTTPException(status_code=500, detail="Stored source file metadata is invalid.")
+
+        client = create_book_storage_client()
+        _, _, _, ClientError, _, _, _ = load_boto3()
+        try:
+            response = client.get_object(Bucket=BOOK_STORAGE_BUCKET, Key=key)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                raise HTTPException(status_code=404, detail="Source PDF not found.") from exc
+            raise HTTPException(status_code=503, detail=f"Failed to load the source PDF: {exc}") from exc
+
+        headers = {
+            "Content-Disposition": f'inline; filename="{meta.get("fileName", "book.pdf")}"',
+            "Cache-Control": "private, max-age=300",
+        }
+        return StreamingResponse(
+            response["Body"].iter_chunks(),
+            media_type=response.get("ContentType") or "application/pdf",
+            headers=headers,
+        )
+
+    source_path = Path(meta["sourcePath"])
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Source PDF not found.")
+    return FileResponse(source_path, media_type="application/pdf", filename=meta.get("fileName") or source_path.name)
 
 
 def append_audio_version(book_id: str, version: dict[str, Any]) -> dict[str, Any]:
     meta = load_book_or_404(book_id)
     meta["latestAudio"] = version
     meta["audioHistory"] = [version, *meta.get("audioHistory", [])][:8]
-    write_json(book_meta_path(book_id), meta)
+    write_book_meta(book_id, meta)
     return serialize_book(meta)
 
 
 def reader_payload(book_id: str) -> dict[str, Any]:
     meta = load_book_or_404(book_id)
-    text = book_text_path(book_id).read_text(encoding="utf-8")
+    text = read_book_text(book_id)
     return {
         "book": serialize_book(meta),
         "text": text,
@@ -1802,7 +2158,7 @@ def reader_payload(book_id: str) -> dict[str, Any]:
 
 def create_highlight(book_id: str, request: HighlightCreateRequest) -> dict[str, Any]:
     load_book_or_404(book_id)
-    text = book_text_path(book_id).read_text(encoding="utf-8")
+    text = read_book_text(book_id)
     if request.end > len(text):
         raise HTTPException(status_code=400, detail="Highlight extends past the end of the book text.")
     if request.end <= request.start:
@@ -1847,6 +2203,8 @@ def delete_highlight(book_id: str, highlight_id: str) -> None:
 
 def delete_book_files(book_id: str) -> None:
     load_book_or_404(book_id)
+    if book_storage_enabled():
+        delete_storage_prefix(book_storage_base_prefix(book_id))
     shutil.rmtree(book_dir(book_id), ignore_errors=True)
     delete_book_progress_records(book_id)
 
@@ -2269,7 +2627,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
             detail=f"{provider['name']} is not configured yet.",
         )
 
-    text = book_text_path(book_id).read_text(encoding="utf-8")
+    text = read_book_text(book_id)
     if request.end > len(text):
         raise HTTPException(status_code=400, detail="Live audio range extends past the end of the book text.")
     if request.end <= request.start:
@@ -2348,7 +2706,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
 def run_generation_job(job_id: str, book_id: str, request: GenerateAudioRequest) -> None:
     raise_if_job_cancelled(job_id)
     meta = load_book_or_404(book_id)
-    cleaned_text = book_text_path(book_id).read_text(encoding="utf-8")
+    cleaned_text = read_book_text(book_id)
     chunks = prepare_synthesis_chunks(cleaned_text, request.provider, request.chunk_size)
     chosen_model = ""
 
@@ -2655,6 +3013,21 @@ def remove_book_highlight(book_id: str, highlight_id: str) -> dict[str, bool]:
 @app.post("/api/books")
 def upload_book(file: UploadFile = File(...)) -> dict[str, Any]:
     return save_uploaded_book(file)
+
+
+@app.post("/api/books/direct-upload")
+def init_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str, Any]:
+    return create_direct_book_upload(request)
+
+
+@app.post("/api/books/direct-upload/complete")
+def finalize_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dict[str, Any]:
+    return complete_direct_book_upload(request)
+
+
+@app.get("/api/books/{book_id}/source")
+def book_source(book_id: str) -> FileResponse | StreamingResponse:
+    return source_file_response(book_id)
 
 
 @app.delete("/api/books/{book_id}")

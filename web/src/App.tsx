@@ -40,8 +40,8 @@ import {
   fetchBooks,
   fetchPollyHealth,
   fetchProviders,
-  HOSTED_UPLOAD_BODY_LIMIT_BYTES,
   testProvider,
+  uploadBookDirectToStorage,
   updateBookAudioProgress,
   updateBookReadingProgress,
   usesHostedFunctionUploadLimit,
@@ -2240,23 +2240,25 @@ export default function App() {
       return null
     }
 
-    if (usesHostedFunctionUploadLimit() && file.size > HOSTED_UPLOAD_BODY_LIMIT_BYTES) {
-      setErrorMessage(
-        'This PDF is larger than the current production upload limit on Vercel (4.5 MB). A direct-to-storage upload flow is needed for larger books.',
-      )
-      return null
-    }
-
     try {
       setUploading(true)
       setErrorMessage('')
-      setStatusMessage(`Uploading ${file.name} and extracting readable text.`)
-      const payload = new FormData()
-      payload.append('file', file)
-      const book = await apiRequest<Book>('/api/books', {
-        method: 'POST',
-        body: payload,
-      })
+      const hostedUpload = usesHostedFunctionUploadLimit()
+      setStatusMessage(
+        hostedUpload
+          ? `Uploading ${file.name} to durable storage and extracting readable text.`
+          : `Uploading ${file.name} and extracting readable text.`,
+      )
+      const book = hostedUpload
+        ? await uploadBookDirectToStorage(file)
+        : await (async () => {
+            const payload = new FormData()
+            payload.append('file', file)
+            return apiRequest<Book>('/api/books', {
+              method: 'POST',
+              body: payload,
+            })
+          })()
       setBooks((previous) => upsertBook(previous, book))
       navigateToLibrary()
       setStatusMessage(`Imported ${book.title}.`)
