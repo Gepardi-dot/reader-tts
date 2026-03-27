@@ -1081,8 +1081,26 @@ def create_polly_client():
     return create_aws_client("polly", region_name=POLLY_REGION)
 
 
+def regional_book_storage_api_url() -> str:
+    if not BOOK_STORAGE_REGION or BOOK_STORAGE_REGION == "us-east-1":
+        return "https://s3.amazonaws.com"
+    return f"https://s3.{BOOK_STORAGE_REGION}.amazonaws.com"
+
+
 def create_book_storage_client():
-    return create_aws_client("s3", region_name=BOOK_STORAGE_REGION)
+    session = create_aws_session(region_name=BOOK_STORAGE_REGION)
+    _, Config, _, _, _, _, _ = load_boto3()
+    client_config = Config(
+        connect_timeout=3,
+        read_timeout=10,
+        retries={"max_attempts": 1},
+        s3={"addressing_style": "virtual"},
+    )
+    return session.client(
+        "s3",
+        config=client_config,
+        endpoint_url=regional_book_storage_api_url(),
+    )
 
 
 def generate_book_storage_download_url(key: str, *, expires_in: int = 3600) -> str:
