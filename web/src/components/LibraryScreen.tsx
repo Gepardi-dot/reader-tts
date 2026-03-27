@@ -13,7 +13,7 @@ type LibraryScreenProps = {
   deletingBookId: string | null
   statusMessage: string
   errorMessage: string
-  onUploadFile: (file: File) => Promise<Book | null>
+  onUploadFile: (file: File, title?: string | null) => Promise<Book | null>
   onOpenBook: (bookId: string) => void
   onDeleteBook: (book: Book) => Promise<void>
 }
@@ -127,6 +127,11 @@ function isPdfFile(file: File) {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
 }
 
+function suggestedTitleFromFileName(fileName: string) {
+  const normalized = fileName.replace(/\.pdf$/i, '').trim()
+  return normalized || fileName.trim()
+}
+
 export function LibraryScreen({
   books,
   readingProgress,
@@ -145,6 +150,7 @@ export function LibraryScreen({
   const [audioState, setAudioState] = useState<AudioStateFilter>('all')
   const [recentOnly, setRecentOnly] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [uploadTitle, setUploadTitle] = useState('')
   const [fileError, setFileError] = useState('')
 
   const searchInputRef = useRef<HTMLInputElement | null>(null)
@@ -208,6 +214,7 @@ export function LibraryScreen({
     Number(readingState !== 'all') +
     Number(audioState !== 'all') +
     Number(recentOnly)
+  const activeStatusMessage = uploading ? statusMessage : ''
 
   function clearDiscovery() {
     setSearchQuery('')
@@ -233,6 +240,7 @@ export function LibraryScreen({
 
     setFileError('')
     setSelectedFile(file)
+    setUploadTitle(suggestedTitleFromFileName(file.name))
   }
 
   async function handleUpload() {
@@ -241,9 +249,10 @@ export function LibraryScreen({
       return
     }
 
-    const uploaded = await onUploadFile(selectedFile)
+    const uploaded = await onUploadFile(selectedFile, uploadTitle)
     if (uploaded) {
       setSelectedFile(null)
+      setUploadTitle('')
       setFileError('')
     }
   }
@@ -271,7 +280,7 @@ export function LibraryScreen({
         totalCount={books.length}
       />
 
-      {statusMessage ? <div className="library-notice">{statusMessage}</div> : null}
+      {activeStatusMessage ? <div className="library-notice library-notice--progress">{activeStatusMessage}</div> : null}
       {errorMessage ? <div className="library-notice library-notice--error">{errorMessage}</div> : null}
 
       <LibrarySection
@@ -297,6 +306,19 @@ export function LibraryScreen({
               <span className="library-upload-inline__file">
                 {trimExcerpt(selectedFile.name, selectedFile.name, 44)}
               </span>
+              <label className="library-upload-inline__title">
+                <span className="library-upload-inline__title-label">Title</span>
+                <input
+                  autoComplete="off"
+                  className="library-upload-inline__title-input"
+                  disabled={uploading}
+                  maxLength={180}
+                  onChange={(event) => setUploadTitle(event.target.value)}
+                  placeholder={suggestedTitleFromFileName(selectedFile.name)}
+                  type="text"
+                  value={uploadTitle}
+                />
+              </label>
               <button
                 className="primary-button"
                 disabled={uploading}
@@ -310,6 +332,7 @@ export function LibraryScreen({
                 disabled={uploading}
                 onClick={() => {
                   setSelectedFile(null)
+                  setUploadTitle('')
                   setFileError('')
                 }}
                 type="button"

@@ -123,7 +123,8 @@ export function fetchBooks() {
   return apiRequest<{ items: import('./types').Book[] }>('/api/books')
 }
 
-export async function uploadBookDirectToStorage(file: File) {
+export async function uploadBookDirectToStorage(file: File, title?: string) {
+  const trimmedTitle = typeof title === 'string' ? title.trim() : ''
   const init = await apiRequest<{
     bookId: string
     upload: {
@@ -139,6 +140,7 @@ export async function uploadBookDirectToStorage(file: File) {
       fileName: file.name,
       contentType: file.type || 'application/pdf',
       size: file.size,
+      title: trimmedTitle || undefined,
     }),
   })
 
@@ -172,6 +174,7 @@ export async function uploadBookDirectToStorage(file: File) {
     body: JSON.stringify({
       bookId: init.bookId,
       fileName: file.name,
+      title: trimmedTitle || undefined,
     }),
   })
 }

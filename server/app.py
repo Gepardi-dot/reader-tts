@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -115,6 +115,7 @@ BOOK_STORAGE_BUCKET = env_value("BOOK_STORAGE_BUCKET")
 BOOK_STORAGE_PREFIX = (env_value("BOOK_STORAGE_PREFIX") or "storybook-reader").strip("/")
 BOOK_STORAGE_REGION = env_value("BOOK_STORAGE_REGION") or env_value("AWS_REGION") or env_value("AWS_DEFAULT_REGION")
 BOOK_STORAGE_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
+BOOK_TITLE_MAX_LENGTH = 180
 
 
 def voice_option(
@@ -436,15 +437,33 @@ class DirectBookUploadInitRequest(BaseModel):
     fileName: str = Field(min_length=1, max_length=260)
     contentType: str = Field(default="application/pdf", max_length=200)
     size: int = Field(gt=0, le=BOOK_STORAGE_MAX_UPLOAD_BYTES)
+    title: str | None = Field(default=None, max_length=BOOK_TITLE_MAX_LENGTH)
 
 
 class DirectBookUploadCompleteRequest(BaseModel):
     bookId: str = Field(min_length=12, max_length=12)
     fileName: str = Field(min_length=1, max_length=260)
+    title: str | None = Field(default=None, max_length=BOOK_TITLE_MAX_LENGTH)
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def resolve_book_title(title: str | None, file_name: str) -> str:
+    fallback = Path(file_name).stem.strip() or Path(file_name).name.strip() or "Untitled book"
+    if title is None:
+        return fallback
+
+    normalized = re.sub(r"\s+", " ", title).strip()
+    if not normalized:
+        return fallback
+    if len(normalized) > BOOK_TITLE_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Book titles must be {BOOK_TITLE_MAX_LENGTH} characters or fewer.",
+        )
+    return normalized
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -2007,6 +2026,7 @@ def import_book_source(
     source_path: Path,
     *,
     source_storage: dict[str, str] | None = None,
+    title_override: str | None = None,
 ) -> dict[str, Any]:
     try:
         raw_text = pdf_to_audio.extract_text(source_path)
@@ -2027,7 +2047,7 @@ def import_book_source(
 
     write_book_text(book_id, cleaned_text)
 
-    title = Path(file_name).stem
+    title = resolve_book_title(title_override, file_name)
     meta = {
         "id": book_id,
         "title": title,
@@ -2048,7 +2068,7 @@ def import_book_source(
     return serialize_book(meta)
 
 
-def save_uploaded_book(upload: UploadFile) -> dict[str, Any]:
+def save_uploaded_book(upload: UploadFile, title_override: str | None = None) -> dict[str, Any]:
     if not upload.filename:
         raise HTTPException(status_code=400, detail="Missing filename.")
 
@@ -2074,7 +2094,13 @@ def save_uploaded_book(upload: UploadFile) -> dict[str, Any]:
                 "key": object_key,
             }
 
-        return import_book_source(book_id, upload.filename, source_path, source_storage=source_storage)
+        return import_book_source(
+            book_id,
+            upload.filename,
+            source_path,
+            source_storage=source_storage,
+            title_override=title_override,
+        )
     except Exception:
         if book_storage_enabled():
             delete_storage_prefix(book_storage_base_prefix(book_id))
@@ -2151,6 +2177,7 @@ def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dic
                     "bucket": BOOK_STORAGE_BUCKET,
                     "key": object_key,
                 },
+                title_override=request.title,
             )
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Uploaded PDF was not found in storage.") from exc
@@ -3119,8 +3146,8 @@ def remove_book_highlight(book_id: str, highlight_id: str) -> dict[str, bool]:
 
 
 @app.post("/api/books")
-def upload_book(file: UploadFile = File(...)) -> dict[str, Any]:
-    return save_uploaded_book(file)
+def upload_book(file: UploadFile = File(...), title: str | None = Form(default=None)) -> dict[str, Any]:
+    return save_uploaded_book(file, title_override=title)
 
 
 @app.post("/api/books/direct-upload")

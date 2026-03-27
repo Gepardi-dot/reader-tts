@@ -53,7 +53,7 @@ export function LibraryToolbar({
           <span />
           <span />
         </div>
-        <div>
+        <div className="library-toolbar__brand-copy">
           <p className="eyebrow">Personal Reading Room</p>
           <h1>Storybook Reader</h1>
           <p className="library-toolbar__summary">{resultLabel}</p>

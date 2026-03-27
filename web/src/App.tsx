@@ -61,6 +61,7 @@ type StoredSession = {
 
 type StoredUiPreferences = {
   readerForm: ReaderForm
+  providerDefaults: Partial<Record<AudioControlProviderId, ProviderFormDefaults>>
   readerAppearance: ReaderAppearance
   readerFontScales: Record<string, number>
   audioPlaybackRate: number
@@ -108,6 +109,10 @@ type LivePlaybackRequest = {
 }
 
 type AudioControlProviderId = Extract<ReaderForm['provider'], 'google' | 'polly' | 'qwen'>
+type ProviderFormDefaults = Pick<
+  ReaderForm,
+  'voice' | 'model' | 'outputFormat' | 'narrationStyle' | 'lengthScale' | 'sentenceSilence'
+>
 
 type ResolvedLiveConfig = {
   provider: ReaderForm['provider']
@@ -182,6 +187,82 @@ function resolveProviderVoice(
   }
 
   return availableVoices[0]?.id
+}
+
+function snapshotProviderFormDefaults(form: ReaderForm): ProviderFormDefaults {
+  return {
+    voice: form.voice,
+    model: form.model,
+    outputFormat: form.outputFormat,
+    narrationStyle: form.narrationStyle,
+    lengthScale: form.lengthScale,
+    sentenceSilence: form.sentenceSilence,
+  }
+}
+
+function normalizeProviderFormDefaults(
+  value: Partial<ProviderFormDefaults> | null | undefined,
+  fallback: ProviderFormDefaults,
+  defaultNarrationStyle = '',
+): ProviderFormDefaults {
+  return {
+    voice: typeof value?.voice === 'string' ? value.voice : fallback.voice,
+    model: typeof value?.model === 'string' ? value.model : fallback.model,
+    outputFormat: isStoredOutputFormat(value?.outputFormat) ? value.outputFormat : fallback.outputFormat,
+    narrationStyle:
+      typeof value?.narrationStyle === 'string'
+        ? value.narrationStyle
+        : fallback.narrationStyle || defaultNarrationStyle,
+    lengthScale: clampPreference(value?.lengthScale, 0.6, 1.5, fallback.lengthScale),
+    sentenceSilence: clampPreference(value?.sentenceSilence, 0, 1, fallback.sentenceSilence),
+  }
+}
+
+function restoreFormForProvider(
+  provider: ProviderCatalog | null,
+  providerId: AudioControlProviderId,
+  storedDefaults: Partial<Record<AudioControlProviderId, ProviderFormDefaults>>,
+  fallbackForm: ReaderForm,
+): ReaderForm {
+  const fallbackModel = resolveProviderModel(provider, fallbackForm.model) ?? ''
+  const fallbackVoice = resolveProviderVoice(provider, fallbackForm.voice, fallbackModel) ?? ''
+  const normalizedDefaults = normalizeProviderFormDefaults(
+    storedDefaults[providerId],
+    snapshotProviderFormDefaults({
+      ...fallbackForm,
+      provider: providerId,
+      model: fallbackModel,
+      voice: fallbackVoice,
+    }),
+    fallbackForm.narrationStyle,
+  )
+  const nextModel = resolveProviderModel(provider, normalizedDefaults.model) ?? ''
+  const nextVoice = resolveProviderVoice(provider, normalizedDefaults.voice, nextModel) ?? ''
+
+  return {
+    ...fallbackForm,
+    provider: providerId,
+    voice: nextVoice,
+    model: nextModel,
+    outputFormat: normalizedDefaults.outputFormat,
+    narrationStyle: normalizedDefaults.narrationStyle,
+    lengthScale: normalizedDefaults.lengthScale,
+    sentenceSilence: normalizedDefaults.sentenceSilence,
+  }
+}
+
+function sameProviderFormDefaults(
+  left: ProviderFormDefaults | null | undefined,
+  right: ProviderFormDefaults,
+) {
+  return (
+    left?.voice === right.voice &&
+    left?.model === right.model &&
+    left?.outputFormat === right.outputFormat &&
+    left?.narrationStyle === right.narrationStyle &&
+    left?.lengthScale === right.lengthScale &&
+    left?.sentenceSilence === right.sentenceSilence
+  )
 }
 
 function resolveLiveConfigForProvider(
@@ -371,6 +452,7 @@ function clampPreference(value: unknown, minimum: number, maximum: number, fallb
 function readStoredUiPreferences(): StoredUiPreferences {
   const fallback: StoredUiPreferences = {
     readerForm: initialForm,
+    providerDefaults: {},
     readerAppearance: initialReaderAppearance,
     readerFontScales: {},
     audioPlaybackRate: 1,
@@ -388,11 +470,24 @@ function readStoredUiPreferences(): StoredUiPreferences {
 
     const parsed = JSON.parse(raw) as Partial<StoredUiPreferences> & {
       readerForm?: Partial<ReaderForm>
+      providerDefaults?: Partial<Record<AudioControlProviderId, Partial<ProviderFormDefaults>>>
       readerAppearance?: Partial<ReaderAppearance>
     }
     const readerForm: Partial<ReaderForm> = parsed.readerForm ?? {}
+    const providerDefaults: Partial<Record<AudioControlProviderId, ProviderFormDefaults>> = {}
     const readerAppearance: Partial<ReaderAppearance> = parsed.readerAppearance ?? {}
     const readerFontScales: Record<string, number> = {}
+
+    for (const [providerId, value] of Object.entries(parsed.providerDefaults ?? {})) {
+      if (!isAudioControlProviderId(providerId) || !value || typeof value !== 'object') {
+        continue
+      }
+
+      providerDefaults[providerId] = normalizeProviderFormDefaults(
+        value,
+        snapshotProviderFormDefaults(initialForm),
+      )
+    }
 
     for (const [bookId, value] of Object.entries(parsed.readerFontScales ?? {})) {
       if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -416,6 +511,7 @@ function readStoredUiPreferences(): StoredUiPreferences {
         lengthScale: clampPreference(readerForm.lengthScale, 0.6, 1.5, initialForm.lengthScale),
         sentenceSilence: clampPreference(readerForm.sentenceSilence, 0, 1, initialForm.sentenceSilence),
       },
+      providerDefaults,
       readerAppearance: {
         fontFamily: isStoredReaderFontFamily(readerAppearance.fontFamily)
           ? readerAppearance.fontFamily
@@ -776,6 +872,9 @@ export default function App() {
     readStoredProgress(),
   )
   const [form, setForm] = useState<ReaderForm>(() => readStoredUiPreferences().readerForm)
+  const [providerDefaults, setProviderDefaults] = useState<
+    Partial<Record<AudioControlProviderId, ProviderFormDefaults>>
+  >(() => readStoredUiPreferences().providerDefaults)
   const [readerAppearance, setReaderAppearance] = useState<ReaderAppearance>(
     () => readStoredUiPreferences().readerAppearance,
   )
@@ -811,7 +910,7 @@ export default function App() {
   const [cancellingJob, setCancellingJob] = useState(false)
   const [audioDockOpen, setAudioDockOpen] = useState(false)
   const [audioPlaying, setAudioPlaying] = useState(false)
-  const [audioJumpMessage, setAudioJumpMessage] = useState('')
+  const [, setAudioJumpMessage] = useState('')
   const [pendingAudioSeek, setPendingAudioSeek] = useState<number | null>(null)
   const [pendingAudioPlay, setPendingAudioPlay] = useState(false)
   const [spokenRange, setSpokenRange] = useState<SpokenRange | null>(null)
@@ -1531,13 +1630,55 @@ export default function App() {
   }, [readerTabs, route])
 
   useEffect(() => {
+    if (!isAudioControlProviderId(form.provider)) {
+      return
+    }
+
+    const currentProviderId: AudioControlProviderId = form.provider
+    const nextDefaults: ProviderFormDefaults = {
+      voice: form.voice,
+      model: form.model,
+      outputFormat: form.outputFormat,
+      narrationStyle: form.narrationStyle,
+      lengthScale: form.lengthScale,
+      sentenceSilence: form.sentenceSilence,
+    }
+    setProviderDefaults((previous) =>
+      sameProviderFormDefaults(previous[currentProviderId], nextDefaults)
+        ? previous
+        : {
+            ...previous,
+            [currentProviderId]: nextDefaults,
+          },
+    )
+  }, [
+    form.lengthScale,
+    form.model,
+    form.narrationStyle,
+    form.outputFormat,
+    form.provider,
+    form.sentenceSilence,
+    form.voice,
+  ])
+
+  useEffect(() => {
+    const persistedProviderDefaults =
+      isAudioControlProviderId(form.provider) &&
+      !sameProviderFormDefaults(providerDefaults[form.provider], snapshotProviderFormDefaults(form))
+        ? {
+            ...providerDefaults,
+            [form.provider]: snapshotProviderFormDefaults(form),
+          }
+        : providerDefaults
+
     writeStoredValue(UI_PREFERENCES_KEY, {
       readerForm: form,
+      providerDefaults: persistedProviderDefaults,
       readerAppearance,
       readerFontScales,
       audioPlaybackRate,
     } satisfies StoredUiPreferences)
-  }, [audioPlaybackRate, form, readerAppearance, readerFontScales])
+  }, [audioPlaybackRate, form, providerDefaults, readerAppearance, readerFontScales])
 
   useEffect(() => {
     if (!selectedBookId) {
@@ -1732,11 +1873,21 @@ export default function App() {
         nextProviders.find((provider) => provider.id === form.provider) ??
         nextProviders[0] ??
         null
-      setForm((previous) => ({
-        ...previous,
-        provider: resolvedProvider?.id ?? previous.provider,
-        narrationStyle: previous.narrationStyle || providerResponse.defaultNarrationStyle,
-      }))
+      if (resolvedProvider) {
+        const resolvedProviderId = resolvedProvider.id as AudioControlProviderId
+        setForm((previous) =>
+          restoreFormForProvider(resolvedProvider, resolvedProviderId, providerDefaults, {
+            ...previous,
+            provider: resolvedProviderId,
+            narrationStyle: previous.narrationStyle || providerResponse.defaultNarrationStyle,
+          }),
+        )
+      } else {
+        setForm((previous) => ({
+          ...previous,
+          narrationStyle: previous.narrationStyle || providerResponse.defaultNarrationStyle,
+        }))
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Failed to load the app.')
     } finally {
@@ -2234,7 +2385,25 @@ export default function App() {
     }
   }
 
-  async function uploadBookFile(file: File) {
+  async function toggleAudioPlayback() {
+    const audio = audioPlayerRef.current
+    if (!audio) {
+      return
+    }
+
+    if (audio.paused || audio.ended) {
+      try {
+        await audio.play()
+      } catch {
+        setErrorMessage('Playback could not start.')
+      }
+      return
+    }
+
+    audio.pause()
+  }
+
+  async function uploadBookFile(file: File, title?: string | null) {
     if (!(file instanceof File)) {
       setErrorMessage('Choose a PDF first.')
       return null
@@ -2243,17 +2412,22 @@ export default function App() {
     try {
       setUploading(true)
       setErrorMessage('')
+      const requestedTitle = typeof title === 'string' ? title.trim() : ''
+      const uploadLabel = requestedTitle || file.name
       const hostedUpload = usesHostedFunctionUploadLimit()
       setStatusMessage(
         hostedUpload
-          ? `Uploading ${file.name} to durable storage and extracting readable text.`
-          : `Uploading ${file.name} and extracting readable text.`,
+          ? `Uploading ${uploadLabel} to durable storage and extracting readable text.`
+          : `Uploading ${uploadLabel} and extracting readable text.`,
       )
       const book = hostedUpload
-        ? await uploadBookDirectToStorage(file)
+        ? await uploadBookDirectToStorage(file, requestedTitle || undefined)
         : await (async () => {
             const payload = new FormData()
             payload.append('file', file)
+            if (requestedTitle) {
+              payload.append('title', requestedTitle)
+            }
             return apiRequest<Book>('/api/books', {
               method: 'POST',
               body: payload,
@@ -2494,14 +2668,43 @@ export default function App() {
 
   function setProvider(provider: 'piper' | 'google' | 'openai' | 'polly' | 'qwen') {
     const match = providers.find((item) => item.id === provider)
-    const nextModel = resolveProviderModel(match ?? null, match?.defaultModel)
-    const nextVoice = resolveProviderVoice(match ?? null, match?.defaultVoice, nextModel)
-    setForm((previous) => ({
-      ...previous,
-      provider,
-      voice: nextVoice ?? '',
-      model: nextModel ?? '',
-    }))
+    if (!isAudioControlProviderId(provider)) {
+      const nextModel = resolveProviderModel(match ?? null, match?.defaultModel)
+      const nextVoice = resolveProviderVoice(match ?? null, match?.defaultVoice, nextModel)
+      setForm((previous) => ({
+        ...previous,
+        provider,
+        voice: nextVoice ?? '',
+        model: nextModel ?? '',
+      }))
+      return
+    }
+
+    const currentProviderId = isAudioControlProviderId(form.provider) ? form.provider : null
+    const nextProviderDefaults = currentProviderId
+      ? {
+          ...providerDefaults,
+          [currentProviderId]: snapshotProviderFormDefaults(form),
+        }
+      : providerDefaults
+
+    setProviderDefaults((previous) => {
+      const currentSnapshot = currentProviderId ? snapshotProviderFormDefaults(form) : null
+      if (!currentProviderId || !currentSnapshot || sameProviderFormDefaults(previous[currentProviderId], currentSnapshot)) {
+        return previous
+      }
+      return {
+        ...previous,
+        [currentProviderId]: currentSnapshot,
+      }
+    })
+
+    setForm((previous) =>
+      restoreFormForProvider(match ?? null, provider, nextProviderDefaults, {
+        ...previous,
+        provider,
+      }),
+    )
   }
 
   const modelOptions = currentProvider?.models ?? []
@@ -2592,11 +2795,10 @@ export default function App() {
       : selectedBook?.latestAudio
         ? `${selectedBook.latestAudio.provider} • ${selectedBook.latestAudio.format}`
         : 'Narration'
-  const audioBarSubtitle =
-    audioJumpMessage ||
-    (liveAudioMode !== null
-      ? 'Live read starts from the displayed page and buffers ahead while you listen.'
-      : 'Press play to start from the displayed page, or select text and use Play here.')
+  const audioBarNarrator =
+    liveAudioMode !== null
+      ? liveAudioCurrent?.voice ?? liveRequestConfigRef.current?.voice ?? selectedVoice?.label ?? 'Narrator'
+      : selectedBook?.latestAudio?.voice ?? selectedVoice?.label ?? 'Narrator'
   const jobBusy =
     activeJob !== null &&
     activeJob.status !== 'completed' &&
@@ -3125,14 +3327,14 @@ export default function App() {
             <div className={`reader-audio-bar ${showAudioDock ? 'active' : ''}`}>
               <div className="reader-audio-bar__meta">
                 <p className="eyebrow">{liveAudioMode !== null ? 'Live narration' : 'Narration'}</p>
-                <strong>{audioBarTitle}</strong>
-                <small>{audioBarSubtitle}</small>
+                <strong>{audioBarNarrator}</strong>
+                <small>{audioBarTitle}</small>
               </div>
               <div className="reader-audio-bar__controls">
                 {currentAudioSrc ? (
                   <>
                     <audio
-                      controls
+                      className="reader-audio-bar__element"
                       key={currentAudioSrc}
                       onEnded={handleAudioEnded}
                       onLoadedMetadata={() => void handleAudioMetadataReady()}
@@ -3144,6 +3346,26 @@ export default function App() {
                       ref={audioPlayerRef}
                       src={currentAudioSrc}
                     />
+                    <button
+                      className="reader-audio-bar__play"
+                      onClick={() => void toggleAudioPlayback()}
+                      type="button"
+                    >
+                      <span className="reader-audio-bar__play-icon" aria-hidden="true">
+                        {audioPlaying ? (
+                          <svg viewBox="0 0 24 24">
+                            <path d="M8 6h3v12H8zM13 6h3v12h-3z" />
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 24 24">
+                            <path d="M8 6.5v11l8.5-5.5z" />
+                          </svg>
+                        )}
+                      </span>
+                      <span className="reader-audio-bar__play-copy">
+                        <strong>{audioPlaying ? 'Pause' : 'Play'}</strong>
+                      </span>
+                    </button>
                     <label className="reader-audio-bar__speed">
                       <span>Speed</span>
                       <select
