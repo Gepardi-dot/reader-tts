@@ -103,6 +103,7 @@ OPENAI_TTS_MODEL = env_value("OPENAI_TTS_MODEL") or "gpt-4o-mini-tts"
 GEMINI_TTS_MODEL = env_value("GEMINI_TTS_MODEL") or "gemini-2.5-flash-preview-tts"
 DASHSCOPE_BASE_HTTP_API_URL = env_value("DASHSCOPE_BASE_HTTP_API_URL") or "https://dashscope-intl.aliyuncs.com/api/v1"
 QWEN_TTS_MODEL = env_value("QWEN_TTS_MODEL") or "qwen3-tts-instruct-flash"
+CANONICAL_WAV_SAMPLE_RATE = 24000
 POLLY_REGION = env_value("POLLY_REGION") or env_value("AWS_REGION") or env_value("AWS_DEFAULT_REGION")
 POLLY_VOICE_ID = env_value("AWS_POLLY_VOICE_ID") or env_value("POLLY_VOICE_ID") or "Matthew"
 POLLY_ENGINE = (env_value("AWS_POLLY_ENGINE") or env_value("POLLY_ENGINE") or "standard").lower()
@@ -1998,6 +1999,17 @@ def pcm_to_wav(pcm_bytes: bytes, wav_path: Path, *, channels: int = 1, rate: int
         wav_file.writeframes(pcm_bytes)
 
 
+def normalize_chunk_wav(wav_path: Path, *, ffmpeg_exe: Path) -> None:
+    normalized_path = wav_path.with_name(f"{wav_path.stem}.normalized.wav")
+    pdf_to_audio.normalize_wav_with_ffmpeg(
+        wav_path,
+        ffmpeg_exe=ffmpeg_exe,
+        output_path=normalized_path,
+        sample_rate=CANONICAL_WAV_SAMPLE_RATE,
+    )
+    normalized_path.replace(wav_path)
+
+
 def restore_file_from_storage(key: str, destination: Path) -> bool:
     payload = read_storage_bytes(key)
     if payload is None:
@@ -2326,7 +2338,7 @@ def synthesize_piper(
         raise RuntimeError(f"Piper voice config not found: {config_path}")
 
     piper_exe = pdf_to_audio.find_binary(None, "PIPER_EXE", pdf_to_audio.DEFAULT_PIPER_EXE)
-    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+    ffmpeg_exe = pdf_to_audio.find_binary(
         None,
         "FFMPEG_EXE",
         Path("ffmpeg.exe"),
@@ -2365,6 +2377,7 @@ def synthesize_piper(
                 str(sentence_silence),
             ]
             pdf_to_audio.run_subprocess(command, input_text=chunk)
+            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
             wav_paths.append(wav_path)
             record_job_progress(
                 job_id=job_id,
@@ -2395,7 +2408,7 @@ def synthesize_openai(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
 
-    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+    ffmpeg_exe = pdf_to_audio.find_binary(
         None,
         "FFMPEG_EXE",
         Path("ffmpeg.exe"),
@@ -2430,6 +2443,7 @@ def synthesize_openai(
                 response.raise_for_status()
                 wav_path = wav_dir / f"chunk_{index:05d}.wav"
                 wav_path.write_bytes(response.content)
+                normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
                 wav_paths.append(wav_path)
                 record_job_progress(
                     job_id=job_id,
@@ -2462,7 +2476,7 @@ def synthesize_google(
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
-    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+    ffmpeg_exe = pdf_to_audio.find_binary(
         None,
         "FFMPEG_EXE",
         Path("ffmpeg.exe"),
@@ -2494,6 +2508,7 @@ def synthesize_google(
                 encoded_audio = payload["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
                 wav_path = wav_dir / f"chunk_{index:05d}.wav"
                 pcm_to_wav(b64decode(encoded_audio), wav_path)
+                normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
                 wav_paths.append(wav_path)
                 record_job_progress(
                     job_id=job_id,
@@ -2527,7 +2542,7 @@ def synthesize_qwen(
         raise RuntimeError("DASHSCOPE_API_KEY is not configured.")
 
     dashscope = load_dashscope()
-    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+    ffmpeg_exe = pdf_to_audio.find_binary(
         None,
         "FFMPEG_EXE",
         Path("ffmpeg.exe"),
@@ -2581,6 +2596,7 @@ def synthesize_qwen(
                 else:
                     raise RuntimeError("Qwen TTS returned no downloadable audio payload.")
 
+                normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
                 wav_paths.append(wav_path)
                 record_job_progress(
                     job_id=job_id,
@@ -2608,7 +2624,7 @@ def synthesize_polly(
     job_id: str | None,
 ) -> None:
     client = create_polly_client()
-    ffmpeg_exe = None if output_format == "wav" else pdf_to_audio.find_binary(
+    ffmpeg_exe = pdf_to_audio.find_binary(
         None,
         "FFMPEG_EXE",
         Path("ffmpeg.exe"),
@@ -2644,6 +2660,7 @@ def synthesize_polly(
 
             wav_path = wav_dir / f"chunk_{index:05d}.wav"
             pcm_to_wav(pcm_bytes, wav_path, rate=int(POLLY_PCM_SAMPLE_RATE))
+            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
             wav_paths.append(wav_path)
             record_job_progress(
                 job_id=job_id,

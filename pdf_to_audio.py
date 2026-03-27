@@ -355,6 +355,30 @@ def concat_with_ffmpeg(
         list_path.unlink(missing_ok=True)
 
 
+def normalize_wav_with_ffmpeg(
+    input_path: Path,
+    *,
+    ffmpeg_exe: Path,
+    output_path: Path,
+    sample_rate: int = 24000,
+) -> None:
+    command = [
+        str(ffmpeg_exe),
+        "-y",
+        "-i",
+        str(input_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-c:a",
+        "pcm_s16le",
+        str(output_path),
+    ]
+    run_subprocess(command)
+
+
 def concat_wav_files(wav_paths: list[Path], *, output_path: Path) -> None:
     if not wav_paths:
         raise ValueError("No WAV chunks were provided.")

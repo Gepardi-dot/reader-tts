@@ -148,6 +148,7 @@ const AUDIO_PROGRESS_KEY = 'storybook-audio-progress'
 const UI_PREFERENCES_KEY = 'storybook-ui-preferences'
 const LIBRARY_SNAPSHOT_KEY = 'storybook-library-snapshot'
 const LIVE_PREFETCH_PAGES = 2
+const LIVE_SELECTION_STARTUP_CHAR_COUNT = 420
 const AUDIO_PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2] as const
 
 function resolveProviderModel(provider: ProviderCatalog | null, requestedModel?: string | null) {
@@ -923,7 +924,6 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string>('')
   const [activeJob, setActiveJob] = useState<JobStatus | null>(null)
   const [testingProvider, setTestingProvider] = useState(false)
-  const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null)
   const [providerSample, setProviderSample] = useState<ProviderTestResult | null>(null)
   const [pollyHealth, setPollyHealth] = useState<PollyHealth | null>(null)
   const [pollyHealthLoading, setPollyHealthLoading] = useState(false)
@@ -964,6 +964,7 @@ export default function App() {
   const lastRemoteAudioSyncRef = useRef<Record<string, StoredAudioProgress | null>>({})
   const liveSessionIdRef = useRef(0)
   const liveNextPageIndexRef = useRef(0)
+  const livePendingRequestRef = useRef<LivePlaybackRequest | null>(null)
   const livePrefetchingRef = useRef(false)
   const liveAudioCurrentRef = useRef<LiveAudioSegment | null>(null)
   const liveAudioQueueRef = useRef<LiveAudioSegment[]>([])
@@ -1182,6 +1183,7 @@ export default function App() {
     audioPlayerRef.current?.pause()
     liveSessionIdRef.current += 1
     liveNextPageIndexRef.current = 0
+    livePendingRequestRef.current = null
     livePrefetchingRef.current = false
     liveRequestConfigRef.current = null
     liveAudioCurrentRef.current = null
@@ -1210,7 +1212,7 @@ export default function App() {
     }
   }
 
-  function liveRequestFromSelection(start: number) {
+  function liveRequestFromSelection(start: number, end: number) {
     const pageIndex = findReaderPageIndexForOffset(start)
     if (pageIndex < 0) {
       return null
@@ -1219,10 +1221,23 @@ export default function App() {
     const page = readerPages[pageIndex]
     const text = readerPayload?.text ?? ''
     const requestStart = Math.max(page.start, start)
-    const requestEnd = page.end
+    const requestEnd = Math.min(
+      page.end,
+      Math.max(requestStart + LIVE_SELECTION_STARTUP_CHAR_COUNT, end),
+    )
     if (!text || requestEnd <= requestStart) {
       return null
     }
+
+    const followUpRequest =
+      requestEnd < page.end
+        ? ({
+            pageNumber: pageIndex + 1,
+            start: requestEnd,
+            end: page.end,
+            text: text.slice(requestEnd, page.end),
+          } satisfies LivePlaybackRequest)
+        : null
 
     return {
       pageIndex,
@@ -1232,7 +1247,24 @@ export default function App() {
         end: requestEnd,
         text: text.slice(requestStart, requestEnd),
       } satisfies LivePlaybackRequest,
+      followUpRequest,
     }
+  }
+
+  function dequeueNextLiveRequest() {
+    const pendingRequest = livePendingRequestRef.current
+    if (pendingRequest) {
+      livePendingRequestRef.current = null
+      return pendingRequest
+    }
+
+    if (liveNextPageIndexRef.current >= readerPages.length) {
+      return null
+    }
+
+    const request = livePageRequestAtIndex(liveNextPageIndexRef.current)
+    liveNextPageIndexRef.current += 1
+    return request
   }
 
   function findReaderPageIndexForOffset(offset: number) {
@@ -1338,10 +1370,9 @@ export default function App() {
       while (
         sessionId === liveSessionIdRef.current &&
         liveAudioQueueRef.current.length < LIVE_PREFETCH_PAGES &&
-        liveNextPageIndexRef.current < readerPages.length
+        (livePendingRequestRef.current !== null || liveNextPageIndexRef.current < readerPages.length)
       ) {
-        const request = livePageRequestAtIndex(liveNextPageIndexRef.current)
-        liveNextPageIndexRef.current += 1
+        const request = dequeueNextLiveRequest()
         if (!request) {
           continue
         }
@@ -1372,6 +1403,7 @@ export default function App() {
       mode: Exclude<LivePlaybackMode, null>
       label: string
       nextPageIndex: number
+      followUpRequest?: LivePlaybackRequest | null
     },
   ) {
     if (!selectedBook || !readerPages.length) {
@@ -1387,6 +1419,7 @@ export default function App() {
     cancelLivePlayback()
     const sessionId = liveSessionIdRef.current
     liveNextPageIndexRef.current = options.nextPageIndex
+    livePendingRequestRef.current = options.followUpRequest ?? null
     liveRequestConfigRef.current = resolvedLiveConfig
 
     restoreAudioProgressRef.current = null
@@ -1406,7 +1439,7 @@ export default function App() {
       }
 
       activateLiveSegment(segment, `Reading ${options.label} now.`)
-      if (options.nextPageIndex < readerPages.length) {
+      if (livePendingRequestRef.current !== null || options.nextPageIndex < readerPages.length) {
         void prefetchLiveSegments(sessionId)
       }
     } catch (error) {
@@ -1433,7 +1466,7 @@ export default function App() {
           setStatusMessage(
             `${resolvedLiveConfig.providerName} was unavailable, so playback continued with ${fallbackLiveConfig.providerName}.`,
           )
-          if (options.nextPageIndex < readerPages.length) {
+          if (livePendingRequestRef.current !== null || options.nextPageIndex < readerPages.length) {
             void prefetchLiveSegments(sessionId)
           }
           return
@@ -2200,7 +2233,7 @@ export default function App() {
   }
 
   async function handlePlayFromSelection(payload: { start: number; end: number; text: string }) {
-    const selectionRequest = liveRequestFromSelection(payload.start)
+    const selectionRequest = liveRequestFromSelection(payload.start, payload.end)
     if (!selectionRequest) {
       setErrorMessage('This selection does not map to readable page text yet.')
       return
@@ -2216,6 +2249,7 @@ export default function App() {
       {
         mode: 'selection',
         label: summarizeSelection(payload.text),
+        followUpRequest: selectionRequest.followUpRequest,
         nextPageIndex: selectionRequest.pageIndex + 1,
       },
     )
@@ -2373,15 +2407,14 @@ export default function App() {
           return next
         })
         activateLiveSegment(queuedSegment, `Reading page ${queuedSegment.pageNumber} now.`)
-        if (liveNextPageIndexRef.current < readerPages.length) {
+        if (livePendingRequestRef.current !== null || liveNextPageIndexRef.current < readerPages.length) {
           void prefetchLiveSegments(liveSessionIdRef.current)
         }
         return
       }
 
-      if (liveNextPageIndexRef.current < readerPages.length) {
-        const request = livePageRequestAtIndex(liveNextPageIndexRef.current)
-        liveNextPageIndexRef.current += 1
+      if (livePendingRequestRef.current !== null || liveNextPageIndexRef.current < readerPages.length) {
+        const request = dequeueNextLiveRequest()
 
         if (request) {
           const sessionId = liveSessionIdRef.current
@@ -2537,7 +2570,6 @@ export default function App() {
 
     try {
       setTestingProvider(true)
-      setPreviewingVoiceId(chosenVoice ?? null)
       setErrorMessage('')
       if (voiceId) {
         setForm((previous) => ({ ...previous, voice: voiceId }))
@@ -2558,7 +2590,6 @@ export default function App() {
       setErrorMessage(error instanceof Error ? error.message : 'Provider test failed.')
     } finally {
       setTestingProvider(false)
-      setPreviewingVoiceId(null)
     }
   }
 
@@ -2765,18 +2796,18 @@ export default function App() {
 
     return currentProvider.available ? `${currentProvider.name} is ready` : `${currentProvider.name} needs setup`
   })()
-  const providerStatusMessage = (() => {
+  const providerStatusSummary = (() => {
     if (!currentProvider) {
       return ''
     }
 
     if (currentProvider.id === 'polly' && pollyHealth) {
       return pollyHealth.connected
-        ? `Connected in ${pollyHealth.region}. Use it for a steady, provider-native read with fast previews and exports.`
+        ? `Connected in ${pollyHealth.region}. Preview or export with a steady provider-native read.`
         : pollyHealth.message
     }
 
-    return currentProvider.description
+    return currentProvider.available ? 'Preview a voice or export a clean listening track.' : 'Configure this provider to use it.'
   })()
   const providerStatusFacts = (() => {
     if (!currentProvider) {
@@ -2812,6 +2843,24 @@ export default function App() {
 
     return facts
   })()
+  const visibleProviderFacts = providerStatusFacts.slice(0, 3)
+  const supportsDirectedStyle = form.provider === 'google' || form.provider === 'qwen'
+  const selectedVoiceMeta = (() => {
+    if (!selectedVoice) {
+      return ''
+    }
+
+    return [selectedVoice.style, voiceGenderLabel(selectedVoice), ...(selectedVoice.tags ?? [])].filter(Boolean).join(' • ')
+  })()
+  function providerTabLabel(provider: ProviderCatalog) {
+    if (provider.id === 'google') {
+      return 'Gemini'
+    }
+    if (provider.id === 'polly') {
+      return 'Polly'
+    }
+    return provider.name.replace(/\s+TTS$/i, '')
+  }
   const currentProgress = selectedBook ? readingProgress[selectedBook.id] : null
   const readerFileLabel = selectedBook?.fileName.replace(/\.pdf$/i, '') ?? ''
   const readingProgressLabel = currentProgress
@@ -2942,7 +2991,7 @@ export default function App() {
           <p className="eyebrow">Narration</p>
           <h2>Audio</h2>
           <p className="narration-panel__summary">
-            Choose a voice, test it, or generate a clean listening track for this book.
+            Choose a voice and make a clean listening track for this book.
           </p>
         </div>
         <div className="narration-panel__header-actions">
@@ -2970,46 +3019,37 @@ export default function App() {
             onClick={() => setProvider(provider.id)}
             type="button"
           >
-            <strong>{provider.name}</strong>
-            <span>
-              {provider.available ? 'Ready' : provider.id === 'polly' ? 'Setup AWS' : 'Needs key'}
+            <strong>{providerTabLabel(provider)}</strong>
+            <span className={`provider-toggle__state ${provider.available ? 'provider-toggle__state--ready' : ''}`}>
+              {provider.available ? 'Ready' : 'Setup'}
             </span>
           </button>
         ))}
       </div>
 
       {currentProvider ? (
-        <div
-          className={`provider-brief ${
-            currentProvider.available ? 'provider-brief--ready' : 'provider-brief--muted'
-          }`}
-        >
-          <div className="provider-brief__copy">
-            <p className="eyebrow">Provider</p>
+        <div className={`narration-provider-strip ${currentProvider.available ? 'is-ready' : 'is-muted'}`}>
+          <div className="narration-provider-strip__copy">
             <strong>{providerStatusTitle}</strong>
-            <p>{providerStatusMessage}</p>
+            <p>{providerStatusSummary}</p>
           </div>
-
-          {providerStatusFacts.length ? (
-            <div className="provider-brief__facts">
-              {providerStatusFacts.map((fact) => (
-                <span className="provider-brief__fact" key={fact}>
-                  {fact}
-                </span>
-              ))}
-            </div>
-          ) : null}
-
-          {form.provider === 'polly' ? (
-            <button
-              className="secondary-button secondary-button--compact provider-brief__action"
-              disabled={pollyHealthLoading}
-              onClick={() => void loadPollyHealth()}
-              type="button"
-            >
-              {pollyHealthLoading ? 'Refreshing...' : 'Refresh'}
-            </button>
-          ) : null}
+          <div className="narration-provider-strip__meta">
+            {visibleProviderFacts.map((fact) => (
+              <span className="narration-provider-strip__fact" key={fact}>
+                {fact}
+              </span>
+            ))}
+            {form.provider === 'polly' ? (
+              <button
+                className="text-link narration-provider-strip__action"
+                disabled={pollyHealthLoading}
+                onClick={() => void loadPollyHealth()}
+                type="button"
+              >
+                {pollyHealthLoading ? 'Refreshing...' : 'Refresh'}
+              </button>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -3019,96 +3059,57 @@ export default function App() {
             <div className="voice-picker__title">
               <div className="voice-picker__title-row">
                 <span>Voice</span>
-                <small className="voice-picker__selection">
-                  {selectedVoice?.label || form.voice || 'Select a voice'}
-                </small>
+                {selectedVoice ? <small className="voice-picker__selection">{selectedVoice.label}</small> : null}
               </div>
-              {currentProvider?.voiceMetaNote ? <p className="voice-picker__note">{currentProvider.voiceMetaNote}</p> : null}
+              {selectedVoiceMeta ? <p className="voice-picker__note">{selectedVoiceMeta}</p> : null}
             </div>
           </div>
-        </div>
-
-        <div className="voice-list">
-          {voiceOptions.map((voice) => {
-            const isActive = voice.id === form.voice
-            const isPreviewing = previewingVoiceId === voice.id && testingProvider
-            const genderLabel = voiceGenderLabel(voice)
-
-            return (
-              <div className={`voice-item ${isActive ? 'active' : ''}`} key={voice.id}>
-                <button
-                  className="voice-item__select"
-                  onClick={() => setForm((previous) => ({ ...previous, voice: voice.id }))}
-                  type="button"
+          {voiceOptions.length ? (
+            <div className="voice-picker__chooser">
+              <label className="control-field voice-select-field">
+                <span>Choose voice</span>
+                <select
+                  onChange={(event) =>
+                    setForm((previous) => ({
+                      ...previous,
+                      voice: event.target.value,
+                    }))
+                  }
+                  value={form.voice}
                 >
-                  <strong>{voice.label}</strong>
-                  <small>{voice.style ?? (isActive ? 'Selected' : 'Use this voice')}</small>
-                  {genderLabel || voice.tags?.length ? (
-                    <div className="voice-tags">
-                      {genderLabel ? <span className="voice-tag">{genderLabel}</span> : null}
-                      {voice.tags?.map((tag) => (
-                        <span className="voice-tag" key={tag}>
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
-                </button>
-                <button
-                  className="secondary-button secondary-button--compact voice-item__preview"
-                  disabled={testingProvider && !isPreviewing}
-                  onClick={() => void handleProviderTest(voice.id)}
-                  title={`Play a sample for ${voice.label}`}
-                  type="button"
-                >
-                  {isPreviewing ? 'Playing' : 'Sample'}
-                </button>
-              </div>
-            )
-          })}
-          {!voiceOptions.length ? (
+                  {!selectedVoice ? <option value="">Select a voice</option> : null}
+                  {voiceOptions.map((voice) => (
+                    <option key={voice.id} value={voice.id}>
+                      {voice.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="secondary-button secondary-button--compact voice-picker__test"
+                disabled={testingProvider || submitting || jobBusy || !currentProvider?.available || !voiceOptions.length}
+                onClick={() => void handleProviderTest()}
+                type="button"
+              >
+                {testingProvider ? 'Testing...' : 'Test voice'}
+              </button>
+            </div>
+          ) : (
             <div className="empty-card voice-picker__empty">
               <strong>No voices available</strong>
               <p>Configure this provider first to browse and preview its voices.</p>
             </div>
-          ) : null}
+          )}
         </div>
       </section>
 
       <section className="narration-block">
         <div className="narration-block__heading">
-          <p className="eyebrow">Settings</p>
-          <strong>Playback and export</strong>
+          <p className="eyebrow">Quick setup</p>
+          <strong>Minimal tuning</strong>
         </div>
 
-        <div className="controls-grid controls-grid--compact">
-          {modelOptions.length ? (
-            <label className="control-field">
-              <span>Model</span>
-              <select
-                onChange={(event) =>
-                  setForm((previous) => ({
-                    ...previous,
-                    model: event.target.value,
-                  }))
-                }
-                value={form.model}
-              >
-                {modelOptions.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.label}
-                  </option>
-                ))}
-              </select>
-              {selectedModel ? (
-                <small>
-                  {selectedModel.description}
-                  {selectedModel.storytelling ? ' Storytelling-friendly.' : ''}
-                </small>
-              ) : null}
-            </label>
-          ) : null}
-
+        <div className="controls-grid controls-grid--compact controls-grid--quick">
           <label className="control-field">
             <span>Output</span>
             <select
@@ -3125,12 +3126,10 @@ export default function App() {
               <option value="wav">WAV</option>
             </select>
           </label>
-        </div>
 
-        <div className="tuning-grid">
           <label className="control-field range-field">
             <div className="range-field__header">
-              <span>Speech speed</span>
+              <span>Pace</span>
               <strong>{form.lengthScale.toFixed(2)}x</strong>
             </div>
             <input
@@ -3146,65 +3145,90 @@ export default function App() {
               type="range"
               value={form.lengthScale}
             />
-            <small>Longer phrasing and slower delivery.</small>
-          </label>
-
-          <label className="control-field range-field">
-            <div className="range-field__header">
-              <span>Sentence pause</span>
-              <strong>{form.sentenceSilence.toFixed(2)}s</strong>
-            </div>
-            <input
-              max={1}
-              min={0}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  sentenceSilence: Number(event.target.value),
-                }))
-              }
-              step={0.05}
-              type="range"
-              value={form.sentenceSilence}
-            />
-            <small>Extra breathing room between sentences.</small>
+            <small>Lower is steadier. Higher is quicker.</small>
           </label>
         </div>
 
-        <label className="style-field control-field">
-          <span>Style direction</span>
-          <textarea
-            onChange={(event) =>
-              setForm((previous) => ({
-                ...previous,
-                narrationStyle: event.target.value,
-              }))
-            }
-            rows={3}
-            value={form.narrationStyle}
-          />
-          <small>
-            Gemini and Qwen follow this directly. Polly keeps a simpler provider-native read.
-          </small>
-        </label>
+        <details className="narration-advanced">
+          <summary>More options</summary>
+          <div className="narration-advanced__content">
+            <div className="narration-advanced__grid">
+              {modelOptions.length ? (
+                <label className="control-field">
+                  <span>Model</span>
+                  <select
+                    onChange={(event) =>
+                      setForm((previous) => ({
+                        ...previous,
+                        model: event.target.value,
+                      }))
+                    }
+                    value={form.model}
+                  >
+                    {modelOptions.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedModel ? (
+                    <small>
+                      {selectedModel.description}
+                      {selectedModel.storytelling ? ' Storytelling-friendly.' : ''}
+                    </small>
+                  ) : null}
+                </label>
+              ) : null}
+
+              <label className="control-field range-field">
+                <div className="range-field__header">
+                  <span>Sentence pause</span>
+                  <strong>{form.sentenceSilence.toFixed(2)}s</strong>
+                </div>
+                <input
+                  max={1}
+                  min={0}
+                  onChange={(event) =>
+                    setForm((previous) => ({
+                      ...previous,
+                      sentenceSilence: Number(event.target.value),
+                    }))
+                  }
+                  step={0.05}
+                  type="range"
+                  value={form.sentenceSilence}
+                />
+                <small>Extra breathing room between sentences.</small>
+              </label>
+            </div>
+
+            {supportsDirectedStyle ? (
+              <label className="style-field control-field style-field--compact">
+                <span>Direction</span>
+                <textarea
+                  onChange={(event) =>
+                    setForm((previous) => ({
+                      ...previous,
+                      narrationStyle: event.target.value,
+                    }))
+                  }
+                  rows={2}
+                  value={form.narrationStyle}
+                />
+                <small>Used directly by Gemini and Qwen.</small>
+              </label>
+            ) : null}
+          </div>
+        </details>
       </section>
 
       <section className="narration-block narration-block--actions">
         <div className="narration-block__heading">
           <p className="eyebrow">Actions</p>
-          <strong>Preview before you export</strong>
+          <strong>Play or export</strong>
         </div>
 
         <div className="action-row">
-          <button
-            className="secondary-button"
-            disabled={testingProvider || submitting || jobBusy || !currentProvider?.available || !voiceOptions.length}
-            onClick={() => void handleProviderTest()}
-            type="button"
-          >
-            {testingProvider ? 'Testing...' : 'Preview voice'}
-          </button>
-
           <button
             className="secondary-button"
             disabled={!liveReadAvailable || testingProvider || submitting || jobBusy}
@@ -3215,7 +3239,7 @@ export default function App() {
           </button>
 
           <button
-            className="primary-button action-row__primary"
+            className="primary-button"
             disabled={
               !selectedBook ||
               submitting ||
@@ -3233,7 +3257,7 @@ export default function App() {
       </section>
 
       {providerSample ? (
-        <div className="audio-card">
+        <div className="audio-card audio-card--compact">
           <div className="audio-card__header">
             <div>
               <p className="eyebrow">Voice preview</p>
@@ -3243,16 +3267,12 @@ export default function App() {
               {providerSample.model ? <small>{providerSample.model}</small> : null}
             </div>
           </div>
-          <p className="sample-text">{providerSample.sampleText}</p>
           <audio autoPlay controls preload="metadata" src={providerSample.audioUrl} />
-          <a className="text-link" href={providerSample.audioUrl}>
-            Open sample audio
-          </a>
         </div>
       ) : null}
 
       {selectedBook?.latestAudio ? (
-        <div className="audio-card">
+        <div className="audio-card audio-card--compact">
           <div className="audio-card__header">
             <div>
               <p className="eyebrow">Latest export</p>
