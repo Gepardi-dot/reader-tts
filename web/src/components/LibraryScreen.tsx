@@ -135,6 +135,7 @@ function suggestedTitleFromFileName(fileName: string) {
 export function LibraryScreen({
   books,
   readingProgress,
+  loading,
   uploading,
   deletingBookId,
   statusMessage,
@@ -215,6 +216,7 @@ export function LibraryScreen({
     Number(audioState !== 'all') +
     Number(recentOnly)
   const activeStatusMessage = uploading ? statusMessage : ''
+  const showColdStartState = loading && !books.length && !sortedEntries.length && !errorMessage
 
   function clearDiscovery() {
     setSearchQuery('')
@@ -363,9 +365,21 @@ export function LibraryScreen({
           </div>
         ) : (
           <div className="library-section__empty">
-            <strong>{books.length ? 'No books match the current view.' : 'No books on the shelf yet.'}</strong>
-            <p>{books.length ? 'Clear the search or filters to see more books.' : 'Upload a PDF to start building your library.'}</p>
-            {books.length && hasActiveFilters ? (
+            <strong>
+              {showColdStartState
+                ? 'Waking up your library…'
+                : books.length
+                  ? 'No books match the current view.'
+                  : 'No books on the shelf yet.'}
+            </strong>
+            <p>
+              {showColdStartState
+                ? 'The hosted app can take a few seconds on a cold start. Your shelf will appear automatically as soon as the reader API responds.'
+                : books.length
+                  ? 'Clear the search or filters to see more books.'
+                  : 'Upload a PDF to start building your library.'}
+            </p>
+            {books.length && hasActiveFilters && !showColdStartState ? (
               <button className="secondary-button secondary-button--compact" onClick={clearDiscovery} type="button">
                 Clear search and filters
               </button>

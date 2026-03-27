@@ -59,6 +59,11 @@ type StoredSession = {
   readerTabs: Record<string, ReaderTab>
 }
 
+type StoredLibrarySnapshot = {
+  books: Book[]
+  providers: ProviderCatalog[]
+}
+
 type StoredUiPreferences = {
   readerForm: ReaderForm
   providerDefaults: Partial<Record<AudioControlProviderId, ProviderFormDefaults>>
@@ -141,6 +146,7 @@ const READING_PROGRESS_KEY = 'storybook-reader-progress'
 const SESSION_STATE_KEY = 'storybook-reader-session'
 const AUDIO_PROGRESS_KEY = 'storybook-audio-progress'
 const UI_PREFERENCES_KEY = 'storybook-ui-preferences'
+const LIBRARY_SNAPSHOT_KEY = 'storybook-library-snapshot'
 const LIVE_PREFETCH_PAGES = 2
 const AUDIO_PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2] as const
 
@@ -416,6 +422,34 @@ function readStoredAudioProgress(): Record<string, StoredAudioProgress> {
     return JSON.parse(raw) as Record<string, StoredAudioProgress>
   } catch {
     return {}
+  }
+}
+
+function readStoredLibrarySnapshot(): StoredLibrarySnapshot {
+  const fallback: StoredLibrarySnapshot = {
+    books: [],
+    providers: [],
+  }
+
+  if (typeof window === 'undefined') {
+    return fallback
+  }
+
+  try {
+    const raw = window.localStorage.getItem(LIBRARY_SNAPSHOT_KEY)
+    if (!raw) {
+      return fallback
+    }
+
+    const parsed = JSON.parse(raw) as Partial<StoredLibrarySnapshot>
+    return {
+      books: Array.isArray(parsed.books) ? (parsed.books as Book[]) : [],
+      providers: Array.isArray(parsed.providers)
+        ? filterAudioControlProviders(parsed.providers as ProviderCatalog[])
+        : [],
+    }
+  } catch {
+    return fallback
   }
 }
 
@@ -864,8 +898,8 @@ function voiceGenderLabel(voice: VoiceOption) {
 }
 
 export default function App() {
-  const [books, setBooks] = useState<Book[]>([])
-  const [providers, setProviders] = useState<ProviderCatalog[]>([])
+  const [books, setBooks] = useState<Book[]>(() => readStoredLibrarySnapshot().books)
+  const [providers, setProviders] = useState<ProviderCatalog[]>(() => readStoredLibrarySnapshot().providers)
   const [route, setRoute] = useState<AppRoute>(() => readInitialRoute(window.location.pathname))
   const [readerTabs, setReaderTabs] = useState<Record<string, ReaderTab>>(() => readStoredSession().readerTabs)
   const [readingProgress, setReadingProgress] = useState<Record<string, ReadingProgress>>(() =>
@@ -1628,6 +1662,13 @@ export default function App() {
       readerTabs,
     } satisfies StoredSession)
   }, [readerTabs, route])
+
+  useEffect(() => {
+    writeStoredValue(LIBRARY_SNAPSHOT_KEY, {
+      books,
+      providers,
+    } satisfies StoredLibrarySnapshot)
+  }, [books, providers])
 
   useEffect(() => {
     if (!isAudioControlProviderId(form.provider)) {

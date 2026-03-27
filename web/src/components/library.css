@@ -563,6 +563,14 @@
   background: linear-gradient(180deg, rgba(248, 243, 233, 0.94), rgba(255, 252, 246, 0.98));
 }
 
+.library-section__empty--loading {
+  border-style: solid;
+  border-color: rgba(88, 102, 24, 0.18);
+  background:
+    linear-gradient(180deg, rgba(248, 243, 233, 0.98), rgba(255, 252, 246, 0.99)),
+    radial-gradient(circle at top left, rgba(136, 154, 53, 0.08), transparent 46%);
+}
+
 .library-section__empty strong {
   color: var(--ink-strong);
   font-size: 1.1rem;
