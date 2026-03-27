@@ -1077,6 +1077,14 @@ def create_book_storage_client():
     return create_aws_client("s3", region_name=BOOK_STORAGE_REGION)
 
 
+def regional_book_storage_upload_url() -> str:
+    if not BOOK_STORAGE_BUCKET:
+        raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
+    if not BOOK_STORAGE_REGION or BOOK_STORAGE_REGION == "us-east-1":
+        return f"https://{BOOK_STORAGE_BUCKET}.s3.amazonaws.com/"
+    return f"https://{BOOK_STORAGE_BUCKET}.s3.{BOOK_STORAGE_REGION}.amazonaws.com/"
+
+
 def gender_label(value: str | None) -> str:
     if not value:
         return "Voice"
@@ -2060,7 +2068,7 @@ def create_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str,
     return {
         "bookId": book_id,
         "upload": {
-            "url": upload["url"],
+            "url": regional_book_storage_upload_url(),
             "fields": upload["fields"],
         },
     }
