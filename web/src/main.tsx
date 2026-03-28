@@ -53,6 +53,65 @@ type StartupFallbackProps = {
   error: unknown
 }
 
+function StartupLoading() {
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'grid',
+        placeItems: 'center',
+        padding: '24px',
+        background:
+          'radial-gradient(circle at top, rgba(225, 214, 178, 0.26), transparent 48%), #f6f1e3',
+        color: '#152129',
+      }}
+    >
+      <div
+        style={{
+          width: 'min(100%, 560px)',
+          borderRadius: '28px',
+          border: '1px solid rgba(24, 32, 36, 0.08)',
+          background: 'rgba(255, 251, 242, 0.94)',
+          boxShadow: '0 28px 60px rgba(34, 45, 49, 0.12)',
+          padding: '32px',
+        }}
+      >
+        <p
+          style={{
+            margin: 0,
+            fontSize: '0.76rem',
+            letterSpacing: '0.32em',
+            textTransform: 'uppercase',
+            color: 'rgba(21, 33, 41, 0.64)',
+          }}
+        >
+          Storybook Reader
+        </p>
+        <h1
+          style={{
+            margin: '14px 0 10px',
+            fontSize: 'clamp(2rem, 6vw, 3rem)',
+            lineHeight: 1,
+            fontWeight: 600,
+          }}
+        >
+          Opening your library.
+        </h1>
+        <p
+          style={{
+            margin: 0,
+            fontSize: '1rem',
+            lineHeight: 1.6,
+            color: 'rgba(21, 33, 41, 0.72)',
+          }}
+        >
+          Loading the reader shell and reconnecting to the hosted API.
+        </p>
+      </div>
+    </div>
+  )
+}
+
 function StartupFallback({ error }: StartupFallbackProps) {
   const detail = formatBootstrapError(error)
 
@@ -217,6 +276,8 @@ class StartupBoundary extends Component<StartupBoundaryProps, StartupBoundarySta
 }
 
 async function bootstrap() {
+  root.render(<StartupLoading />)
+
   try {
     const { default: App } = await import('./App.tsx')
 
