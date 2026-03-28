@@ -1047,7 +1047,7 @@ export function ReaderDesk({
                 Dictionary
               </button>
               <button onClick={openDefinitionWindow} type="button">
-                Define
+                Google
               </button>
             </div>
             <div className="selection-menu__swatches">
@@ -1172,24 +1172,6 @@ export function ReaderDesk({
                   </div>
                 ) : null}
 
-                {dictionaryResult.relatedTerms.length ? (
-                  <section className="dictionary-sheet__related">
-                    <div className="dictionary-sheet__section-label">Related words</div>
-                    <div className="dictionary-sheet__chips">
-                      {dictionaryResult.relatedTerms.map((relatedTerm) => (
-                        <button
-                          className="dictionary-sheet__chip"
-                          key={relatedTerm}
-                          onClick={() => void loadDictionaryTerm(relatedTerm)}
-                          type="button"
-                        >
-                          {relatedTerm}
-                        </button>
-                      ))}
-                    </div>
-                  </section>
-                ) : null}
-
                 {dictionaryResult.entries.map((entry, index) => (
                   <article className="dictionary-entry" key={`${dictionaryResult.normalizedTerm}-${index}`}>
                     <div className="dictionary-entry__header">
@@ -1225,6 +1207,24 @@ export function ReaderDesk({
                     {entry.notes ? <p className="dictionary-entry__notes">{entry.notes}</p> : null}
                   </article>
                 ))}
+
+                {dictionaryResult.relatedTerms.length ? (
+                  <section className="dictionary-sheet__related">
+                    <div className="dictionary-sheet__section-label">Related words</div>
+                    <div className="dictionary-sheet__chips">
+                      {dictionaryResult.relatedTerms.map((relatedTerm) => (
+                        <button
+                          className="dictionary-sheet__chip"
+                          key={relatedTerm}
+                          onClick={() => void loadDictionaryTerm(relatedTerm)}
+                          type="button"
+                        >
+                          {relatedTerm}
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
               </div>
             ) : (
               <div className="dictionary-sheet__state">

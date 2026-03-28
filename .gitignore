@@ -15,6 +15,7 @@ server/__pycache__/
 .env
 *.log
 *.err.log
+tmp-*.txt
 
 .vercel
 public/
