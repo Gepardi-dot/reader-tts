@@ -640,12 +640,8 @@ export function ReaderDesk({
     setDictionaryError(null)
   }
 
-  async function openDictionarySheet() {
-    if (!draft) {
-      return
-    }
-
-    const term = normalizeDictionaryLookupTerm(draft.text)
+  async function loadDictionaryTerm(rawTerm: string) {
+    const term = normalizeDictionaryLookupTerm(rawTerm)
     if (!term) {
       return
     }
@@ -674,6 +670,16 @@ export function ReaderDesk({
     } finally {
       setDictionaryLoading(false)
     }
+  }
+
+  async function openDictionarySheet() {
+    if (!draft) {
+      return
+    }
+
+    const selectedTerm = draft.text
+    clearSelection()
+    await loadDictionaryTerm(selectedTerm)
   }
 
   function applyDraftFromRange(page: ReaderPage, container: HTMLDivElement, range: Range) {
@@ -1013,31 +1019,37 @@ export function ReaderDesk({
           ref={menuRef}
           style={{ left: menuPosition.left, top: menuPosition.top }}
         >
-          <div className="selection-menu__label">{draft.text}</div>
-          <div className="selection-menu__actions">
-            <button
-              disabled={!canPlayFromSelection || playingSelection}
-              onClick={() => void playFromSelection()}
-              title={canPlayFromSelection ? 'Start playback from this selection' : 'Set up a ready voice in Audio controls first'}
-              type="button"
-            >
-              {canPlayFromSelection ? (playingSelection ? 'Starting...' : 'Play here') : 'Live not ready'}
-            </button>
-            <button onClick={() => void copySelection()} type="button">
-              Copy
-            </button>
-            <button onClick={() => setNoteOpen((current) => !current)} type="button">
-              {noteOpen ? 'Close note' : 'Note'}
-            </button>
-            <button onClick={() => void openDictionarySheet()} type="button">
-              Dictionary
-            </button>
-            <button onClick={openDefinitionWindow} type="button">
-              Define
-            </button>
-          </div>
-          <div className="selection-menu__highlight-row">
-            <span>Highlight</span>
+          <div className="selection-menu__toolbar">
+            <div className="selection-menu__label" title={draft.text}>
+              {draft.text}
+            </div>
+            <div className="selection-menu__actions">
+              <button
+                disabled={!canPlayFromSelection || playingSelection}
+                onClick={() => void playFromSelection()}
+                title={canPlayFromSelection ? 'Start playback from this selection' : 'Set up a ready voice in Audio controls first'}
+                type="button"
+              >
+                {playingSelection ? 'Starting...' : 'Play'}
+              </button>
+              <button onClick={() => void copySelection()} type="button">
+                Copy
+              </button>
+              <button
+                aria-pressed={noteOpen}
+                className={noteOpen ? 'is-active' : ''}
+                onClick={() => setNoteOpen((current) => !current)}
+                type="button"
+              >
+                Note
+              </button>
+              <button onClick={() => void openDictionarySheet()} type="button">
+                Dictionary
+              </button>
+              <button onClick={openDefinitionWindow} type="button">
+                Define
+              </button>
+            </div>
             <div className="selection-menu__swatches">
               <button
                 aria-label="Highlight in amber"
@@ -1144,7 +1156,7 @@ export function ReaderDesk({
             {dictionaryLoading && !dictionaryResult ? (
               <div className="dictionary-sheet__state">
                 <strong>Looking up “{dictionaryTerm}”...</strong>
-                <p>Searching the local dictionary index.</p>
+                <p>Searching the local offline dictionary.</p>
               </div>
             ) : dictionaryError ? (
               <div className="dictionary-sheet__state dictionary-sheet__state--error">
@@ -1153,13 +1165,56 @@ export function ReaderDesk({
               </div>
             ) : dictionaryResult?.entries.length ? (
               <div className="dictionary-sheet__body">
+                {dictionaryResult.matchNote ? (
+                  <div className="dictionary-sheet__match-note">
+                    <strong>Matched headword</strong>
+                    <p>{dictionaryResult.matchNote}</p>
+                  </div>
+                ) : null}
+
+                {dictionaryResult.relatedTerms.length ? (
+                  <section className="dictionary-sheet__related">
+                    <div className="dictionary-sheet__section-label">Related words</div>
+                    <div className="dictionary-sheet__chips">
+                      {dictionaryResult.relatedTerms.map((relatedTerm) => (
+                        <button
+                          className="dictionary-sheet__chip"
+                          key={relatedTerm}
+                          onClick={() => void loadDictionaryTerm(relatedTerm)}
+                          type="button"
+                        >
+                          {relatedTerm}
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+
                 {dictionaryResult.entries.map((entry, index) => (
                   <article className="dictionary-entry" key={`${dictionaryResult.normalizedTerm}-${index}`}>
                     <div className="dictionary-entry__header">
+                      <span className="dictionary-entry__index">{index + 1}</span>
                       {entry.partOfSpeech ? <span className="dictionary-entry__pos">{entry.partOfSpeech}</span> : null}
                       {entry.registerLabel ? <span className="dictionary-entry__register">{entry.registerLabel}</span> : null}
                     </div>
                     <p className="dictionary-entry__definition">{entry.definition}</p>
+                    {entry.synonyms.length ? (
+                      <div className="dictionary-entry__synonyms">
+                        <span>Synonyms</span>
+                        <div className="dictionary-sheet__chips dictionary-sheet__chips--inline">
+                          {entry.synonyms.map((synonym) => (
+                            <button
+                              className="dictionary-sheet__chip dictionary-sheet__chip--soft"
+                              key={`${index}-${synonym}`}
+                              onClick={() => void loadDictionaryTerm(synonym)}
+                              type="button"
+                            >
+                              {synonym}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                     {entry.examples.length ? (
                       <ul className="dictionary-entry__examples">
                         {entry.examples.map((example, exampleIndex) => (
@@ -1176,8 +1231,8 @@ export function ReaderDesk({
                 <strong>{dictionaryResult?.message || 'No definition found yet.'}</strong>
                 <p>
                   {dictionaryResult?.available
-                    ? 'The offline database is installed, but this term was not found in the current index.'
-                    : 'The popup is ready. Once we import the Samsung dictionary data for your private install, this will work fully offline.'}
+                    ? 'The offline dictionary is installed, but this term was not found in the current local sources.'
+                    : 'The offline dictionary is not available on this device yet.'}
                 </p>
               </div>
             )}

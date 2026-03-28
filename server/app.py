@@ -467,6 +467,7 @@ class DictionarySensePayload(BaseModel):
     examples: list[str] = Field(default_factory=list)
     registerLabel: str | None = None
     notes: str | None = None
+    synonyms: list[str] = Field(default_factory=list)
 
 
 class DictionaryLookupPayload(BaseModel):
@@ -477,6 +478,8 @@ class DictionaryLookupPayload(BaseModel):
     source: str | None = None
     pronunciation: str | None = None
     entries: list[DictionarySensePayload] = Field(default_factory=list)
+    matchNote: str | None = None
+    relatedTerms: list[str] = Field(default_factory=list)
     message: str | None = None
 
 
@@ -636,6 +639,8 @@ def default_dictionary_unavailable_payload(term: str) -> dict[str, Any]:
         "source": None,
         "pronunciation": None,
         "entries": [],
+        "matchNote": None,
+        "relatedTerms": [],
         "message": "Offline dictionary data is not installed yet.",
     }
 
@@ -659,6 +664,61 @@ def parse_dictionary_examples(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def clean_dictionary_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def normalize_dictionary_link_term(value: str | None) -> str:
+    return normalize_dictionary_term((value or "").replace("_", " "))
+
+
+def unique_dictionary_terms(values: list[str], *, exclude: set[str] | None = None, limit: int = 8) -> list[str]:
+    excluded = {item.casefold() for item in (exclude or set()) if item}
+    seen: set[str] = set()
+    items: list[str] = []
+
+    for raw_value in values:
+        term = normalize_dictionary_link_term(raw_value)
+        if not term:
+            continue
+        folded = term.casefold()
+        if folded in excluded or folded in seen:
+            continue
+        seen.add(folded)
+        items.append(term)
+        if len(items) >= limit:
+            break
+
+    return items
+
+
+def unique_dictionary_examples(values: list[str], *, limit: int = 3) -> list[str]:
+    seen: set[str] = set()
+    items: list[str] = []
+
+    for raw_value in values:
+        example = clean_dictionary_text(raw_value)
+        if not example:
+            continue
+        folded = example.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        items.append(example)
+        if len(items) >= limit:
+            break
+
+    return items
+
+
+def humanize_wordnet_lexname(value: str | None) -> str | None:
+    if not value:
+        return None
+    _, _, suffix = value.partition(".")
+    label = (suffix or value).replace("_", " ").strip()
+    return label.title() if label else None
 
 
 def fetch_dictionary_rows(term: str) -> list[sqlite3.Row]:
@@ -704,6 +764,8 @@ def build_dictionary_payload(term: str, rows: list[sqlite3.Row]) -> dict[str, An
             "source": None,
             "pronunciation": None,
             "entries": [],
+            "matchNote": None,
+            "relatedTerms": [],
             "message": f"No offline definition found for “{term}”.",
         }
 
@@ -718,6 +780,7 @@ def build_dictionary_payload(term: str, rows: list[sqlite3.Row]) -> dict[str, An
             "examples": parse_dictionary_examples(row["examples_json"] if "examples_json" in row.keys() else None),
             "registerLabel": row["register"] if "register" in row.keys() else None,
             "notes": row["notes"] if "notes" in row.keys() else None,
+            "synonyms": [],
         }
         for row in rows
     ]
@@ -730,6 +793,8 @@ def build_dictionary_payload(term: str, rows: list[sqlite3.Row]) -> dict[str, An
         "source": source,
         "pronunciation": pronunciation,
         "entries": entries,
+        "matchNote": None,
+        "relatedTerms": [],
         "message": None,
     }
 
@@ -918,7 +983,7 @@ def cache_dictionary_entries(lookup_term: str, entries: list[dict[str, Any]]) ->
                 (
                     lookup_term.casefold(),
                     entry["term"],
-                    None,
+                    entry.get("pronunciation"),
                     entry.get("part_of_speech"),
                     entry["definition"],
                     json.dumps(entry.get("examples") or []),
@@ -987,6 +1052,134 @@ def wordnet_part_of_speech(label: str | None) -> str | None:
     return mapping.get(label or "")
 
 
+def resolve_wordnet_synsets(wn: Any, normalized: str) -> tuple[str | None, list[Any]]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(value: str | None) -> None:
+        candidate = clean_dictionary_text((value or "").replace(" ", "_"))
+        if not candidate:
+            return
+        folded = candidate.casefold()
+        if folded in seen:
+            return
+        seen.add(folded)
+        candidates.append(candidate)
+
+    add_candidate(normalized)
+    if " " not in normalized:
+        for pos in ("n", "v", "a", "s", "r"):
+            add_candidate(wn.morphy(normalized, pos))
+
+    for candidate in candidates:
+        synsets = wn.synsets(candidate)
+        if synsets:
+            return candidate, synsets
+    return None, []
+
+
+def rank_wordnet_synset(synset: Any) -> tuple[int, int]:
+    counts = [max(0, int(lemma.count())) for lemma in synset.lemmas()]
+    return (max(counts, default=0), sum(counts))
+
+
+def build_wordnet_payload(wn: Any, term: str) -> dict[str, Any] | None:
+    normalized = normalize_dictionary_term(term)
+    resolved_query, synsets = resolve_wordnet_synsets(wn, normalized)
+    if not synsets:
+        return None
+
+    resolved_term = normalize_dictionary_link_term(resolved_query) or normalized
+    exact = resolved_term.casefold() == normalized.casefold()
+    sorted_synsets = sorted(
+        enumerate(synsets),
+        key=lambda item: (-rank_wordnet_synset(item[1])[0], -rank_wordnet_synset(item[1])[1], item[0]),
+    )
+
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str]] = set()
+    related_candidates: list[str] = []
+
+    for _, synset in sorted_synsets:
+        definition = clean_dictionary_text(synset.definition())
+        if not definition:
+            continue
+
+        part_of_speech = wordnet_part_of_speech(getattr(synset, "pos", lambda: None)())
+        key = (part_of_speech, definition.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        examples = unique_dictionary_examples([example for example in synset.examples()], limit=3)
+        synonyms = unique_dictionary_terms(
+            [lemma.name() for lemma in synset.lemmas()],
+            exclude={normalized, resolved_term},
+            limit=6,
+        )
+
+        for lemma in synset.lemmas():
+            related_candidates.append(lemma.name())
+            for related in lemma.derivationally_related_forms():
+                related_candidates.append(related.name())
+            for similar in lemma.pertainyms():
+                related_candidates.append(similar.name())
+            for antonym in lemma.antonyms():
+                related_candidates.append(antonym.name())
+
+        entries.append(
+            {
+                "term": resolved_term,
+                "pronunciation": None,
+                "part_of_speech": part_of_speech,
+                "definition": definition,
+                "examples": examples,
+                "register": humanize_wordnet_lexname(synset.lexname() if hasattr(synset, "lexname") else None),
+                "notes": None,
+                "synonyms": synonyms,
+                "source": OPEN_WORDNET_SOURCE_LABEL,
+            }
+        )
+        if len(entries) >= 8:
+            break
+
+    if not entries:
+        return None
+
+    related_terms = unique_dictionary_terms(
+        related_candidates,
+        exclude={normalized, resolved_term},
+        limit=10,
+    )
+    match_note = None
+    if not exact:
+        match_note = f"Showing the base form “{resolved_term}” for “{normalized}”."
+
+    return {
+        "term": resolved_term,
+        "normalizedTerm": normalized,
+        "available": True,
+        "exact": exact,
+        "source": OPEN_WORDNET_SOURCE_LABEL,
+        "pronunciation": None,
+        "entries": [
+            {
+                "partOfSpeech": entry.get("part_of_speech"),
+                "definition": entry["definition"],
+                "examples": entry.get("examples") or [],
+                "registerLabel": entry.get("register"),
+                "notes": entry.get("notes"),
+                "synonyms": entry.get("synonyms") or [],
+            }
+            for entry in entries
+        ],
+        "matchNote": match_note,
+        "relatedTerms": related_terms,
+        "message": None,
+        "_cacheEntries": entries,
+    }
+
+
 def lookup_open_wordnet_dictionary(term: str) -> tuple[dict[str, Any] | None, str | None]:
     normalized = normalize_dictionary_term(term)
     wn, availability_error = ensure_open_wordnet_available()
@@ -995,47 +1188,14 @@ def lookup_open_wordnet_dictionary(term: str) -> tuple[dict[str, Any] | None, st
     if wn is None:
         return None, "Open English WordNet is unavailable."
 
-    query = normalized.replace(" ", "_")
-    synsets = wn.synsets(query)
-    if not synsets and " " not in normalized:
-        lemma = wn.morphy(normalized)
-        if lemma:
-            synsets = wn.synsets(lemma)
-    if not synsets:
+    payload = build_wordnet_payload(wn, normalized)
+    if payload is None:
         return None, f"No standalone offline definition found for “{normalized}”."
 
-    entries: list[dict[str, Any]] = []
-    seen: set[tuple[str | None, str]] = set()
-    for synset in synsets:
-        definition = re.sub(r"\s+", " ", synset.definition()).strip()
-        if not definition:
-            continue
-        part_of_speech = wordnet_part_of_speech(getattr(synset, "pos", lambda: None)())
-        key = (part_of_speech, definition.casefold())
-        if key in seen:
-            continue
-        seen.add(key)
-        entries.append(
-            {
-                "term": normalized,
-                "part_of_speech": part_of_speech,
-                "definition": definition,
-                "examples": [re.sub(r"\s+", " ", example).strip() for example in synset.examples() if example.strip()],
-                "register": None,
-                "notes": synset.lexname() if hasattr(synset, "lexname") else None,
-                "source": OPEN_WORDNET_SOURCE_LABEL,
-            }
-        )
-        if len(entries) >= 8:
-            break
-
-    if not entries:
-        return None, f"No standalone offline definition found for “{normalized}”."
-
-    cache_dictionary_entries(normalized, entries)
+    cache_entries = payload.pop("_cacheEntries", [])
+    cache_dictionary_entries(normalized, cache_entries)
     cached_rows = fetch_dictionary_rows(normalized)
     if cached_rows:
-        payload = build_dictionary_payload(normalized, cached_rows)
         payload["message"] = "Fetched from Open English WordNet and cached locally."
         return payload, None
     return None, "Open English WordNet returned data, but the local cache could not be written."
@@ -1113,6 +1273,15 @@ def lookup_offline_dictionary(term: str) -> dict[str, Any]:
 
     rows = fetch_dictionary_rows(normalized)
     if rows:
+        source = rows[0]["source"] if "source" in rows[0].keys() else None
+        if source == OPEN_WORDNET_SOURCE_LABEL:
+            wn, availability_error = ensure_open_wordnet_available()
+            if not availability_error and wn is not None:
+                wordnet_payload = build_wordnet_payload(wn, normalized)
+                if wordnet_payload is not None:
+                    wordnet_payload["message"] = None
+                    wordnet_payload.pop("_cacheEntries", None)
+                    return wordnet_payload
         payload = build_dictionary_payload(normalized, rows)
         payload["message"] = None
         return payload

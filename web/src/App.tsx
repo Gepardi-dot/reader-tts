@@ -3242,7 +3242,11 @@ export default function App() {
           ) : null}
           <div className="reader-screen__topbar">
             <div className="reader-screen__topbar-main">
-              <button className="secondary-button secondary-button--compact" onClick={navigateToLibrary} type="button">
+              <button
+                className="secondary-button secondary-button--compact reader-screen__back-button"
+                onClick={navigateToLibrary}
+                type="button"
+              >
                 Back to Library
               </button>
               {selectedBook ? (

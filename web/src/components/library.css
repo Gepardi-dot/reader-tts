@@ -934,14 +934,98 @@
   }
 
   .library-book-grid {
-    grid-auto-columns: minmax(152px, 62vw);
-    gap: 0.85rem;
-    padding-bottom: 1.4rem;
-    scroll-snap-type: x proximity;
+    grid-auto-flow: row;
+    grid-template-columns: 1fr;
+    grid-auto-columns: auto;
+    align-items: stretch;
+    overflow: visible;
+    gap: 0.95rem;
+    padding: 0;
+    scroll-snap-type: none;
+  }
+
+  .library-book-grid::after {
+    display: none;
   }
 
   .library-book-card {
-    scroll-snap-align: start;
+    display: grid;
+    grid-template-columns: minmax(104px, 30vw) minmax(0, 1fr);
+    gap: 0.85rem;
+    align-items: start;
+    padding: 0.72rem;
+    border: 1px solid rgba(18, 33, 39, 0.08);
+    border-radius: 22px;
+    background:
+      linear-gradient(180deg, rgba(255, 253, 248, 0.96), rgba(244, 238, 227, 0.94)),
+      radial-gradient(circle at top, rgba(255, 255, 255, 0.76), transparent 62%);
+    box-shadow:
+      0 14px 24px rgba(22, 31, 36, 0.05),
+      inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    transform: none;
+    scroll-snap-align: none;
+  }
+
+  .library-book-card:hover,
+  .library-book-card:focus-within {
+    transform: none;
+  }
+
+  .library-book-card__media,
+  .library-book-card__cover {
+    width: 100%;
+  }
+
+  .library-book-card__cover .library-cover {
+    border-radius: 18px;
+  }
+
+  .library-book-card__menu {
+    top: 0.55rem;
+    right: 0.55rem;
+  }
+
+  .library-book-card__menu-toggle {
+    width: 2.05rem;
+    height: 2.05rem;
+  }
+
+  .library-book-card__meta {
+    min-width: 0;
+    gap: 0.38rem;
+    padding: 0;
+  }
+
+  .library-book-card__date {
+    font-size: 0.72rem;
+  }
+
+  .library-book-card__meta h3 {
+    font-size: clamp(1.45rem, 7vw, 1.95rem);
+    line-height: 0.92;
+  }
+
+  .library-book-card__excerpt {
+    -webkit-line-clamp: 3;
+    font-size: 0.92rem;
+  }
+
+  .library-book-card__chips {
+    gap: 0.35rem;
+  }
+
+  .library-book-card__chip {
+    padding: 0.26rem 0.52rem;
+    font-size: 0.7rem;
+  }
+
+  .library-book-card__footer .secondary-button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .library-book-card__progress {
+    font-size: 0.8rem;
   }
 
   .library-book-card__menu-popover,
@@ -1014,7 +1098,17 @@
     max-width: 24ch;
   }
 
-  .library-book-grid {
-    grid-auto-columns: minmax(148px, 74vw);
+  .library-book-card {
+    grid-template-columns: minmax(96px, 31vw) minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.68rem;
+  }
+
+  .library-book-card__meta h3 {
+    font-size: clamp(1.32rem, 8.6vw, 1.8rem);
+  }
+
+  .library-book-card__excerpt {
+    font-size: 0.88rem;
   }
 }

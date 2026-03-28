@@ -43,6 +43,7 @@ export type DictionarySense = {
   examples: string[]
   registerLabel?: string | null
   notes?: string | null
+  synonyms: string[]
 }
 
 export type DictionaryLookupResult = {
@@ -53,6 +54,8 @@ export type DictionaryLookupResult = {
   source?: string | null
   pronunciation?: string | null
   entries: DictionarySense[]
+  matchNote?: string | null
+  relatedTerms: string[]
   message?: string | null
 }
 
