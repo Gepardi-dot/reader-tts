@@ -19,7 +19,6 @@ import type {
   Highlight,
   JobStatus,
   LiveAudioSegment,
-  PollyHealth,
   ProviderCatalog,
   ProviderTestResult,
   ReaderPayload,
@@ -38,7 +37,6 @@ import {
   fetchBookProgress,
   fetchBookReader,
   fetchBooks,
-  fetchPollyHealth,
   fetchProviders,
   testProvider,
   uploadBookDirectToStorage,
@@ -925,8 +923,6 @@ export default function App() {
   const [activeJob, setActiveJob] = useState<JobStatus | null>(null)
   const [testingProvider, setTestingProvider] = useState(false)
   const [providerSample, setProviderSample] = useState<ProviderTestResult | null>(null)
-  const [pollyHealth, setPollyHealth] = useState<PollyHealth | null>(null)
-  const [pollyHealthLoading, setPollyHealthLoading] = useState(false)
   const [readerPayload, setReaderPayload] = useState<ReaderPayload | null>(null)
   const [readerLoading, setReaderLoading] = useState(false)
   const [readerTab, setReaderTab] = useState<ReaderTab>('reader')
@@ -1800,14 +1796,6 @@ export default function App() {
   }, [form.provider, form.voice, form.model, form.narrationStyle, form.lengthScale, form.sentenceSilence])
 
   useEffect(() => {
-    if (form.provider !== 'polly') {
-      return
-    }
-
-    void loadPollyHealth()
-  }, [form.provider])
-
-  useEffect(() => {
     if (!selectedBookId) {
       setReaderPayload(null)
       setChapterNavOpen(false)
@@ -2611,29 +2599,6 @@ export default function App() {
     }
   }
 
-  async function loadPollyHealth() {
-    try {
-      setPollyHealthLoading(true)
-      const payload = await fetchPollyHealth()
-      setPollyHealth(payload)
-    } catch (error) {
-      setPollyHealth({
-        connected: false,
-        region: 'Unknown',
-        engine: 'unknown',
-        languageCode: 'unknown',
-        profile: null,
-        defaultVoice: null,
-        voiceCount: 0,
-        accountId: null,
-        arn: null,
-        message: error instanceof Error ? error.message : 'Failed to load Polly health.',
-      })
-    } finally {
-      setPollyHealthLoading(false)
-    }
-  }
-
   async function handleCreateHighlight(payload: {
     start: number
     end: number
@@ -2785,65 +2750,6 @@ export default function App() {
   const voiceOptions: VoiceOption[] =
     currentProvider ? filterVoicesForModel(currentProvider.voices, selectedModelId) : []
   const selectedVoice = voiceOptions.find((voice) => voice.id === form.voice) ?? null
-  const providerStatusTitle = (() => {
-    if (!currentProvider) {
-      return ''
-    }
-
-    if (currentProvider.id === 'polly' && pollyHealth) {
-      return pollyHealth.connected ? 'Amazon Polly is ready' : 'Amazon Polly needs attention'
-    }
-
-    return currentProvider.available ? `${currentProvider.name} is ready` : `${currentProvider.name} needs setup`
-  })()
-  const providerStatusSummary = (() => {
-    if (!currentProvider) {
-      return ''
-    }
-
-    if (currentProvider.id === 'polly' && pollyHealth) {
-      return pollyHealth.connected
-        ? `Connected in ${pollyHealth.region}. Preview or export with a steady provider-native read.`
-        : pollyHealth.message
-    }
-
-    return currentProvider.available ? 'Preview a voice or export a clean listening track.' : 'Configure this provider to use it.'
-  })()
-  const providerStatusFacts = (() => {
-    if (!currentProvider) {
-      return []
-    }
-
-    const facts: string[] = []
-
-    if (currentProvider.id === 'polly' && pollyHealth) {
-      if (selectedVoice?.label) {
-        facts.push(selectedVoice.label)
-      } else if (pollyHealth.defaultVoice) {
-        facts.push(`Default ${pollyHealth.defaultVoice}`)
-      }
-
-      facts.push(`${pollyHealth.voiceCount} voices`)
-      facts.push(pollyHealth.engine)
-      facts.push(pollyHealth.region)
-      return facts
-    }
-
-    if (selectedVoice?.label) {
-      facts.push(selectedVoice.label)
-    }
-
-    if (selectedModel?.label) {
-      facts.push(selectedModel.label)
-    }
-
-    if (selectedModel?.storytelling) {
-      facts.push('Storytelling-ready')
-    }
-
-    return facts
-  })()
-  const visibleProviderFacts = providerStatusFacts.slice(0, 3)
   const supportsDirectedStyle = form.provider === 'google' || form.provider === 'qwen'
   const selectedVoiceMeta = (() => {
     if (!selectedVoice) {
@@ -2990,23 +2896,16 @@ export default function App() {
         <div className="narration-panel__intro">
           <p className="eyebrow">Narration</p>
           <h2>Audio</h2>
-          <p className="narration-panel__summary">
-            Choose a voice and make a clean listening track for this book.
-          </p>
+          <p className="narration-panel__summary">Pick a voice and generate clean audio.</p>
         </div>
         <div className="narration-panel__header-actions">
-          {currentProvider ? (
-            <span className={`badge ${currentProvider.available ? 'ok' : 'muted'}`}>
-              {currentProvider.available ? 'Ready' : 'Needs setup'}
-            </span>
-          ) : null}
           <button
             aria-label="Close narration controls"
             className="secondary-button secondary-button--compact narration-panel__close"
             onClick={() => setNarrationOpen(false)}
             type="button"
           >
-            Close
+            Done
           </button>
         </div>
       </div>
@@ -3014,44 +2913,27 @@ export default function App() {
       <div className="provider-toggle" role="tablist" aria-label="Voice providers">
         {providers.map((provider) => (
           <button
+            aria-selected={provider.id === form.provider}
             className={provider.id === form.provider ? 'active' : ''}
             key={provider.id}
             onClick={() => setProvider(provider.id)}
             type="button"
           >
             <strong>{providerTabLabel(provider)}</strong>
-            <span className={`provider-toggle__state ${provider.available ? 'provider-toggle__state--ready' : ''}`}>
-              {provider.available ? 'Ready' : 'Setup'}
+            <span
+              className={[
+                'provider-toggle__state',
+                provider.id === form.provider ? 'provider-toggle__state--active' : '',
+                provider.available ? 'provider-toggle__state--ready' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+            >
+              {provider.id === form.provider ? 'Selected' : provider.available ? 'Ready' : 'Setup'}
             </span>
           </button>
         ))}
       </div>
-
-      {currentProvider ? (
-        <div className={`narration-provider-strip ${currentProvider.available ? 'is-ready' : 'is-muted'}`}>
-          <div className="narration-provider-strip__copy">
-            <strong>{providerStatusTitle}</strong>
-            <p>{providerStatusSummary}</p>
-          </div>
-          <div className="narration-provider-strip__meta">
-            {visibleProviderFacts.map((fact) => (
-              <span className="narration-provider-strip__fact" key={fact}>
-                {fact}
-              </span>
-            ))}
-            {form.provider === 'polly' ? (
-              <button
-                className="text-link narration-provider-strip__action"
-                disabled={pollyHealthLoading}
-                onClick={() => void loadPollyHealth()}
-                type="button"
-              >
-                {pollyHealthLoading ? 'Refreshing...' : 'Refresh'}
-              </button>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
 
       <section className="narration-block">
         <div className="voice-picker">
@@ -3067,7 +2949,7 @@ export default function App() {
           {voiceOptions.length ? (
             <div className="voice-picker__chooser">
               <label className="control-field voice-select-field">
-                <span>Choose voice</span>
+                <span>Voice</span>
                 <select
                   onChange={(event) =>
                     setForm((previous) => ({
@@ -3091,7 +2973,7 @@ export default function App() {
                 onClick={() => void handleProviderTest()}
                 type="button"
               >
-                {testingProvider ? 'Testing...' : 'Test voice'}
+                {testingProvider ? 'Testing...' : 'Test'}
               </button>
             </div>
           ) : (
@@ -3150,7 +3032,7 @@ export default function App() {
         </div>
 
         <details className="narration-advanced">
-          <summary>More options</summary>
+          <summary>More</summary>
           <div className="narration-advanced__content">
             <div className="narration-advanced__grid">
               {modelOptions.length ? (
@@ -3225,7 +3107,7 @@ export default function App() {
       <section className="narration-block narration-block--actions">
         <div className="narration-block__heading">
           <p className="eyebrow">Actions</p>
-          <strong>Play or export</strong>
+          <strong>Listen or export</strong>
         </div>
 
         <div className="action-row">
@@ -3235,7 +3117,7 @@ export default function App() {
             onClick={() => void handleStartLiveReadCurrentPage()}
             type="button"
           >
-            {liveAudioLoading && liveAudioMode === 'page' ? 'Starting...' : 'Read current page'}
+            {liveAudioLoading && liveAudioMode === 'page' ? 'Starting...' : 'Read page'}
           </button>
 
           <button
@@ -3251,7 +3133,7 @@ export default function App() {
             onClick={() => void handleGenerate()}
             type="button"
           >
-            {submitting ? 'Starting...' : 'Generate audiobook'}
+            {submitting ? 'Starting...' : 'Generate'}
           </button>
         </div>
       </section>
@@ -3275,7 +3157,7 @@ export default function App() {
         <div className="audio-card audio-card--compact">
           <div className="audio-card__header">
             <div>
-              <p className="eyebrow">Latest export</p>
+              <p className="eyebrow">Latest audio</p>
               <strong>
                 {selectedBook.latestAudio.provider} • {selectedBook.latestAudio.format}
               </strong>
@@ -3285,15 +3167,10 @@ export default function App() {
           </div>
           <audio controls preload="metadata" src={selectedBook.latestAudio.url} />
           <a className="text-link" href={selectedBook.latestAudio.url}>
-            Open audio file
+            Open file
           </a>
         </div>
-      ) : (
-        <div className="empty-card">
-          <strong>No audio yet</strong>
-          <p>The generated track will appear here with a built-in player.</p>
-        </div>
-      )}
+      ) : null}
 
       {activeJob ? (
         <div className={`job-card ${activeJob.status}`}>

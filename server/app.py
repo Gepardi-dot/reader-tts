@@ -6,11 +6,15 @@ import json
 import os
 import re
 import shutil
+import sqlite3
+import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 import wave
+import xml.etree.ElementTree as ET
 from base64 import b64decode
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -71,6 +75,8 @@ for env_name in (
     "BOOK_STORAGE_BUCKET",
     "BOOK_STORAGE_PREFIX",
     "BOOK_STORAGE_REGION",
+    "ADB_EXE",
+    "SAMSUNG_DICTIONARY_DEVICE_ID",
 ):
     if env_name in os.environ and env_value(env_name) is None:
         os.environ.pop(env_name, None)
@@ -117,6 +123,14 @@ BOOK_STORAGE_PREFIX = (env_value("BOOK_STORAGE_PREFIX") or "storybook-reader").s
 BOOK_STORAGE_REGION = env_value("BOOK_STORAGE_REGION") or env_value("AWS_REGION") or env_value("AWS_DEFAULT_REGION")
 BOOK_STORAGE_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 BOOK_TITLE_MAX_LENGTH = 180
+OFFLINE_DICTIONARY_DB = Path(env_value("OFFLINE_DICTIONARY_DB") or str(ROOT / "dictionary" / "offline" / "dictionary.sqlite3"))
+OPEN_WORDNET_DATA_DIR = ROOT / "dictionary" / "open-wordnet"
+SAMSUNG_DICTIONARY_PACKAGE = "com.diotek.sec.lookup.dictionary"
+SAMSUNG_DICTIONARY_BRIDGE_LABEL = "Samsung Dictionary · Collins English"
+OPEN_WORDNET_SOURCE_LABEL = "Open English WordNet"
+SAMSUNG_DICTIONARY_DEVICE_ID = env_value("SAMSUNG_DICTIONARY_DEVICE_ID")
+_samsung_dictionary_bridge_lock = threading.Lock()
+_wordnet_download_lock = threading.Lock()
 
 
 def voice_option(
@@ -447,6 +461,25 @@ class DirectBookUploadCompleteRequest(BaseModel):
     title: str | None = Field(default=None, max_length=BOOK_TITLE_MAX_LENGTH)
 
 
+class DictionarySensePayload(BaseModel):
+    partOfSpeech: str | None = None
+    definition: str
+    examples: list[str] = Field(default_factory=list)
+    registerLabel: str | None = None
+    notes: str | None = None
+
+
+class DictionaryLookupPayload(BaseModel):
+    term: str
+    normalizedTerm: str
+    available: bool
+    exact: bool
+    source: str | None = None
+    pronunciation: str | None = None
+    entries: list[DictionarySensePayload] = Field(default_factory=list)
+    message: str | None = None
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -465,6 +498,648 @@ def resolve_book_title(title: str | None, file_name: str) -> str:
             detail=f"Book titles must be {BOOK_TITLE_MAX_LENGTH} characters or fewer.",
         )
     return normalized
+
+
+def normalize_dictionary_term(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value).strip()
+    normalized = normalized.strip(" \t\r\n\"“”'‘’.,;:!?()[]{}")
+    return normalized[:120]
+
+
+def normalize_samsung_ui_term(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value or "")
+    text = "".join(character for character in text if not unicodedata.combining(character))
+    text = text.replace("′", "'")
+    text = re.sub(r"[^A-Za-z0-9\s\-']", "", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def parse_android_bounds(value: str) -> tuple[int, int, int, int] | None:
+    match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", value.strip())
+    if not match:
+        return None
+    left, top, right, bottom = (int(part) for part in match.groups())
+    return left, top, right, bottom
+
+
+def center_of_bounds(value: str) -> tuple[int, int] | None:
+    bounds = parse_android_bounds(value)
+    if bounds is None:
+        return None
+    left, top, right, bottom = bounds
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def resolve_adb_executable() -> Path | None:
+    candidates: list[Path] = []
+    explicit = env_value("ADB_EXE")
+    if explicit:
+        candidates.append(Path(explicit))
+    which = shutil.which("adb")
+    if which:
+        candidates.append(Path(which))
+    winget_root = Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
+    candidates.extend(sorted(winget_root.glob("Google.PlatformTools*/platform-tools/adb.exe"), reverse=True))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            return resolved
+    return None
+
+
+def run_adb_command(
+    adb_executable: Path,
+    *args: str,
+    device_id: str | None = None,
+    timeout: float = 20,
+    check: bool = True,
+) -> str:
+    command = [str(adb_executable)]
+    if device_id:
+        command.extend(["-s", device_id])
+    command.extend(args)
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        timeout=timeout,
+        check=False,
+    )
+    if check and completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        stdout = completed.stdout.strip()
+        raise RuntimeError(stderr or stdout or f"adb exited with status {completed.returncode}.")
+    return completed.stdout
+
+
+def resolve_samsung_dictionary_device_id(adb_executable: Path) -> str | None:
+    run_adb_command(adb_executable, "start-server", timeout=15, check=False)
+    output = run_adb_command(adb_executable, "devices", timeout=15)
+    device_ids: list[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith("List of devices attached"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            device_ids.append(parts[0])
+    if SAMSUNG_DICTIONARY_DEVICE_ID:
+        return SAMSUNG_DICTIONARY_DEVICE_ID if SAMSUNG_DICTIONARY_DEVICE_ID in device_ids else None
+    if len(device_ids) == 1:
+        return device_ids[0]
+    return None
+
+
+def dictionary_db_schema_sql() -> str:
+    return """
+        create table if not exists entries (
+            lookup_term text not null,
+            term text not null,
+            pronunciation text,
+            part_of_speech text,
+            definition text not null,
+            examples_json text,
+            register text,
+            notes text,
+            source text,
+            priority integer not null default 0
+        );
+        create index if not exists idx_entries_lookup_term on entries (lookup_term);
+    """
+
+
+def ensure_dictionary_db_schema() -> None:
+    OFFLINE_DICTIONARY_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(OFFLINE_DICTIONARY_DB) as conn:
+        conn.executescript(dictionary_db_schema_sql())
+        conn.commit()
+
+
+def dictionary_db_available() -> bool:
+    return OFFLINE_DICTIONARY_DB.exists() and OFFLINE_DICTIONARY_DB.is_file()
+
+
+def default_dictionary_unavailable_payload(term: str) -> dict[str, Any]:
+    normalized = normalize_dictionary_term(term)
+    return {
+        "term": term,
+        "normalizedTerm": normalized,
+        "available": False,
+        "exact": False,
+        "source": None,
+        "pronunciation": None,
+        "entries": [],
+        "message": "Offline dictionary data is not installed yet.",
+    }
+
+
+def parse_dictionary_examples(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not trimmed:
+            return []
+        try:
+            parsed = json.loads(trimmed)
+        except json.JSONDecodeError:
+            parsed = [item.strip(" -\t") for item in trimmed.splitlines() if item.strip()]
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        if isinstance(parsed, str) and parsed.strip():
+            return [parsed.strip()]
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def fetch_dictionary_rows(term: str) -> list[sqlite3.Row]:
+    if not dictionary_db_available():
+        return []
+
+    query = """
+        select
+            term,
+            pronunciation,
+            part_of_speech,
+            definition,
+            examples_json,
+            source,
+            register,
+            notes
+        from entries
+        where lookup_term = ?
+        order by priority desc, rowid asc
+        limit 8
+    """
+
+    try:
+        with sqlite3.connect(f"file:{OFFLINE_DICTIONARY_DB}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(query, (term.casefold(),)).fetchall()
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if "no such table" in message:
+            return []
+        raise HTTPException(status_code=500, detail=f"Offline dictionary lookup failed: {exc}") from exc
+    except sqlite3.DatabaseError as exc:
+        raise HTTPException(status_code=500, detail=f"Offline dictionary lookup failed: {exc}") from exc
+
+
+def build_dictionary_payload(term: str, rows: list[sqlite3.Row]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "term": term,
+            "normalizedTerm": term,
+            "available": True,
+            "exact": False,
+            "source": None,
+            "pronunciation": None,
+            "entries": [],
+            "message": f"No offline definition found for “{term}”.",
+        }
+
+    first = rows[0]
+    source = first["source"] if "source" in first.keys() else None
+    pronunciation = first["pronunciation"] if "pronunciation" in first.keys() else None
+
+    entries = [
+        {
+            "partOfSpeech": row["part_of_speech"] if "part_of_speech" in row.keys() else None,
+            "definition": row["definition"],
+            "examples": parse_dictionary_examples(row["examples_json"] if "examples_json" in row.keys() else None),
+            "registerLabel": row["register"] if "register" in row.keys() else None,
+            "notes": row["notes"] if "notes" in row.keys() else None,
+        }
+        for row in rows
+    ]
+
+    return {
+        "term": first["term"] or term,
+        "normalizedTerm": term,
+        "available": True,
+        "exact": str(first["term"] or "").casefold() == term.casefold(),
+        "source": source,
+        "pronunciation": pronunciation,
+        "entries": entries,
+        "message": None,
+    }
+
+
+def extract_ui_xml(output: str) -> str:
+    start = output.find("<?xml")
+    end = output.rfind("</hierarchy>")
+    if start < 0 or end < 0:
+        raise RuntimeError("Android UI dump did not return XML.")
+    return output[start : end + len("</hierarchy>")]
+
+
+def find_nodes_by_resource_id(root: ET.Element, resource_id: str) -> list[ET.Element]:
+    return [node for node in root.iter("node") if node.attrib.get("resource-id") == resource_id]
+
+
+def choose_samsung_search_result(root: ET.Element, normalized_term: str) -> ET.Element | None:
+    candidates = find_nodes_by_resource_id(root, "com.diotek.sec.lookup.dictionary:id/list_text")
+    if not candidates:
+        return None
+
+    exact = [
+        node
+        for node in candidates
+        if normalize_samsung_ui_term(node.attrib.get("text", "")) == normalized_term.casefold()
+    ]
+    if exact:
+        return exact[0]
+
+    prefix = [
+        node
+        for node in candidates
+        if normalize_samsung_ui_term(node.attrib.get("text", "")).startswith(normalized_term.casefold())
+    ]
+    if prefix:
+        return prefix[0]
+    return candidates[0]
+
+
+def parse_samsung_preview_entries(keyword: str, preview_text: str, source: str) -> list[dict[str, Any]]:
+    cleaned_lines = [re.sub(r"\s+", " ", line).strip() for line in preview_text.splitlines()]
+    lines = [line for line in cleaned_lines if line]
+    if not lines:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    prelude_notes: list[str] = []
+    current: dict[str, Any] | None = None
+
+    def flush_current() -> None:
+        nonlocal current
+        if current and current.get("definition"):
+            entries.append(current)
+        current = None
+
+    for line in lines:
+        if re.fullmatch(r"\([^)]*\)", line):
+            prelude_notes.append(line)
+            continue
+
+        sense_match = re.match(r"^(\d+)\s+([A-Z][A-Z-]+)\s*$", line)
+        if sense_match:
+            flush_current()
+            current = {
+                "term": keyword,
+                "part_of_speech": sense_match.group(2),
+                "definition": "",
+                "examples": [],
+                "register": None,
+                "notes": None,
+                "source": source,
+            }
+            continue
+
+        if current is None:
+            current = {
+                "term": keyword,
+                "part_of_speech": None,
+                "definition": "",
+                "examples": [],
+                "register": None,
+                "notes": None,
+                "source": source,
+            }
+
+        if line.startswith("◇"):
+            example = line.lstrip("◇ ").strip()
+            if example:
+                current["examples"].append(example)
+            continue
+
+        if line.startswith("∙") or line.startswith("•"):
+            note = line.lstrip("∙• ").strip()
+            if note:
+                existing_note = current.get("notes")
+                current["notes"] = f"{existing_note} {note}".strip() if existing_note else note
+            continue
+
+        definition = current["definition"]
+        current["definition"] = f"{definition} {line}".strip() if definition else line
+
+    flush_current()
+
+    if prelude_notes and entries:
+        first_note = " ".join(prelude_notes)
+        entries[0]["notes"] = f"{first_note} {entries[0]['notes']}".strip() if entries[0].get("notes") else first_note
+
+    if not entries and lines:
+        entries.append(
+            {
+                "term": keyword,
+                "part_of_speech": None,
+                "definition": " ".join(lines),
+                "examples": [],
+                "register": None,
+                "notes": " ".join(prelude_notes) if prelude_notes else None,
+                "source": source,
+            }
+        )
+    return entries
+
+
+def parse_samsung_exact_search(root: ET.Element, normalized_term: str) -> tuple[str | None, list[dict[str, Any]]]:
+    list_view_nodes = find_nodes_by_resource_id(root, "com.diotek.sec.lookup.dictionary:id/listview")
+    if not list_view_nodes:
+        no_match_nodes = find_nodes_by_resource_id(root, "com.diotek.sec.lookup.dictionary:id/tv_no_dictionary")
+        if no_match_nodes:
+            return no_match_nodes[0].attrib.get("text") or "No matches found.", []
+        return "Samsung Dictionary did not return a readable result.", []
+
+    list_view = list_view_nodes[0]
+    current_source: str | None = None
+    entries: list[dict[str, Any]] = []
+
+    for child in list_view:
+        dict_name_nodes = find_nodes_by_resource_id(child, "com.diotek.sec.lookup.dictionary:id/tv_dict_name")
+        if dict_name_nodes:
+            current_source = dict_name_nodes[0].attrib.get("text", "").strip() or None
+            continue
+
+        body_nodes = find_nodes_by_resource_id(child, "com.diotek.sec.lookup.dictionary:id/ly_body")
+        if not body_nodes or current_source != "Collins English":
+            continue
+
+        keyword_nodes = find_nodes_by_resource_id(child, "com.diotek.sec.lookup.dictionary:id/tv_keyword")
+        preview_nodes = find_nodes_by_resource_id(child, "com.diotek.sec.lookup.dictionary:id/tv_preview")
+        keyword = keyword_nodes[0].attrib.get("text", "").strip() if keyword_nodes else normalized_term
+        preview_text = preview_nodes[0].attrib.get("text", "").strip() if preview_nodes else ""
+        if not preview_text:
+            continue
+        entries.extend(
+            parse_samsung_preview_entries(
+                keyword=keyword,
+                preview_text=preview_text,
+                source=SAMSUNG_DICTIONARY_BRIDGE_LABEL,
+            )
+        )
+
+    if entries:
+        return None, entries
+    return "Samsung Dictionary returned no Collins English preview for this term.", []
+
+
+def cache_dictionary_entries(lookup_term: str, entries: list[dict[str, Any]]) -> None:
+    if not entries:
+        return
+    ensure_dictionary_db_schema()
+    with sqlite3.connect(OFFLINE_DICTIONARY_DB) as conn:
+        conn.execute("delete from entries where lookup_term = ?", (lookup_term.casefold(),))
+        for priority, entry in enumerate(entries, start=1):
+            conn.execute(
+                """
+                insert into entries (
+                    lookup_term,
+                    term,
+                    pronunciation,
+                    part_of_speech,
+                    definition,
+                    examples_json,
+                    register,
+                    notes,
+                    source,
+                    priority
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lookup_term.casefold(),
+                    entry["term"],
+                    None,
+                    entry.get("part_of_speech"),
+                    entry["definition"],
+                    json.dumps(entry.get("examples") or []),
+                    entry.get("register"),
+                    entry.get("notes"),
+                    entry.get("source"),
+                    len(entries) - priority,
+                ),
+            )
+        conn.commit()
+
+
+def samsung_dictionary_bridge_status() -> tuple[Path | None, str | None, str | None]:
+    adb_executable = resolve_adb_executable()
+    if adb_executable is None:
+        return None, None, "ADB is not installed on this machine."
+    device_id = resolve_samsung_dictionary_device_id(adb_executable)
+    if device_id is None:
+        if SAMSUNG_DICTIONARY_DEVICE_ID:
+            return adb_executable, None, f"Samsung dictionary device {SAMSUNG_DICTIONARY_DEVICE_ID} is not connected."
+        return adb_executable, None, "Connect exactly one Samsung phone with USB debugging enabled to use the live dictionary bridge."
+    return adb_executable, device_id, None
+
+
+def ensure_open_wordnet_available():
+    try:
+        import nltk
+    except ImportError:
+        return None, "NLTK is not installed, so the standalone offline dictionary is unavailable."
+
+    OPEN_WORDNET_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if str(OPEN_WORDNET_DATA_DIR) not in nltk.data.path:
+        nltk.data.path.insert(0, str(OPEN_WORDNET_DATA_DIR))
+
+    try:
+        nltk.data.find("corpora/wordnet")
+    except LookupError:
+        try:
+            nltk.data.find("corpora/wordnet.zip")
+        except LookupError:
+            with _wordnet_download_lock:
+                try:
+                    nltk.data.find("corpora/wordnet")
+                except LookupError:
+                    try:
+                        nltk.data.find("corpora/wordnet.zip")
+                    except LookupError:
+                        success = nltk.download("wordnet", download_dir=str(OPEN_WORDNET_DATA_DIR), quiet=True)
+                        if not success:
+                            return None, "Open English WordNet could not be downloaded for standalone offline use."
+    try:
+        from nltk.corpus import wordnet as wn
+    except Exception as exc:  # pragma: no cover - import-path edge case
+        return None, f"Open English WordNet is installed but could not be loaded: {exc}"
+    return wn, None
+
+
+def wordnet_part_of_speech(label: str | None) -> str | None:
+    mapping = {
+        "n": "noun",
+        "v": "verb",
+        "a": "adjective",
+        "s": "adjective",
+        "r": "adverb",
+    }
+    return mapping.get(label or "")
+
+
+def lookup_open_wordnet_dictionary(term: str) -> tuple[dict[str, Any] | None, str | None]:
+    normalized = normalize_dictionary_term(term)
+    wn, availability_error = ensure_open_wordnet_available()
+    if availability_error:
+        return None, availability_error
+    if wn is None:
+        return None, "Open English WordNet is unavailable."
+
+    query = normalized.replace(" ", "_")
+    synsets = wn.synsets(query)
+    if not synsets and " " not in normalized:
+        lemma = wn.morphy(normalized)
+        if lemma:
+            synsets = wn.synsets(lemma)
+    if not synsets:
+        return None, f"No standalone offline definition found for “{normalized}”."
+
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str]] = set()
+    for synset in synsets:
+        definition = re.sub(r"\s+", " ", synset.definition()).strip()
+        if not definition:
+            continue
+        part_of_speech = wordnet_part_of_speech(getattr(synset, "pos", lambda: None)())
+        key = (part_of_speech, definition.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(
+            {
+                "term": normalized,
+                "part_of_speech": part_of_speech,
+                "definition": definition,
+                "examples": [re.sub(r"\s+", " ", example).strip() for example in synset.examples() if example.strip()],
+                "register": None,
+                "notes": synset.lexname() if hasattr(synset, "lexname") else None,
+                "source": OPEN_WORDNET_SOURCE_LABEL,
+            }
+        )
+        if len(entries) >= 8:
+            break
+
+    if not entries:
+        return None, f"No standalone offline definition found for “{normalized}”."
+
+    cache_dictionary_entries(normalized, entries)
+    cached_rows = fetch_dictionary_rows(normalized)
+    if cached_rows:
+        payload = build_dictionary_payload(normalized, cached_rows)
+        payload["message"] = "Fetched from Open English WordNet and cached locally."
+        return payload, None
+    return None, "Open English WordNet returned data, but the local cache could not be written."
+
+
+def lookup_samsung_dictionary_via_adb(term: str) -> tuple[dict[str, Any] | None, str | None]:
+    normalized = normalize_dictionary_term(term)
+    adb_executable, device_id, bridge_error = samsung_dictionary_bridge_status()
+    if bridge_error or adb_executable is None or device_id is None:
+        return None, bridge_error
+
+    with _samsung_dictionary_bridge_lock:
+        try:
+            run_adb_command(adb_executable, "shell", "am", "force-stop", SAMSUNG_DICTIONARY_PACKAGE, device_id=device_id)
+            time.sleep(0.6)
+            run_adb_command(
+                adb_executable,
+                "shell",
+                "monkey",
+                "-p",
+                SAMSUNG_DICTIONARY_PACKAGE,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+                device_id=device_id,
+                timeout=20,
+            )
+            time.sleep(1.5)
+
+            search_root = ET.fromstring(extract_ui_xml(run_adb_command(adb_executable, "exec-out", "uiautomator", "dump", "/dev/tty", device_id=device_id, timeout=20)))
+            search_field = find_nodes_by_resource_id(search_root, "android:id/search_src_text")
+            if not search_field:
+                return None, "Samsung Dictionary opened, but the search field was not accessible."
+            search_center = center_of_bounds(search_field[0].attrib.get("bounds", ""))
+            if search_center is None:
+                return None, "Samsung Dictionary search field bounds were invalid."
+            run_adb_command(adb_executable, "shell", "input", "tap", str(search_center[0]), str(search_center[1]), device_id=device_id)
+            time.sleep(0.3)
+
+            encoded_term = normalized.replace(" ", "%s")
+            run_adb_command(adb_executable, "shell", "input", "text", encoded_term, device_id=device_id)
+            time.sleep(1.2)
+
+            results_root = ET.fromstring(extract_ui_xml(run_adb_command(adb_executable, "exec-out", "uiautomator", "dump", "/dev/tty", device_id=device_id, timeout=20)))
+            result_node = choose_samsung_search_result(results_root, normalized)
+            if result_node is None:
+                return None, f"Samsung Dictionary returned no matches for “{normalized}”."
+            result_center = center_of_bounds(result_node.attrib.get("bounds", ""))
+            if result_center is None:
+                return None, "Samsung Dictionary result bounds were invalid."
+            run_adb_command(adb_executable, "shell", "input", "tap", str(result_center[0]), str(result_center[1]), device_id=device_id)
+            time.sleep(1.2)
+
+            exact_root = ET.fromstring(extract_ui_xml(run_adb_command(adb_executable, "exec-out", "uiautomator", "dump", "/dev/tty", device_id=device_id, timeout=20)))
+            message, entries = parse_samsung_exact_search(exact_root, normalized)
+            if not entries:
+                return None, message or f"Samsung Dictionary returned no matches for “{normalized}”."
+
+            cache_dictionary_entries(normalized, entries)
+            cached_rows = fetch_dictionary_rows(normalized)
+            if cached_rows:
+                payload = build_dictionary_payload(normalized, cached_rows)
+                payload["message"] = "Fetched from the connected Samsung Dictionary and cached locally."
+                return payload, None
+
+            return None, "Samsung Dictionary returned data, but the local cache could not be written."
+        except (ET.ParseError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            return None, f"Samsung Dictionary bridge failed: {exc}"
+
+
+def lookup_offline_dictionary(term: str) -> dict[str, Any]:
+    normalized = normalize_dictionary_term(term)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Select a word or phrase to look up.")
+
+    rows = fetch_dictionary_rows(normalized)
+    if rows:
+        payload = build_dictionary_payload(normalized, rows)
+        payload["message"] = None
+        return payload
+
+    samsung_payload, samsung_error = lookup_samsung_dictionary_via_adb(normalized)
+    if samsung_payload is not None:
+        return samsung_payload
+
+    wordnet_payload, wordnet_error = lookup_open_wordnet_dictionary(normalized)
+    if wordnet_payload is not None:
+        if samsung_error and not wordnet_payload.get("message"):
+            wordnet_payload["message"] = samsung_error
+        return wordnet_payload
+
+    failure_notes = [message for message in (samsung_error, wordnet_error) if message]
+    failure_message = " ".join(dict.fromkeys(failure_notes)) if failure_notes else None
+
+    if dictionary_db_available():
+        payload = build_dictionary_payload(normalized, [])
+        if failure_message:
+            payload["message"] = failure_message
+        return payload
+
+    payload = default_dictionary_unavailable_payload(term)
+    if failure_message:
+        payload["message"] = failure_message
+    return payload
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -3092,6 +3767,11 @@ def polly_health() -> dict[str, Any]:
 @app.post("/api/providers/test")
 def provider_test(request: ProviderTestRequest) -> dict[str, Any]:
     return run_provider_test(request)
+
+
+@app.get("/api/dictionary/lookup")
+def dictionary_lookup(term: str) -> dict[str, Any]:
+    return lookup_offline_dictionary(term)
 
 
 @app.get("/api/books")

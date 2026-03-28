@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import type { Highlight, HighlightColor } from '../types'
+import { lookupDictionary } from '../api'
+import type { DictionaryLookupResult, Highlight, HighlightColor } from '../types'
 import {
   DEFAULT_READER_APPEARANCE,
   READER_FONT_SCALE_MAX,
@@ -64,6 +65,10 @@ type SelectionMenuPosition = {
 
 function normalizeText(value: string) {
   return value.replace(/\s+/g, ' ').trim()
+}
+
+function normalizeDictionaryLookupTerm(value: string) {
+  return normalizeText(value).replace(/^[\s"'“”‘’.,;:!?()[\]{}]+|[\s"'“”‘’.,;:!?()[\]{}]+$/g, '').slice(0, 120)
 }
 
 function formatSegmentText(pageText: string, startOffset: number, endOffset: number) {
@@ -341,6 +346,11 @@ export function ReaderDesk({
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteText, setNoteText] = useState('')
   const [noteColor, setNoteColor] = useState<HighlightColor>('amber')
+  const [dictionaryOpen, setDictionaryOpen] = useState(false)
+  const [dictionaryLoading, setDictionaryLoading] = useState(false)
+  const [dictionaryTerm, setDictionaryTerm] = useState('')
+  const [dictionaryResult, setDictionaryResult] = useState<DictionaryLookupResult | null>(null)
+  const [dictionaryError, setDictionaryError] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
   const pageRefs = useRef<Array<HTMLDivElement | null>>([])
   const lastReportedPageRef = useRef<number | null>(null)
@@ -348,6 +358,7 @@ export function ReaderDesk({
   const progressChangeRef = useRef<typeof onProgressChange>(onProgressChange)
   const fontScaleChangeRef = useRef<typeof onFontScaleChange>(onFontScaleChange)
   const appearanceChangeRef = useRef<typeof onAppearanceChange>(onAppearanceChange)
+  const dictionaryCacheRef = useRef<Record<string, DictionaryLookupResult>>({})
 
   const pages = useMemo(() => paginateReaderText(text), [text])
   const readerDeskStyle = useMemo<CSSProperties>(() => {
@@ -598,6 +609,21 @@ export function ReaderDesk({
     }
   }, [draft])
 
+  useEffect(() => {
+    if (!dictionaryOpen) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeDictionary()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [dictionaryOpen])
+
   function clearSelection() {
     window.getSelection()?.removeAllRanges()
     setDraft(null)
@@ -606,6 +632,48 @@ export function ReaderDesk({
     setNoteText('')
     setNoteColor('amber')
     setPlayingSelection(false)
+  }
+
+  function closeDictionary() {
+    setDictionaryOpen(false)
+    setDictionaryLoading(false)
+    setDictionaryError(null)
+  }
+
+  async function openDictionarySheet() {
+    if (!draft) {
+      return
+    }
+
+    const term = normalizeDictionaryLookupTerm(draft.text)
+    if (!term) {
+      return
+    }
+
+    setDictionaryTerm(term)
+    setDictionaryOpen(true)
+    setDictionaryError(null)
+
+    const cached = dictionaryCacheRef.current[term]
+    if (cached) {
+      setDictionaryResult(cached)
+      clearSelection()
+      return
+    }
+
+    setDictionaryResult(null)
+    clearSelection()
+
+    try {
+      setDictionaryLoading(true)
+      const result = await lookupDictionary(term)
+      dictionaryCacheRef.current[term] = result
+      setDictionaryResult(result)
+    } catch (error) {
+      setDictionaryError(error instanceof Error ? error.message : 'Failed to load the offline dictionary.')
+    } finally {
+      setDictionaryLoading(false)
+    }
   }
 
   function applyDraftFromRange(page: ReaderPage, container: HTMLDivElement, range: Range) {
@@ -961,6 +1029,9 @@ export function ReaderDesk({
             <button onClick={() => setNoteOpen((current) => !current)} type="button">
               {noteOpen ? 'Close note' : 'Note'}
             </button>
+            <button onClick={() => void openDictionarySheet()} type="button">
+              Dictionary
+            </button>
             <button onClick={openDefinitionWindow} type="button">
               Define
             </button>
@@ -1034,6 +1105,83 @@ export function ReaderDesk({
               </div>
             </div>
           ) : null}
+        </div>
+      ) : null}
+
+      {dictionaryOpen ? (
+        <div
+          aria-label={dictionaryTerm ? `Dictionary entry for ${dictionaryTerm}` : 'Dictionary'}
+          aria-modal="true"
+          className="dictionary-sheet__overlay"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeDictionary()
+            }
+          }}
+          role="dialog"
+        >
+          <div className="dictionary-sheet">
+            <div className="dictionary-sheet__topline">Offline dictionary</div>
+            <div className="dictionary-sheet__header">
+              <div>
+                <h3>{dictionaryResult?.term || dictionaryTerm}</h3>
+                {dictionaryResult?.pronunciation ? (
+                  <p className="dictionary-sheet__pronunciation">{dictionaryResult.pronunciation}</p>
+                ) : null}
+              </div>
+              <button className="dictionary-sheet__close" onClick={closeDictionary} type="button">
+                Close
+              </button>
+            </div>
+
+            <div className="dictionary-sheet__meta">
+              <span className={`dictionary-sheet__badge ${dictionaryResult?.available ? 'ready' : 'pending'}`}>
+                {dictionaryResult?.available ? 'Offline ready' : 'Awaiting local data'}
+              </span>
+              {dictionaryResult?.source ? <span className="dictionary-sheet__source">{dictionaryResult.source}</span> : null}
+            </div>
+
+            {dictionaryLoading && !dictionaryResult ? (
+              <div className="dictionary-sheet__state">
+                <strong>Looking up “{dictionaryTerm}”...</strong>
+                <p>Searching the local dictionary index.</p>
+              </div>
+            ) : dictionaryError ? (
+              <div className="dictionary-sheet__state dictionary-sheet__state--error">
+                <strong>Dictionary lookup failed.</strong>
+                <p>{dictionaryError}</p>
+              </div>
+            ) : dictionaryResult?.entries.length ? (
+              <div className="dictionary-sheet__body">
+                {dictionaryResult.entries.map((entry, index) => (
+                  <article className="dictionary-entry" key={`${dictionaryResult.normalizedTerm}-${index}`}>
+                    <div className="dictionary-entry__header">
+                      {entry.partOfSpeech ? <span className="dictionary-entry__pos">{entry.partOfSpeech}</span> : null}
+                      {entry.registerLabel ? <span className="dictionary-entry__register">{entry.registerLabel}</span> : null}
+                    </div>
+                    <p className="dictionary-entry__definition">{entry.definition}</p>
+                    {entry.examples.length ? (
+                      <ul className="dictionary-entry__examples">
+                        {entry.examples.map((example, exampleIndex) => (
+                          <li key={`${index}-${exampleIndex}`}>{example}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {entry.notes ? <p className="dictionary-entry__notes">{entry.notes}</p> : null}
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="dictionary-sheet__state">
+                <strong>{dictionaryResult?.message || 'No definition found yet.'}</strong>
+                <p>
+                  {dictionaryResult?.available
+                    ? 'The offline database is installed, but this term was not found in the current index.'
+                    : 'The popup is ready. Once we import the Samsung dictionary data for your private install, this will work fully offline.'}
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       ) : null}
 

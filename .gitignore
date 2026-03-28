@@ -1,6 +1,11 @@
 .venv/
 library/
 output/
+dictionary/offline/*
+!dictionary/offline/.gitkeep
+dictionary/extracted/*
+dictionary/open-wordnet/*
+!dictionary/open-wordnet/.gitkeep
 web/node_modules/
 web/dist/
 __pycache__/

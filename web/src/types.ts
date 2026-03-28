@@ -37,6 +37,25 @@ export type ProviderTestResult = {
   message: string
 }
 
+export type DictionarySense = {
+  partOfSpeech?: string | null
+  definition: string
+  examples: string[]
+  registerLabel?: string | null
+  notes?: string | null
+}
+
+export type DictionaryLookupResult = {
+  term: string
+  normalizedTerm: string
+  available: boolean
+  exact: boolean
+  source?: string | null
+  pronunciation?: string | null
+  entries: DictionarySense[]
+  message?: string | null
+}
+
 export type HighlightColor = 'amber' | 'rose' | 'sky'
 
 export type Highlight = {

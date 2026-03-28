@@ -296,6 +296,10 @@ export function deleteHighlight(bookId: string, highlightId: string) {
   })
 }
 
+export function lookupDictionary(term: string) {
+  return apiRequest<import('./types').DictionaryLookupResult>(`/api/dictionary/lookup?term=${encodeURIComponent(term)}`)
+}
+
 export function testProvider(
   payload: {
     provider: import('./types').ProviderCatalog['id']

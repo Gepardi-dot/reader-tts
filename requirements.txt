@@ -6,6 +6,7 @@ fastapi
 httpx
 imageio-ffmpeg
 lxml
+nltk
 python-dotenv
 python-multipart
 pypdf
