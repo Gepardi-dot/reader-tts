@@ -38,5 +38,7 @@ Samsung bridge:
 Standalone fallback:
 
 - If Samsung is not connected, the API falls back to Open English WordNet via NLTK.
-- The WordNet corpus is downloaded once into `dictionary/open-wordnet/` and then works without the phone.
+- The standalone offline corpus lives in `dictionary/open-wordnet/corpora/wordnet.zip` and then works without the phone.
+- WordNet Release 3.0 is included under the Princeton WordNet license bundled inside the archive.
 - WordNet results are also cached into `dictionary/offline/dictionary.sqlite3`.
+- Extracted Samsung / Collins assets remain local-only and should not be committed or redistributed.

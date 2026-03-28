@@ -6,6 +6,8 @@ dictionary/offline/*
 dictionary/extracted/*
 dictionary/open-wordnet/*
 !dictionary/open-wordnet/.gitkeep
+!dictionary/open-wordnet/corpora/
+!dictionary/open-wordnet/corpora/wordnet.zip
 web/node_modules/
 web/dist/
 __pycache__/
