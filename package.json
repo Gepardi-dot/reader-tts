@@ -1,0 +1,15 @@
+{
+  "name": "storybook-reader",
+  "private": true,
+  "scripts": {
+    "build": "npm --prefix web run build",
+    "lint": "npm --prefix web run lint",
+    "dev": "npm --prefix web run dev",
+    "preview": "npm --prefix web run preview",
+    "rewrite:build": "npm --prefix web-rewrite run build",
+    "rewrite:dev": "npm --prefix web-rewrite run dev",
+    "rewrite:lint": "npm --prefix web-rewrite run lint",
+    "rewrite:test": "npm --prefix web-rewrite run test",
+    "rewrite:e2e": "npm --prefix web-rewrite run test:e2e"
+  }
+}

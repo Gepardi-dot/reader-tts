@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Backend: Python syntax check
+  # ─────────────────────────────────────────────────────────────────────────
+  backend:
+    name: Backend (syntax check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check server/app.py
+        run: python -m py_compile server/app.py
+      - name: Check pdf_to_audio.py
+        run: python -m py_compile pdf_to_audio.py
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Primary frontend (web-rewrite): lint → build → vitest → Playwright E2E
+  # This is the app that deploys to Vercel.
+  # ─────────────────────────────────────────────────────────────────────────
+  frontend:
+    name: Frontend — web-rewrite (lint + build + test + e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-rewrite/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web-rewrite
+
+      - name: Lint
+        run: npm run lint
+        working-directory: web-rewrite
+
+      - name: Type-check + build
+        run: npm run build
+        working-directory: web-rewrite
+
+      - name: Unit tests (vitest)
+        run: npm test
+        working-directory: web-rewrite
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+        working-directory: web-rewrite
+
+      - name: E2E tests (VITE_USE_MOCKS=1)
+        run: npm run test:e2e
+        working-directory: web-rewrite
+        env:
+          CI: 'true'
+          VITE_USE_MOCKS: '1'
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-rewrite
+          path: web-rewrite/playwright-report/
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Legacy frontend (web): lint + build only — kept for reference during migration
+  # ─────────────────────────────────────────────────────────────────────────
+  frontend-legacy:
+    name: Frontend — web legacy (lint + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Lint
+        run: npm run lint
+        working-directory: web
+
+      - name: Type-check + build
+        run: npm run build
+        working-directory: web

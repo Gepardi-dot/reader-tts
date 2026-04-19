@@ -1,0 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Manrope:wght@500;600;700;800&display=swap');
+
+:root {
+  --font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+  --font-ui: 'Manrope', 'Avenir Next', 'Segoe UI', sans-serif;
+  --ink-strong: #17211f;
+  --ink: #20312d;
+  --ink-soft: rgba(28, 40, 37, 0.72);
+  --ink-faint: rgba(28, 40, 37, 0.52);
+  --surface: rgba(255, 252, 247, 0.94);
+  --surface-strong: rgba(255, 254, 250, 0.98);
+  --surface-muted: rgba(244, 237, 225, 0.92);
+  --surface-dark: #212b29;
+  --accent: #bd8a3f;
+  --accent-soft: rgba(189, 138, 63, 0.14);
+  --accent-strong: #8a5c18;
+  --line: rgba(28, 40, 37, 0.1);
+  --line-strong: rgba(28, 40, 37, 0.18);
+  --success: #3a7358;
+  --warning: #8f6932;
+  --danger: #8d4b42;
+  --shadow-soft: 0 18px 40px rgba(24, 26, 24, 0.08);
+  --shadow-strong: 0 30px 70px rgba(17, 18, 17, 0.14);
+  --radius-lg: 2rem;
+  --radius-md: 1.4rem;
+  --radius-sm: 1rem;
+}

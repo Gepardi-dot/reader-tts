@@ -1,0 +1,47 @@
+# Fly.io deployment for the Kokoro TTS remote server.
+#
+# First-time setup:
+#   fly launch --dockerfile Dockerfile.kokoro --name kokoro-reader --no-deploy
+#   fly volumes create kokoro_data --size 5 --region <your-region>
+#   fly secrets set KOKORO_API_KEY=$(openssl rand -hex 32)
+#   fly deploy --dockerfile Dockerfile.kokoro
+#
+# Recommended machine: shared-cpu-2x, 1 GB RAM (model needs ~600 MB)
+#   fly scale vm shared-cpu-2x --memory 1024
+#
+# Get URL: fly info
+# Then set in Vercel:
+#   KOKORO_REMOTE_URL=https://kokoro-reader.fly.dev
+#   KOKORO_REMOTE_API_KEY=<same as KOKORO_API_KEY>
+
+app = "kokoro-reader"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile.kokoro"
+
+[env]
+  HOST              = "0.0.0.0"
+  PORT              = "8767"
+  KOKORO_CACHE_DIR  = "/data/cache"
+  HF_HOME           = "/data/hf_cache"
+
+[http_service]
+  internal_port        = 8767
+  force_https          = true
+  auto_stop_machines   = false
+  auto_start_machines  = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type       = "requests"
+    hard_limit = 8
+    soft_limit = 4
+
+[[mounts]]
+  source      = "kokoro_data"
+  destination = "/data"
+
+[[vm]]
+  size   = "shared-cpu-2x"
+  memory = "1024mb"

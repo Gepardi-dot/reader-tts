@@ -1,0 +1,55 @@
+.venv/
+.venv-qwen3-tts/
+/library/
+/output/
+voices/neutts/*
+!voices/neutts/.gitkeep
+dictionary/offline/*
+!dictionary/offline/.gitkeep
+dictionary/extracted/*
+dictionary/open-wordnet/*
+!dictionary/open-wordnet/.gitkeep
+!dictionary/open-wordnet/corpora/
+!dictionary/open-wordnet/corpora/wordnet.zip
+web/node_modules/
+web/dist/
+web/test-results/
+web-rewrite/node_modules/
+web-rewrite/dist/
+web-rewrite/test-results/
+web-next/node_modules/
+web-next/dist/
+web-next/test-results/
+web/output/
+__pycache__/
+server/__pycache__/
+.env
+*.log
+*.err.log
+
+# Temp/debug artifacts — generated during testing, not source code
+tmp-*.txt
+tmp-*.json
+tmp-*.js
+tmp-*.spec.js
+tmp-*.png
+tmp-*.har
+
+# Screenshot / debug images (Playwright, manual checks)
+*.png
+*.har
+
+# Python cache
+**/__pycache__/
+*.pyc
+*.pyo
+
+.vercel
+public/
+
+# Stitch design loop outputs
+.stitch/designs/*
+!.stitch/designs/.gitkeep
+.claude/worktrees/
+.playwright-cli/
+.agents/

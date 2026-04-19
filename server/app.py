@@ -1,0 +1,5687 @@
+from __future__ import annotations
+
+import importlib.util
+import hashlib
+import json
+import logging
+import os
+import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import threading
+import time
+import unicodedata
+import uuid
+import wave
+import xml.etree.ElementTree as ET
+from base64 import b64decode
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from html import escape as escape_html
+from http import HTTPStatus
+from pathlib import Path
+from typing import Any, Literal
+
+import httpx
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+from pypdf import PdfReader
+
+import pdf_to_audio
+from server.gemma_provider import (
+    build_gemma_answer_coach,
+    build_gemma_context_generator,
+    build_gemma_lesson_generator,
+    build_gemma_sentence_coach,
+    gemma_runtime_configured,
+)
+from server.vocabulary_studio import VocabularyStudioService, create_vocabulary_router
+
+
+ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT / ".env")
+
+logger = logging.getLogger(__name__)
+
+
+def env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def env_int_value(name: str, default: int) -> int:
+    value = env_value(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def env_float_value(name: str, default: float) -> float:
+    value = env_value(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+for env_name in (
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "POLLY_REGION",
+    "AWS_POLLY_VOICE_ID",
+    "POLLY_VOICE_ID",
+    "AWS_POLLY_ENGINE",
+    "POLLY_ENGINE",
+    "AWS_POLLY_LANGUAGE_CODE",
+    "POLLY_LANGUAGE_CODE",
+    "OPENAI_API_KEY",
+    "OPENAI_CONTEXT_MODEL",
+    "OPENAI_TTS_MODEL",
+    "GEMINI_API_KEY",
+    "GEMINI_TTS_MODEL",
+    "GEMMA_PROVIDER",
+    "GEMMA_BASE_URL",
+    "GEMMA_MODEL",
+    "GEMMA_TIMEOUT_SECONDS",
+    "VOCAB_CONTEXT_PROVIDER",
+    "DASHSCOPE_API_KEY",
+    "DASHSCOPE_BASE_HTTP_API_URL",
+    "QWEN_TTS_MODEL",
+    "QWEN_LOCAL_PYTHON",
+    "QWEN_LOCAL_MODEL",
+    "QWEN_LOCAL_DEVICE",
+    "QWEN_LOCAL_DTYPE",
+    "QWEN_LOCAL_ATTN_IMPLEMENTATION",
+    "QWEN_LOCAL_BATCH_SIZE",
+    "QWEN_LOCAL_TIMEOUT_SECONDS",
+    "QWEN_LOCAL_SOX_DIR",
+    "NEUTTS_WSL_DISTRO",
+    "NEUTTS_WSL_USER",
+    "NEUTTS_WSL_PYTHON",
+    "NEUTTS_WSL_HF_HOME",
+    "NEUTTS_LOCAL_MODEL",
+    "NEUTTS_LOCAL_CODEC",
+    "NEUTTS_LOCAL_TIMEOUT_SECONDS",
+    "NEUTTS_LOCAL_DAEMON_PORT",
+    "NEUTTS_LOCAL_DAEMON_HOST",
+    "NEUTTS_LOCAL_DAEMON_STARTUP_SECONDS",
+    "NEUTTS_REMOTE_URL",
+    "NEUTTS_REMOTE_API_KEY",
+    "NEUTTS_REMOTE_TIMEOUT_SECONDS",
+    "KOKORO_REMOTE_URL",
+    "KOKORO_REMOTE_API_KEY",
+    "KOKORO_REMOTE_TIMEOUT_SECONDS",
+    "PIPER_EXE",
+    "PIPER_ESPEAK_DATA",
+    "SUPABASE_DB_URL",
+    "SUPABASE_POOLER_URL",
+    "DATABASE_URL",
+    "SUPABASE_URL",
+    "SUPABASE_ANON_KEY",
+    "BOOK_STORAGE_BUCKET",
+    "BOOK_STORAGE_PREFIX",
+    "BOOK_STORAGE_REGION",
+    "ADB_EXE",
+    "SAMSUNG_DICTIONARY_DEVICE_ID",
+):
+    if env_name in os.environ and env_value(env_name) is None:
+        os.environ.pop(env_name, None)
+
+
+def runtime_root() -> Path:
+    if os.environ.get("VERCEL"):
+        return Path(tempfile.gettempdir()) / "storybook-reader"
+    return ROOT
+
+
+def frontend_root() -> Path:
+    candidates = [ROOT / "web-rewrite" / "dist", ROOT / "web" / "dist", ROOT / "public"]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+RUNTIME_ROOT = runtime_root()
+DATA_ROOT = RUNTIME_ROOT / "library"
+BOOKS_ROOT = DATA_ROOT / "books"
+JOBS_ROOT = DATA_ROOT / "jobs"
+WEB_DIST = frontend_root()
+DEFAULT_AUDIO_DIR = RUNTIME_ROOT / "output"
+PREVIEW_ROOT = DATA_ROOT / "previews"
+VOICES_ROOT = ROOT / "voices"
+NEUTTS_VOICES_ROOT = VOICES_ROOT / "neutts"
+DICTIONARY_BUNDLE_ROOT = ROOT / "dictionary"
+RUNTIME_DICTIONARY_ROOT = RUNTIME_ROOT / "dictionary"
+OFFLINE_DICTIONARY_BUNDLE_DB = DICTIONARY_BUNDLE_ROOT / "offline" / "dictionary.sqlite3"
+OPEN_WORDNET_BUNDLE_DIR = DICTIONARY_BUNDLE_ROOT / "open-wordnet"
+OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
+OPENAI_TTS_MODEL = env_value("OPENAI_TTS_MODEL") or "gpt-4o-mini-tts"
+GEMINI_TTS_MODEL = env_value("GEMINI_TTS_MODEL") or "gemini-2.5-flash-preview-tts"
+DASHSCOPE_BASE_HTTP_API_URL = env_value("DASHSCOPE_BASE_HTTP_API_URL") or "https://dashscope-intl.aliyuncs.com/api/v1"
+QWEN_TTS_MODEL = env_value("QWEN_TTS_MODEL") or "qwen3-tts-instruct-flash"
+QWEN_LOCAL_PYTHON = env_value("QWEN_LOCAL_PYTHON")
+QWEN_LOCAL_MODEL = env_value("QWEN_LOCAL_MODEL") or "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+QWEN_LOCAL_DEVICE = env_value("QWEN_LOCAL_DEVICE") or "cuda:0"
+QWEN_LOCAL_DTYPE = env_value("QWEN_LOCAL_DTYPE") or "auto"
+QWEN_LOCAL_ATTN_IMPLEMENTATION = env_value("QWEN_LOCAL_ATTN_IMPLEMENTATION") or ""
+QWEN_LOCAL_BATCH_SIZE = max(1, env_int_value("QWEN_LOCAL_BATCH_SIZE", 6))
+QWEN_LOCAL_TIMEOUT_SECONDS = max(60.0, env_float_value("QWEN_LOCAL_TIMEOUT_SECONDS", 3600.0))
+QWEN_LOCAL_DAEMON_PORT = min(max(env_int_value("QWEN_LOCAL_DAEMON_PORT", 8766), 1024), 65535)
+QWEN_LOCAL_DAEMON_HOST = env_value("QWEN_LOCAL_DAEMON_HOST") or "127.0.0.1"
+QWEN_LOCAL_DAEMON_STARTUP_SECONDS = max(5.0, env_float_value("QWEN_LOCAL_DAEMON_STARTUP_SECONDS", 120.0))
+QWEN_LOCAL_SOX_DIR = env_value("QWEN_LOCAL_SOX_DIR") or ""
+QWEN_LOCAL_HELPER = ROOT / "scripts" / "qwen_local_tts.py"
+NEUTTS_WSL_DISTRO = env_value("NEUTTS_WSL_DISTRO") or "Ubuntu"
+NEUTTS_WSL_USER = env_value("NEUTTS_WSL_USER")
+NEUTTS_WSL_PYTHON = env_value("NEUTTS_WSL_PYTHON")
+NEUTTS_WSL_HF_HOME = env_value("NEUTTS_WSL_HF_HOME")
+NEUTTS_LOCAL_MODEL = env_value("NEUTTS_LOCAL_MODEL") or "neuphonic/neutts-nano-q4-gguf"
+NEUTTS_LOCAL_CODEC = env_value("NEUTTS_LOCAL_CODEC") or "neuphonic/neucodec-onnx-decoder"
+NEUTTS_LOCAL_TIMEOUT_SECONDS = max(60.0, env_float_value("NEUTTS_LOCAL_TIMEOUT_SECONDS", 3600.0))
+NEUTTS_LOCAL_DAEMON_PORT = min(max(env_int_value("NEUTTS_LOCAL_DAEMON_PORT", 8765), 1024), 65535)
+NEUTTS_LOCAL_DAEMON_HOST = env_value("NEUTTS_LOCAL_DAEMON_HOST") or "127.0.0.1"
+NEUTTS_LOCAL_DAEMON_STARTUP_SECONDS = max(5.0, env_float_value("NEUTTS_LOCAL_DAEMON_STARTUP_SECONDS", 90.0))
+NEUTTS_LOCAL_HELPER = ROOT / "scripts" / "neutts_wsl_tts.py"
+NEUTTS_REMOTE_URL = (env_value("NEUTTS_REMOTE_URL") or "").rstrip("/")
+NEUTTS_REMOTE_API_KEY = env_value("NEUTTS_REMOTE_API_KEY") or ""
+NEUTTS_REMOTE_TIMEOUT_SECONDS = max(30.0, env_float_value("NEUTTS_REMOTE_TIMEOUT_SECONDS", 120.0))
+KOKORO_REMOTE_URL = (env_value("KOKORO_REMOTE_URL") or "").rstrip("/")
+KOKORO_REMOTE_API_KEY = env_value("KOKORO_REMOTE_API_KEY") or ""
+KOKORO_REMOTE_TIMEOUT_SECONDS = max(10.0, env_float_value("KOKORO_REMOTE_TIMEOUT_SECONDS", 60.0))
+CANONICAL_WAV_SAMPLE_RATE = 24000
+POLLY_REGION = env_value("POLLY_REGION") or env_value("AWS_REGION") or env_value("AWS_DEFAULT_REGION")
+POLLY_VOICE_ID = env_value("AWS_POLLY_VOICE_ID") or env_value("POLLY_VOICE_ID") or "Matthew"
+POLLY_ENGINE = (env_value("AWS_POLLY_ENGINE") or env_value("POLLY_ENGINE") or "standard").lower()
+POLLY_LANGUAGE_CODE = env_value("AWS_POLLY_LANGUAGE_CODE") or env_value("POLLY_LANGUAGE_CODE") or "en-US"
+POLLY_PCM_SAMPLE_RATE = "16000"
+POLLY_CACHE_TTL_SECONDS = 300
+APP_SECRET_KEY = env_value("APP_SECRET_KEY")
+LIVE_AUDIO_CACHE_VERSION = 3
+PROVIDER_TEST_CACHE_VERSION = 2
+GEMINI_MAX_RETRY_ATTEMPTS = 3
+GEMINI_MAX_RETRY_DELAY_SECONDS = 75.0
+BOOK_STORAGE_BUCKET = env_value("BOOK_STORAGE_BUCKET")
+BOOK_STORAGE_PREFIX = (env_value("BOOK_STORAGE_PREFIX") or "storybook-reader").strip("/")
+BOOK_STORAGE_REGION = env_value("BOOK_STORAGE_REGION") or env_value("AWS_REGION") or env_value("AWS_DEFAULT_REGION")
+BOOK_STORAGE_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
+BOOK_TITLE_MAX_LENGTH = 180
+OFFLINE_DICTIONARY_DB = Path(
+    env_value("OFFLINE_DICTIONARY_DB") or str(RUNTIME_DICTIONARY_ROOT / "offline" / "dictionary.sqlite3")
+)
+OPEN_WORDNET_DATA_DIR = RUNTIME_DICTIONARY_ROOT / "open-wordnet"
+SAMSUNG_DICTIONARY_PACKAGE = "com.diotek.sec.lookup.dictionary"
+SAMSUNG_DICTIONARY_BRIDGE_LABEL = "Samsung Dictionary · Collins English"
+OPEN_WORDNET_SOURCE_LABEL = "Open English WordNet"
+SAMSUNG_DICTIONARY_DEVICE_ID = env_value("SAMSUNG_DICTIONARY_DEVICE_ID")
+_samsung_dictionary_bridge_lock = threading.Lock()
+_wordnet_download_lock = threading.Lock()
+_dictionary_runtime_assets_lock = threading.Lock()
+
+
+def voice_option(
+    voice_id: str,
+    label: str,
+    *,
+    gender: Literal["male", "female", "neutral"] | None = None,
+    gender_source: Literal["provider", "estimated"] | None = None,
+    style: str | None = None,
+    tags: list[str] | None = None,
+    models: list[str] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"id": voice_id, "label": label}
+    if gender is not None:
+        payload["gender"] = gender
+    if gender_source is not None:
+        payload["genderSource"] = gender_source
+    if style is not None:
+        payload["style"] = style
+    if tags:
+        payload["tags"] = tags
+    if models:
+        payload["models"] = models
+    return payload
+
+
+def provider_model_option(
+    model_id: str,
+    label: str,
+    description: str,
+    *,
+    storytelling: bool = False,
+) -> dict[str, Any]:
+    return {
+        "id": model_id,
+        "label": label,
+        "description": description,
+        "storytelling": storytelling,
+    }
+
+
+GEMINI_TTS_MODELS = [
+    provider_model_option(
+        "gemini-2.5-flash-preview-tts",
+        "Gemini 2.5 Flash TTS",
+        "Fast preview TTS for general narration and voice tests.",
+    ),
+    provider_model_option(
+        "gemini-2.5-pro-preview-tts",
+        "Gemini 2.5 Pro TTS",
+        "Higher-capability preview TTS when you want more deliberate directed narration. May require paid Gemini quota.",
+        storytelling=True,
+    ),
+]
+GEMINI_TTS_MODEL_IDS = {item["id"] for item in GEMINI_TTS_MODELS}
+QWEN_TTS_MODELS = [
+    provider_model_option(
+        "qwen3-tts-instruct-flash",
+        "Qwen3 TTS Instruct Flash",
+        "Expressive instruction-guided narration for audiobooks, dramatic reads, and premium previews.",
+        storytelling=True,
+    ),
+    provider_model_option(
+        "qwen3-tts-flash",
+        "Qwen3 TTS Flash",
+        "Lower-cost multilingual speech synthesis for straightforward narration and utility reads.",
+    ),
+]
+QWEN_TTS_MODEL_IDS = {item["id"] for item in QWEN_TTS_MODELS}
+QWEN_LOCAL_TTS_MODELS = [
+    provider_model_option(
+        "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "Qwen3 TTS Local 0.6B",
+        "Local CustomVoice model with lower memory requirements and no per-request API traffic.",
+    ),
+    provider_model_option(
+        "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "Qwen3 TTS Local 1.7B",
+        "Higher-capability local CustomVoice model for richer narration when the machine can handle it.",
+        storytelling=True,
+    ),
+]
+QWEN_LOCAL_TTS_MODEL_IDS = {item["id"] for item in QWEN_LOCAL_TTS_MODELS}
+NEUTTS_LOCAL_TTS_MODELS = [
+    provider_model_option(
+        "neuphonic/neutts-nano-q4-gguf",
+        "NeuTTS Nano Q4",
+        "Fastest local NeuTTS profile for CPU-only laptops and routine audiobook jobs.",
+    ),
+    provider_model_option(
+        "neuphonic/neutts-air-q4-gguf",
+        "NeuTTS Air Q4",
+        "Higher-quality local NeuTTS profile with a heavier CPU cost.",
+        storytelling=True,
+    ),
+]
+NEUTTS_LOCAL_TTS_MODEL_IDS = {item["id"] for item in NEUTTS_LOCAL_TTS_MODELS}
+OPENAI_TTS_MODELS = [
+    provider_model_option(
+        "gpt-4o-mini-tts",
+        "GPT-4o mini TTS",
+        "Fast promptable narration with a lightweight model.",
+    )
+]
+OPENAI_VOICES = [
+    voice_option("alloy", "Alloy", gender="neutral", gender_source="estimated", style="Balanced"),
+    voice_option("ash", "Ash", gender="male", gender_source="estimated", style="Calm"),
+    voice_option("ballad", "Ballad", gender="male", gender_source="estimated", style="Dramatic", tags=["Story"]),
+    voice_option("coral", "Coral", gender="female", gender_source="estimated", style="Warm", tags=["Story"]),
+    voice_option("echo", "Echo", gender="male", gender_source="estimated", style="Clear"),
+    voice_option("fable", "Fable", gender="male", gender_source="estimated", style="Narrative", tags=["Story"]),
+    voice_option("nova", "Nova", gender="female", gender_source="estimated", style="Bright"),
+    voice_option("onyx", "Onyx", gender="male", gender_source="estimated", style="Deep", tags=["Story"]),
+    voice_option("sage", "Sage", gender="female", gender_source="estimated", style="Measured"),
+    voice_option("shimmer", "Shimmer", gender="female", gender_source="estimated", style="Light"),
+]
+QWEN_VOICES = [
+    voice_option(
+        "Cherry",
+        "Cherry",
+        gender="female",
+        gender_source="provider",
+        style="Lively",
+        tags=["Story"],
+        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Serena",
+        "Serena",
+        gender="female",
+        gender_source="provider",
+        style="Warm",
+        tags=["Story"],
+        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Jennifer",
+        "Jennifer",
+        gender="female",
+        gender_source="provider",
+        style="Clear",
+        models=["qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Mia",
+        "Mia",
+        gender="female",
+        gender_source="provider",
+        style="Bright",
+        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Bellona",
+        "Bellona",
+        gender="female",
+        gender_source="provider",
+        style="Dramatic",
+        tags=["Story"],
+        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Ethan",
+        "Ethan",
+        gender="male",
+        gender_source="provider",
+        style="Natural",
+        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Ryan",
+        "Ryan",
+        gender="male",
+        gender_source="provider",
+        style="Conversational",
+        models=["qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Aiden",
+        "Aiden",
+        gender="male",
+        gender_source="provider",
+        style="Measured",
+        models=["qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Neil",
+        "Neil",
+        gender="male",
+        gender_source="provider",
+        style="Steady",
+        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Vincent",
+        "Vincent",
+        gender="male",
+        gender_source="provider",
+        style="Deep",
+        tags=["Story"],
+        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Arthur",
+        "Arthur",
+        gender="male",
+        gender_source="provider",
+        style="Classic",
+        tags=["Story"],
+        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
+    ),
+    voice_option(
+        "Elias",
+        "Elias",
+        gender="male",
+        gender_source="provider",
+        style="Smooth",
+        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
+    ),
+]
+QWEN_LOCAL_VOICES = [
+    voice_option("Vivian", "Vivian", gender="female", gender_source="provider", style="Bright", tags=["Story"]),
+    voice_option("Serena", "Serena", gender="female", gender_source="provider", style="Warm", tags=["Story"]),
+    voice_option("Uncle_Fu", "Uncle Fu", gender="male", gender_source="provider", style="Mellow", tags=["Story"]),
+    voice_option("Dylan", "Dylan", gender="male", gender_source="provider", style="Clear"),
+    voice_option("Eric", "Eric", gender="male", gender_source="provider", style="Lively"),
+    voice_option("Ryan", "Ryan", gender="male", gender_source="provider", style="Dynamic", tags=["Story"]),
+    voice_option("Aiden", "Aiden", gender="male", gender_source="provider", style="Sunny"),
+    voice_option("Ono_Anna", "Ono Anna", gender="female", gender_source="provider", style="Playful"),
+    voice_option("Sohee", "Sohee", gender="female", gender_source="provider", style="Emotive"),
+]
+GEMINI_VOICES = [
+    voice_option("Zephyr", "Zephyr", gender="neutral", gender_source="estimated", style="Bright"),
+    voice_option("Puck", "Puck", gender="male", gender_source="estimated", style="Upbeat"),
+    voice_option("Charon", "Charon", gender="male", gender_source="estimated", style="Informative"),
+    voice_option("Kore", "Kore", gender="female", gender_source="estimated", style="Firm", tags=["Story"]),
+    voice_option("Fenrir", "Fenrir", gender="male", gender_source="estimated", style="Excitable"),
+    voice_option("Leda", "Leda", gender="female", gender_source="estimated", style="Youthful"),
+    voice_option("Orus", "Orus", gender="male", gender_source="estimated", style="Firm"),
+    voice_option("Aoede", "Aoede", gender="female", gender_source="estimated", style="Breezy"),
+    voice_option("Callirrhoe", "Callirrhoe", gender="female", gender_source="estimated", style="Easy-going"),
+    voice_option("Autonoe", "Autonoe", gender="female", gender_source="estimated", style="Bright"),
+    voice_option("Enceladus", "Enceladus", gender="male", gender_source="estimated", style="Breathy"),
+    voice_option("Iapetus", "Iapetus", gender="male", gender_source="estimated", style="Clear"),
+    voice_option("Umbriel", "Umbriel", gender="neutral", gender_source="estimated", style="Easy-going"),
+    voice_option("Algieba", "Algieba", gender="neutral", gender_source="estimated", style="Smooth"),
+    voice_option("Despina", "Despina", gender="female", gender_source="estimated", style="Smooth"),
+    voice_option("Erinome", "Erinome", gender="female", gender_source="estimated", style="Clear"),
+    voice_option("Algenib", "Algenib", gender="neutral", gender_source="estimated", style="Gravelly"),
+    voice_option("Rasalgethi", "Rasalgethi", gender="neutral", gender_source="estimated", style="Informative"),
+    voice_option("Laomedeia", "Laomedeia", gender="female", gender_source="estimated", style="Upbeat"),
+    voice_option("Achernar", "Achernar", gender="neutral", gender_source="estimated", style="Soft", tags=["Story"]),
+    voice_option("Alnilam", "Alnilam", gender="neutral", gender_source="estimated", style="Firm"),
+    voice_option("Schedar", "Schedar", gender="neutral", gender_source="estimated", style="Even"),
+    voice_option("Gacrux", "Gacrux", gender="neutral", gender_source="estimated", style="Mature", tags=["Story"]),
+    voice_option("Pulcherrima", "Pulcherrima", gender="female", gender_source="estimated", style="Forward"),
+    voice_option("Achird", "Achird", gender="neutral", gender_source="estimated", style="Friendly"),
+    voice_option("Zubenelgenubi", "Zubenelgenubi", gender="neutral", gender_source="estimated", style="Casual"),
+    voice_option("Vindemiatrix", "Vindemiatrix", gender="female", gender_source="estimated", style="Gentle"),
+    voice_option("Sadachbia", "Sadachbia", gender="neutral", gender_source="estimated", style="Lively"),
+    voice_option("Sadaltager", "Sadaltager", gender="neutral", gender_source="estimated", style="Knowledgeable"),
+    voice_option("Sulafat", "Sulafat", gender="female", gender_source="estimated", style="Warm", tags=["Story"]),
+]
+KOKORO_VOICES = [
+    voice_option("af_heart",   "Heart",   gender="female", gender_source="provider", style="Warm & Natural",        tags=["Story", "Narration", "Audiobook"]),
+    voice_option("af_sarah",   "Sarah",   gender="female", gender_source="provider", style="Clear & Conversational"),
+    voice_option("af_sky",     "Sky",     gender="female", gender_source="provider", style="Bright & Expressive"),
+    voice_option("am_adam",    "Adam",    gender="male",   gender_source="provider", style="Natural & Steady",      tags=["Story", "Narration", "Audiobook"]),
+    voice_option("am_michael", "Michael", gender="male",   gender_source="provider", style="Authoritative"),
+    voice_option("bf_emma",    "Emma",    gender="female", gender_source="provider", style="British · Warm"),
+    voice_option("bm_george",  "George",  gender="male",   gender_source="provider", style="British · Deep",        tags=["Story", "Narration", "Audiobook"]),
+    voice_option("bm_lewis",   "Lewis",   gender="male",   gender_source="provider", style="British · Calm"),
+]
+
+DEFAULT_NARRATION_STYLE = (
+    "Read like a premium audiobook narrator. Keep the pacing controlled, "
+    "the phrasing natural, and the delivery emotionally aware without adding "
+    "or changing any words from the text."
+)
+PROVIDER_TEST_SNIPPET = (
+    "When the room quieted, the story finally found its rhythm. "
+    "Read this sample with natural phrasing, steady pacing, and a warm, attentive tone."
+)
+PROVIDER_TEST_LOCAL_SNIPPET = "Quick local voice check. Keep it warm, clear, and steady."
+SUPABASE_DB_URL = env_value("SUPABASE_POOLER_URL") or env_value("SUPABASE_DB_URL") or env_value("DATABASE_URL")
+
+for directory in (DATA_ROOT, BOOKS_ROOT, JOBS_ROOT, DEFAULT_AUDIO_DIR, PREVIEW_ROOT, NEUTTS_VOICES_ROOT):
+    directory.mkdir(parents=True, exist_ok=True)
+
+_SENTRY_DSN = env_value("SENTRY_DSN")
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            integrations=[StarletteIntegration(), FastApiIntegration()],
+            traces_sample_rate=0.2,
+            send_default_pii=False,
+        )
+        logger.info("Sentry error tracking enabled.")
+    except ImportError:
+        logger.warning("SENTRY_DSN is set but sentry-sdk is not installed. Run: pip install -r requirements.txt")
+
+app = FastAPI(title="Storybook Reader", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/library", StaticFiles(directory=str(DATA_ROOT)), name="library")
+
+_PROTECTED_PREFIXES = ("/api/", "/library/")
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Require a Bearer token on all API and library routes when APP_SECRET_KEY is set.
+
+    If APP_SECRET_KEY is not configured, all requests pass through unchanged so that
+    local development works without any extra setup.
+    """
+    if APP_SECRET_KEY is None:
+        return await call_next(request)
+
+    path = request.url.path
+
+    # Allow CORS preflight and the health check without a key.
+    if request.method == "OPTIONS" or path == "/api/health":
+        return await call_next(request)
+
+    # Only protect API and library routes; static frontend assets are public.
+    if not any(path.startswith(prefix) for prefix in _PROTECTED_PREFIXES):
+        return await call_next(request)
+
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer ") and auth[7:].strip() == APP_SECRET_KEY:
+        return await call_next(request)
+
+    return JSONResponse({"detail": "Access key required."}, status_code=401)
+
+
+job_lock = threading.Lock()
+job_state: dict[str, dict[str, Any]] = {}
+polly_catalog_cache: dict[str, Any] | None = None
+polly_catalog_cache_expires_at = 0.0
+qwen_local_lock = threading.Lock()
+neutts_local_lock = threading.Lock()
+qwen_local_daemon_lock = threading.Lock()
+neutts_local_daemon_lock = threading.Lock()
+progress_store_lock = threading.Lock()
+progress_store_ready = False
+
+
+class JobCancelledError(RuntimeError):
+    pass
+
+
+class GenerateAudioRequest(BaseModel):
+    provider: Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local"] = "piper"
+    voice: str | None = None
+    model: str | None = None
+    output_format: Literal["mp3", "m4b", "wav"] = "mp3"
+    narration_style: str = Field(default=DEFAULT_NARRATION_STYLE, max_length=1500)
+    chunk_size: int | None = Field(default=None, ge=150, le=4000)
+    length_scale: float = Field(default=1.0, ge=0.6, le=1.5)
+    sentence_silence: float = Field(default=0.2, ge=0.0, le=1.0)
+
+
+class ProviderTestRequest(BaseModel):
+    provider: Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local"] = "piper"
+    voice: str | None = None
+    model: str | None = None
+    narration_style: str = Field(default=DEFAULT_NARRATION_STYLE, max_length=1500)
+    length_scale: float = Field(default=1.0, ge=0.6, le=1.5)
+    sentence_silence: float = Field(default=0.2, ge=0.0, le=1.0)
+
+
+class LiveAudioRequest(BaseModel):
+    provider: Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local"] = "openai"
+    voice: str | None = None
+    model: str | None = None
+    output_format: Literal["mp3", "wav"] = "mp3"
+    narration_style: str = Field(default=DEFAULT_NARRATION_STYLE, max_length=1500)
+    length_scale: float = Field(default=1.0, ge=0.6, le=1.5)
+    sentence_silence: float = Field(default=0.2, ge=0.0, le=1.0)
+    pageNumber: int = Field(ge=1)
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    text: str = Field(min_length=1, max_length=20000)
+
+
+class ProviderWarmupRequest(BaseModel):
+    provider: Literal["qwen_local", "neutts_local"] = "neutts_local"
+    voice: str | None = None
+    model: str | None = None
+
+
+class HighlightCreateRequest(BaseModel):
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    color: Literal["amber", "rose", "sky"]
+    kind: Literal["highlight", "note", "vocabulary"] = "highlight"
+    text: str = Field(min_length=1, max_length=800)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ReadingProgressRequest(BaseModel):
+    pageNumber: int = Field(ge=1)
+    totalPages: int = Field(ge=1)
+    textStart: int = Field(ge=0)
+    textEnd: int = Field(ge=0)
+    textLength: int = Field(ge=0)
+    updatedAt: str | None = None
+
+
+class AudioProgressRequest(BaseModel):
+    audioUrl: str = Field(min_length=1, max_length=4000)
+    currentTime: float = Field(ge=0)
+    wasPlaying: bool
+    updatedAt: str | None = None
+
+
+class LearningEventCreateRequest(BaseModel):
+    type: str = Field(min_length=1, max_length=80)
+    xpDelta: int = Field(default=0, ge=0, le=500)
+    bookId: str | None = Field(default=None, max_length=120)
+    deckId: str | None = Field(default=None, max_length=120)
+    cardId: str | None = Field(default=None, max_length=120)
+    label: str | None = Field(default=None, max_length=180)
+    detail: str | None = Field(default=None, max_length=500)
+
+
+class DirectBookUploadInitRequest(BaseModel):
+    fileName: str = Field(min_length=1, max_length=260)
+    contentType: str = Field(default="application/pdf", max_length=200)
+    size: int = Field(gt=0, le=BOOK_STORAGE_MAX_UPLOAD_BYTES)
+    title: str | None = Field(default=None, max_length=BOOK_TITLE_MAX_LENGTH)
+
+
+class DirectBookUploadCompleteRequest(BaseModel):
+    bookId: str = Field(min_length=12, max_length=12)
+    fileName: str = Field(min_length=1, max_length=260)
+    title: str | None = Field(default=None, max_length=BOOK_TITLE_MAX_LENGTH)
+
+
+class DictionarySensePayload(BaseModel):
+    partOfSpeech: str | None = None
+    definition: str
+    examples: list[str] = Field(default_factory=list)
+    registerLabel: str | None = None
+    notes: str | None = None
+    synonyms: list[str] = Field(default_factory=list)
+
+
+class DictionaryLookupPayload(BaseModel):
+    term: str
+    normalizedTerm: str
+    available: bool
+    exact: bool
+    source: str | None = None
+    pronunciation: str | None = None
+    entries: list[DictionarySensePayload] = Field(default_factory=list)
+    matchNote: str | None = None
+    relatedTerms: list[str] = Field(default_factory=list)
+    message: str | None = None
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def resolve_book_title(title: str | None, file_name: str) -> str:
+    fallback = Path(file_name).stem.strip() or Path(file_name).name.strip() or "Untitled book"
+    if title is None:
+        return fallback
+
+    normalized = re.sub(r"\s+", " ", title).strip()
+    if not normalized:
+        return fallback
+    if len(normalized) > BOOK_TITLE_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Book titles must be {BOOK_TITLE_MAX_LENGTH} characters or fewer.",
+        )
+    return normalized
+
+
+def normalize_dictionary_term(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value).strip()
+    normalized = normalized.strip(" \t\r\n\"“”'‘’.,;:!?()[]{}")
+    return normalized[:120]
+
+
+def normalize_samsung_ui_term(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value or "")
+    text = "".join(character for character in text if not unicodedata.combining(character))
+    text = text.replace("′", "'")
+    text = re.sub(r"[^A-Za-z0-9\s\-']", "", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def parse_android_bounds(value: str) -> tuple[int, int, int, int] | None:
+    match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", value.strip())
+    if not match:
+        return None
+    left, top, right, bottom = (int(part) for part in match.groups())
+    return left, top, right, bottom
+
+
+def center_of_bounds(value: str) -> tuple[int, int] | None:
+    bounds = parse_android_bounds(value)
+    if bounds is None:
+        return None
+    left, top, right, bottom = bounds
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def resolve_adb_executable() -> Path | None:
+    candidates: list[Path] = []
+    explicit = env_value("ADB_EXE")
+    if explicit:
+        candidates.append(Path(explicit))
+    which = shutil.which("adb")
+    if which:
+        candidates.append(Path(which))
+    winget_root = Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
+    candidates.extend(sorted(winget_root.glob("Google.PlatformTools*/platform-tools/adb.exe"), reverse=True))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            return resolved
+    return None
+
+
+def run_adb_command(
+    adb_executable: Path,
+    *args: str,
+    device_id: str | None = None,
+    timeout: float = 20,
+    check: bool = True,
+) -> str:
+    command = [str(adb_executable)]
+    if device_id:
+        command.extend(["-s", device_id])
+    command.extend(args)
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        timeout=timeout,
+        check=False,
+    )
+    if check and completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        stdout = completed.stdout.strip()
+        raise RuntimeError(stderr or stdout or f"adb exited with status {completed.returncode}.")
+    return completed.stdout
+
+
+def resolve_samsung_dictionary_device_id(adb_executable: Path) -> str | None:
+    run_adb_command(adb_executable, "start-server", timeout=15, check=False)
+    output = run_adb_command(adb_executable, "devices", timeout=15)
+    device_ids: list[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith("List of devices attached"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            device_ids.append(parts[0])
+    if SAMSUNG_DICTIONARY_DEVICE_ID:
+        return SAMSUNG_DICTIONARY_DEVICE_ID if SAMSUNG_DICTIONARY_DEVICE_ID in device_ids else None
+    if len(device_ids) == 1:
+        return device_ids[0]
+    return None
+
+
+def dictionary_db_schema_sql() -> str:
+    return """
+        create table if not exists entries (
+            lookup_term text not null,
+            term text not null,
+            pronunciation text,
+            part_of_speech text,
+            definition text not null,
+            examples_json text,
+            register text,
+            notes text,
+            source text,
+            priority integer not null default 0
+        );
+        create index if not exists idx_entries_lookup_term on entries (lookup_term);
+    """
+
+
+def ensure_dictionary_runtime_assets() -> None:
+    with _dictionary_runtime_assets_lock:
+        if OFFLINE_DICTIONARY_BUNDLE_DB.exists() and not OFFLINE_DICTIONARY_DB.exists():
+            OFFLINE_DICTIONARY_DB.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(OFFLINE_DICTIONARY_BUNDLE_DB, OFFLINE_DICTIONARY_DB)
+
+        bundled_wordnet_zip = OPEN_WORDNET_BUNDLE_DIR / "corpora" / "wordnet.zip"
+        runtime_wordnet_zip = OPEN_WORDNET_DATA_DIR / "corpora" / "wordnet.zip"
+        if bundled_wordnet_zip.exists() and not runtime_wordnet_zip.exists():
+            runtime_wordnet_zip.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(bundled_wordnet_zip, runtime_wordnet_zip)
+
+
+def ensure_dictionary_db_schema() -> None:
+    ensure_dictionary_runtime_assets()
+    OFFLINE_DICTIONARY_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(OFFLINE_DICTIONARY_DB) as conn:
+        conn.executescript(dictionary_db_schema_sql())
+        conn.commit()
+
+
+def dictionary_db_available() -> bool:
+    ensure_dictionary_runtime_assets()
+    return OFFLINE_DICTIONARY_DB.exists() and OFFLINE_DICTIONARY_DB.is_file()
+
+
+def default_dictionary_unavailable_payload(term: str) -> dict[str, Any]:
+    normalized = normalize_dictionary_term(term)
+    return {
+        "term": term,
+        "normalizedTerm": normalized,
+        "available": False,
+        "exact": False,
+        "source": None,
+        "pronunciation": None,
+        "entries": [],
+        "matchNote": None,
+        "relatedTerms": [],
+        "message": "Offline dictionary data is not installed yet.",
+    }
+
+
+def parse_dictionary_examples(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not trimmed:
+            return []
+        try:
+            parsed = json.loads(trimmed)
+        except json.JSONDecodeError:
+            parsed = [item.strip(" -\t") for item in trimmed.splitlines() if item.strip()]
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        if isinstance(parsed, str) and parsed.strip():
+            return [parsed.strip()]
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def clean_dictionary_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def normalize_dictionary_link_term(value: str | None) -> str:
+    return normalize_dictionary_term((value or "").replace("_", " "))
+
+
+def unique_dictionary_terms(values: list[str], *, exclude: set[str] | None = None, limit: int = 8) -> list[str]:
+    excluded = {item.casefold() for item in (exclude or set()) if item}
+    seen: set[str] = set()
+    items: list[str] = []
+
+    for raw_value in values:
+        term = normalize_dictionary_link_term(raw_value)
+        if not term:
+            continue
+        folded = term.casefold()
+        if folded in excluded or folded in seen:
+            continue
+        seen.add(folded)
+        items.append(term)
+        if len(items) >= limit:
+            break
+
+    return items
+
+
+def unique_dictionary_examples(values: list[str], *, limit: int = 3) -> list[str]:
+    seen: set[str] = set()
+    items: list[str] = []
+
+    for raw_value in values:
+        example = clean_dictionary_text(raw_value)
+        if not example:
+            continue
+        folded = example.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        items.append(example)
+        if len(items) >= limit:
+            break
+
+    return items
+
+
+def humanize_wordnet_lexname(value: str | None) -> str | None:
+    if not value:
+        return None
+    _, _, suffix = value.partition(".")
+    label = (suffix or value).replace("_", " ").strip()
+    return label.title() if label else None
+
+
+def fetch_dictionary_rows(term: str) -> list[sqlite3.Row]:
+    if not dictionary_db_available():
+        return []
+
+    query = """
+        select
+            term,
+            pronunciation,
+            part_of_speech,
+            definition,
+            examples_json,
+            source,
+            register,
+            notes
+        from entries
+        where lookup_term = ?
+        order by priority desc, rowid asc
+        limit 8
+    """
+
+    try:
+        with sqlite3.connect(f"file:{OFFLINE_DICTIONARY_DB}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(query, (term.casefold(),)).fetchall()
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if "no such table" in message:
+            return []
+        logger.error("Offline dictionary lookup failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Offline dictionary lookup failed.") from exc
+    except sqlite3.DatabaseError as exc:
+        logger.error("Offline dictionary lookup failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Offline dictionary lookup failed.") from exc
+
+
+def build_dictionary_payload(term: str, rows: list[sqlite3.Row]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "term": term,
+            "normalizedTerm": term,
+            "available": True,
+            "exact": False,
+            "source": None,
+            "pronunciation": None,
+            "entries": [],
+            "matchNote": None,
+            "relatedTerms": [],
+            "message": f"No offline definition found for “{term}”.",
+        }
+
+    first = rows[0]
+    source = first["source"] if "source" in first.keys() else None
+    pronunciation = first["pronunciation"] if "pronunciation" in first.keys() else None
+
+    entries = [
+        {
+            "partOfSpeech": row["part_of_speech"] if "part_of_speech" in row.keys() else None,
+            "definition": row["definition"],
+            "examples": parse_dictionary_examples(row["examples_json"] if "examples_json" in row.keys() else None),
+            "registerLabel": row["register"] if "register" in row.keys() else None,
+            "notes": row["notes"] if "notes" in row.keys() else None,
+            "synonyms": [],
+        }
+        for row in rows
+    ]
+
+    return {
+        "term": first["term"] or term,
+        "normalizedTerm": term,
+        "available": True,
+        "exact": str(first["term"] or "").casefold() == term.casefold(),
+        "source": source,
+        "pronunciation": pronunciation,
+        "entries": entries,
+        "matchNote": None,
+        "relatedTerms": [],
+        "message": None,
+    }
+
+
+def extract_ui_xml(output: str) -> str:
+    start = output.find("<?xml")
+    end = output.rfind("</hierarchy>")
+    if start < 0 or end < 0:
+        raise RuntimeError("Android UI dump did not return XML.")
+    return output[start : end + len("</hierarchy>")]
+
+
+def find_nodes_by_resource_id(root: ET.Element, resource_id: str) -> list[ET.Element]:
+    return [node for node in root.iter("node") if node.attrib.get("resource-id") == resource_id]
+
+
+def choose_samsung_search_result(root: ET.Element, normalized_term: str) -> ET.Element | None:
+    candidates = find_nodes_by_resource_id(root, "com.diotek.sec.lookup.dictionary:id/list_text")
+    if not candidates:
+        return None
+
+    exact = [
+        node
+        for node in candidates
+        if normalize_samsung_ui_term(node.attrib.get("text", "")) == normalized_term.casefold()
+    ]
+    if exact:
+        return exact[0]
+
+    prefix = [
+        node
+        for node in candidates
+        if normalize_samsung_ui_term(node.attrib.get("text", "")).startswith(normalized_term.casefold())
+    ]
+    if prefix:
+        return prefix[0]
+    return candidates[0]
+
+
+def parse_samsung_preview_entries(keyword: str, preview_text: str, source: str) -> list[dict[str, Any]]:
+    cleaned_lines = [re.sub(r"\s+", " ", line).strip() for line in preview_text.splitlines()]
+    lines = [line for line in cleaned_lines if line]
+    if not lines:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    prelude_notes: list[str] = []
+    current: dict[str, Any] | None = None
+
+    def flush_current() -> None:
+        nonlocal current
+        if current and current.get("definition"):
+            entries.append(current)
+        current = None
+
+    for line in lines:
+        if re.fullmatch(r"\([^)]*\)", line):
+            prelude_notes.append(line)
+            continue
+
+        sense_match = re.match(r"^(\d+)\s+([A-Z][A-Z-]+)\s*$", line)
+        if sense_match:
+            flush_current()
+            current = {
+                "term": keyword,
+                "part_of_speech": sense_match.group(2),
+                "definition": "",
+                "examples": [],
+                "register": None,
+                "notes": None,
+                "source": source,
+            }
+            continue
+
+        if current is None:
+            current = {
+                "term": keyword,
+                "part_of_speech": None,
+                "definition": "",
+                "examples": [],
+                "register": None,
+                "notes": None,
+                "source": source,
+            }
+
+        if line.startswith("◇"):
+            example = line.lstrip("◇ ").strip()
+            if example:
+                current["examples"].append(example)
+            continue
+
+        if line.startswith("∙") or line.startswith("•"):
+            note = line.lstrip("∙• ").strip()
+            if note:
+                existing_note = current.get("notes")
+                current["notes"] = f"{existing_note} {note}".strip() if existing_note else note
+            continue
+
+        definition = current["definition"]
+        current["definition"] = f"{definition} {line}".strip() if definition else line
+
+    flush_current()
+
+    if prelude_notes and entries:
+        first_note = " ".join(prelude_notes)
+        entries[0]["notes"] = f"{first_note} {entries[0]['notes']}".strip() if entries[0].get("notes") else first_note
+
+    if not entries and lines:
+        entries.append(
+            {
+                "term": keyword,
+                "part_of_speech": None,
+                "definition": " ".join(lines),
+                "examples": [],
+                "register": None,
+                "notes": " ".join(prelude_notes) if prelude_notes else None,
+                "source": source,
+            }
+        )
+    return entries
+
+
+def parse_samsung_exact_search(root: ET.Element, normalized_term: str) -> tuple[str | None, list[dict[str, Any]]]:
+    list_view_nodes = find_nodes_by_resource_id(root, "com.diotek.sec.lookup.dictionary:id/listview")
+    if not list_view_nodes:
+        no_match_nodes = find_nodes_by_resource_id(root, "com.diotek.sec.lookup.dictionary:id/tv_no_dictionary")
+        if no_match_nodes:
+            return no_match_nodes[0].attrib.get("text") or "No matches found.", []
+        return "Samsung Dictionary did not return a readable result.", []
+
+    list_view = list_view_nodes[0]
+    current_source: str | None = None
+    entries: list[dict[str, Any]] = []
+
+    for child in list_view:
+        dict_name_nodes = find_nodes_by_resource_id(child, "com.diotek.sec.lookup.dictionary:id/tv_dict_name")
+        if dict_name_nodes:
+            current_source = dict_name_nodes[0].attrib.get("text", "").strip() or None
+            continue
+
+        body_nodes = find_nodes_by_resource_id(child, "com.diotek.sec.lookup.dictionary:id/ly_body")
+        if not body_nodes or current_source != "Collins English":
+            continue
+
+        keyword_nodes = find_nodes_by_resource_id(child, "com.diotek.sec.lookup.dictionary:id/tv_keyword")
+        preview_nodes = find_nodes_by_resource_id(child, "com.diotek.sec.lookup.dictionary:id/tv_preview")
+        keyword = keyword_nodes[0].attrib.get("text", "").strip() if keyword_nodes else normalized_term
+        preview_text = preview_nodes[0].attrib.get("text", "").strip() if preview_nodes else ""
+        if not preview_text:
+            continue
+        entries.extend(
+            parse_samsung_preview_entries(
+                keyword=keyword,
+                preview_text=preview_text,
+                source=SAMSUNG_DICTIONARY_BRIDGE_LABEL,
+            )
+        )
+
+    if entries:
+        return None, entries
+    return "Samsung Dictionary returned no Collins English preview for this term.", []
+
+
+def cache_dictionary_entries(lookup_term: str, entries: list[dict[str, Any]]) -> None:
+    if not entries:
+        return
+    ensure_dictionary_db_schema()
+    with sqlite3.connect(OFFLINE_DICTIONARY_DB) as conn:
+        conn.execute("delete from entries where lookup_term = ?", (lookup_term.casefold(),))
+        for priority, entry in enumerate(entries, start=1):
+            conn.execute(
+                """
+                insert into entries (
+                    lookup_term,
+                    term,
+                    pronunciation,
+                    part_of_speech,
+                    definition,
+                    examples_json,
+                    register,
+                    notes,
+                    source,
+                    priority
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lookup_term.casefold(),
+                    entry["term"],
+                    entry.get("pronunciation"),
+                    entry.get("part_of_speech"),
+                    entry["definition"],
+                    json.dumps(entry.get("examples") or []),
+                    entry.get("register"),
+                    entry.get("notes"),
+                    entry.get("source"),
+                    len(entries) - priority,
+                ),
+            )
+        conn.commit()
+
+
+def samsung_dictionary_bridge_status() -> tuple[Path | None, str | None, str | None]:
+    adb_executable = resolve_adb_executable()
+    if adb_executable is None:
+        return None, None, "ADB is not installed on this machine."
+    device_id = resolve_samsung_dictionary_device_id(adb_executable)
+    if device_id is None:
+        if SAMSUNG_DICTIONARY_DEVICE_ID:
+            return adb_executable, None, f"Samsung dictionary device {SAMSUNG_DICTIONARY_DEVICE_ID} is not connected."
+        return adb_executable, None, "Connect exactly one Samsung phone with USB debugging enabled to use the live dictionary bridge."
+    return adb_executable, device_id, None
+
+
+def ensure_open_wordnet_available():
+    try:
+        import nltk
+    except ImportError:
+        return None, "NLTK is not installed, so the standalone offline dictionary is unavailable."
+
+    ensure_dictionary_runtime_assets()
+    OPEN_WORDNET_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if str(OPEN_WORDNET_DATA_DIR) not in nltk.data.path:
+        nltk.data.path.insert(0, str(OPEN_WORDNET_DATA_DIR))
+
+    try:
+        nltk.data.find("corpora/wordnet")
+    except LookupError:
+        try:
+            nltk.data.find("corpora/wordnet.zip")
+        except LookupError:
+            with _wordnet_download_lock:
+                try:
+                    nltk.data.find("corpora/wordnet")
+                except LookupError:
+                    try:
+                        nltk.data.find("corpora/wordnet.zip")
+                    except LookupError:
+                        success = nltk.download("wordnet", download_dir=str(OPEN_WORDNET_DATA_DIR), quiet=True)
+                        if not success:
+                            return None, "Open English WordNet could not be downloaded for standalone offline use."
+    try:
+        from nltk.corpus import wordnet as wn
+    except Exception as exc:  # pragma: no cover - import-path edge case
+        return None, f"Open English WordNet is installed but could not be loaded: {exc}"
+    return wn, None
+
+
+def wordnet_part_of_speech(label: str | None) -> str | None:
+    mapping = {
+        "n": "noun",
+        "v": "verb",
+        "a": "adjective",
+        "s": "adjective",
+        "r": "adverb",
+    }
+    return mapping.get(label or "")
+
+
+def resolve_wordnet_synsets(wn: Any, normalized: str) -> tuple[str | None, list[Any]]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(value: str | None) -> None:
+        candidate = clean_dictionary_text((value or "").replace(" ", "_"))
+        if not candidate:
+            return
+        folded = candidate.casefold()
+        if folded in seen:
+            return
+        seen.add(folded)
+        candidates.append(candidate)
+
+    add_candidate(normalized)
+    if " " not in normalized:
+        for pos in ("n", "v", "a", "s", "r"):
+            add_candidate(wn.morphy(normalized, pos))
+
+    for candidate in candidates:
+        synsets = wn.synsets(candidate)
+        if synsets:
+            return candidate, synsets
+    return None, []
+
+
+def rank_wordnet_synset(synset: Any) -> tuple[int, int]:
+    counts = [max(0, int(lemma.count())) for lemma in synset.lemmas()]
+    return (max(counts, default=0), sum(counts))
+
+
+def build_wordnet_payload(wn: Any, term: str) -> dict[str, Any] | None:
+    normalized = normalize_dictionary_term(term)
+    resolved_query, synsets = resolve_wordnet_synsets(wn, normalized)
+    if not synsets:
+        return None
+
+    resolved_term = normalize_dictionary_link_term(resolved_query) or normalized
+    exact = resolved_term.casefold() == normalized.casefold()
+    sorted_synsets = sorted(
+        enumerate(synsets),
+        key=lambda item: (-rank_wordnet_synset(item[1])[0], -rank_wordnet_synset(item[1])[1], item[0]),
+    )
+
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str]] = set()
+    related_candidates: list[str] = []
+
+    for _, synset in sorted_synsets:
+        definition = clean_dictionary_text(synset.definition())
+        if not definition:
+            continue
+
+        part_of_speech = wordnet_part_of_speech(getattr(synset, "pos", lambda: None)())
+        key = (part_of_speech, definition.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        examples = unique_dictionary_examples([example for example in synset.examples()], limit=3)
+        synonyms = unique_dictionary_terms(
+            [lemma.name() for lemma in synset.lemmas()],
+            exclude={normalized, resolved_term},
+            limit=6,
+        )
+
+        for lemma in synset.lemmas():
+            related_candidates.append(lemma.name())
+            for related in lemma.derivationally_related_forms():
+                related_candidates.append(related.name())
+            for similar in lemma.pertainyms():
+                related_candidates.append(similar.name())
+            for antonym in lemma.antonyms():
+                related_candidates.append(antonym.name())
+
+        entries.append(
+            {
+                "term": resolved_term,
+                "pronunciation": None,
+                "part_of_speech": part_of_speech,
+                "definition": definition,
+                "examples": examples,
+                "register": humanize_wordnet_lexname(synset.lexname() if hasattr(synset, "lexname") else None),
+                "notes": None,
+                "synonyms": synonyms,
+                "source": OPEN_WORDNET_SOURCE_LABEL,
+            }
+        )
+        if len(entries) >= 8:
+            break
+
+    if not entries:
+        return None
+
+    related_terms = unique_dictionary_terms(
+        related_candidates,
+        exclude={normalized, resolved_term},
+        limit=10,
+    )
+    match_note = None
+    if not exact:
+        match_note = f"Showing the base form “{resolved_term}” for “{normalized}”."
+
+    return {
+        "term": resolved_term,
+        "normalizedTerm": normalized,
+        "available": True,
+        "exact": exact,
+        "source": OPEN_WORDNET_SOURCE_LABEL,
+        "pronunciation": None,
+        "entries": [
+            {
+                "partOfSpeech": entry.get("part_of_speech"),
+                "definition": entry["definition"],
+                "examples": entry.get("examples") or [],
+                "registerLabel": entry.get("register"),
+                "notes": entry.get("notes"),
+                "synonyms": entry.get("synonyms") or [],
+            }
+            for entry in entries
+        ],
+        "matchNote": match_note,
+        "relatedTerms": related_terms,
+        "message": None,
+        "_cacheEntries": entries,
+    }
+
+
+def lookup_open_wordnet_dictionary(term: str) -> tuple[dict[str, Any] | None, str | None]:
+    normalized = normalize_dictionary_term(term)
+    wn, availability_error = ensure_open_wordnet_available()
+    if availability_error:
+        return None, availability_error
+    if wn is None:
+        return None, "Open English WordNet is unavailable."
+
+    payload = build_wordnet_payload(wn, normalized)
+    if payload is None:
+        return None, f"No standalone offline definition found for “{normalized}”."
+
+    cache_entries = payload.pop("_cacheEntries", [])
+    cache_dictionary_entries(normalized, cache_entries)
+    cached_rows = fetch_dictionary_rows(normalized)
+    if cached_rows:
+        payload["message"] = "Fetched from Open English WordNet and cached locally."
+        return payload, None
+    return None, "Open English WordNet returned data, but the local cache could not be written."
+
+
+def lookup_samsung_dictionary_via_adb(term: str) -> tuple[dict[str, Any] | None, str | None]:
+    normalized = normalize_dictionary_term(term)
+    adb_executable, device_id, bridge_error = samsung_dictionary_bridge_status()
+    if bridge_error or adb_executable is None or device_id is None:
+        return None, bridge_error
+
+    with _samsung_dictionary_bridge_lock:
+        try:
+            run_adb_command(adb_executable, "shell", "am", "force-stop", SAMSUNG_DICTIONARY_PACKAGE, device_id=device_id)
+            time.sleep(0.6)
+            run_adb_command(
+                adb_executable,
+                "shell",
+                "monkey",
+                "-p",
+                SAMSUNG_DICTIONARY_PACKAGE,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+                device_id=device_id,
+                timeout=20,
+            )
+            time.sleep(1.5)
+
+            search_root = ET.fromstring(extract_ui_xml(run_adb_command(adb_executable, "exec-out", "uiautomator", "dump", "/dev/tty", device_id=device_id, timeout=20)))
+            search_field = find_nodes_by_resource_id(search_root, "android:id/search_src_text")
+            if not search_field:
+                return None, "Samsung Dictionary opened, but the search field was not accessible."
+            search_center = center_of_bounds(search_field[0].attrib.get("bounds", ""))
+            if search_center is None:
+                return None, "Samsung Dictionary search field bounds were invalid."
+            run_adb_command(adb_executable, "shell", "input", "tap", str(search_center[0]), str(search_center[1]), device_id=device_id)
+            time.sleep(0.3)
+
+            encoded_term = normalized.replace(" ", "%s")
+            run_adb_command(adb_executable, "shell", "input", "text", encoded_term, device_id=device_id)
+            time.sleep(1.2)
+
+            results_root = ET.fromstring(extract_ui_xml(run_adb_command(adb_executable, "exec-out", "uiautomator", "dump", "/dev/tty", device_id=device_id, timeout=20)))
+            result_node = choose_samsung_search_result(results_root, normalized)
+            if result_node is None:
+                return None, f"Samsung Dictionary returned no matches for “{normalized}”."
+            result_center = center_of_bounds(result_node.attrib.get("bounds", ""))
+            if result_center is None:
+                return None, "Samsung Dictionary result bounds were invalid."
+            run_adb_command(adb_executable, "shell", "input", "tap", str(result_center[0]), str(result_center[1]), device_id=device_id)
+            time.sleep(1.2)
+
+            exact_root = ET.fromstring(extract_ui_xml(run_adb_command(adb_executable, "exec-out", "uiautomator", "dump", "/dev/tty", device_id=device_id, timeout=20)))
+            message, entries = parse_samsung_exact_search(exact_root, normalized)
+            if not entries:
+                return None, message or f"Samsung Dictionary returned no matches for “{normalized}”."
+
+            cache_dictionary_entries(normalized, entries)
+            cached_rows = fetch_dictionary_rows(normalized)
+            if cached_rows:
+                payload = build_dictionary_payload(normalized, cached_rows)
+                payload["message"] = "Fetched from the connected Samsung Dictionary and cached locally."
+                return payload, None
+
+            return None, "Samsung Dictionary returned data, but the local cache could not be written."
+        except (ET.ParseError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            return None, f"Samsung Dictionary bridge failed: {exc}"
+
+
+def lookup_offline_dictionary(term: str) -> dict[str, Any]:
+    normalized = normalize_dictionary_term(term)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Select a word or phrase to look up.")
+
+    rows = fetch_dictionary_rows(normalized)
+    if rows:
+        source = rows[0]["source"] if "source" in rows[0].keys() else None
+        if source == OPEN_WORDNET_SOURCE_LABEL:
+            wn, availability_error = ensure_open_wordnet_available()
+            if not availability_error and wn is not None:
+                wordnet_payload = build_wordnet_payload(wn, normalized)
+                if wordnet_payload is not None:
+                    wordnet_payload["message"] = None
+                    wordnet_payload.pop("_cacheEntries", None)
+                    return wordnet_payload
+        payload = build_dictionary_payload(normalized, rows)
+        payload["message"] = None
+        return payload
+
+    samsung_payload, samsung_error = lookup_samsung_dictionary_via_adb(normalized)
+    if samsung_payload is not None:
+        return samsung_payload
+
+    wordnet_payload, wordnet_error = lookup_open_wordnet_dictionary(normalized)
+    if wordnet_payload is not None:
+        if samsung_error and not wordnet_payload.get("message"):
+            wordnet_payload["message"] = samsung_error
+        return wordnet_payload
+
+    failure_notes = [message for message in (samsung_error, wordnet_error) if message]
+    failure_message = " ".join(dict.fromkeys(failure_notes)) if failure_notes else None
+
+    if dictionary_db_available():
+        payload = build_dictionary_payload(normalized, [])
+        if failure_message:
+            payload["message"] = failure_message
+        return payload
+
+    payload = default_dictionary_unavailable_payload(term)
+    if failure_message:
+        payload["message"] = failure_message
+    return payload
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    for attempt in range(10):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    for attempt in range(10):
+        try:
+            temp_path.replace(path)
+            return
+        except PermissionError:
+            if attempt == 9:
+                temp_path.unlink(missing_ok=True)
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
+def parse_client_timestamp(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.now(timezone.utc)
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
+
+
+def serialize_timestamp(value: datetime | None) -> str:
+    if value is None:
+        return utc_now()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def progress_store_configured() -> bool:
+    return SUPABASE_DB_URL is not None
+
+
+def load_psycopg():
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise RuntimeError("Supabase progress syncing requires psycopg. Reinstall with `pip install -r requirements.txt`.") from exc
+
+    return psycopg
+
+
+# Each entry is a list of SQL statements for that migration version (1-indexed).
+# Migrations are idempotent — use IF NOT EXISTS / IF EXISTS guards so re-running is safe.
+# NEVER modify existing entries. Add new lists at the end for future schema changes.
+_SCHEMA_MIGRATIONS: list[list[str]] = [
+    # Version 1 — initial progress tables
+    [
+        """
+        create table if not exists reader_progress (
+            book_id text primary key,
+            page_number integer not null,
+            total_pages integer not null,
+            text_start integer not null,
+            text_end integer not null,
+            text_length integer not null,
+            updated_at timestamptz not null default now()
+        )
+        """,
+        """
+        create table if not exists audio_progress (
+            book_id text primary key,
+            audio_url text not null,
+            playback_time double precision not null,
+            was_playing boolean not null,
+            updated_at timestamptz not null default now()
+        )
+        """,
+    ],
+    # Version 2 — add future columns here as a new list entry, for example:
+    # [
+    #     "alter table reader_progress add column if not exists highlight_count integer not null default 0",
+    # ],
+]
+
+
+def _run_schema_migrations(conn: Any) -> None:
+    """Apply any pending schema migrations and record them in schema_migrations."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            create table if not exists schema_migrations (
+                version integer primary key,
+                applied_at timestamptz not null default now()
+            )
+            """
+        )
+        conn.commit()
+
+        cur.execute("select version from schema_migrations order by version")
+        applied = {row[0] for row in cur.fetchall()}
+
+        for version, statements in enumerate(_SCHEMA_MIGRATIONS, start=1):
+            if version in applied:
+                continue
+            for sql in statements:
+                cur.execute(sql)
+            cur.execute("insert into schema_migrations (version) values (%s)", (version,))
+            conn.commit()
+            logger.info("Applied schema migration %d", version)
+
+
+def ensure_progress_store() -> None:
+    global progress_store_ready
+
+    if progress_store_ready or not progress_store_configured():
+        return
+
+    with progress_store_lock:
+        if progress_store_ready or not progress_store_configured():
+            return
+
+        psycopg = load_psycopg()
+
+        try:
+            with psycopg.connect(SUPABASE_DB_URL) as conn:
+                _run_schema_migrations(conn)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to connect to Supabase Postgres: {exc}") from exc
+
+        progress_store_ready = True
+
+
+@contextmanager
+def progress_store_cursor():
+    if not progress_store_configured():
+        raise RuntimeError("SUPABASE_DB_URL is not configured.")
+
+    ensure_progress_store()
+    psycopg = load_psycopg()
+
+    try:
+        with psycopg.connect(SUPABASE_DB_URL) as conn:
+            with conn.cursor() as cur:
+                yield cur
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to access Supabase progress store: {exc}") from exc
+
+
+def serialize_reading_progress_row(row: tuple[Any, ...] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+
+    page_number, total_pages, text_start, text_end, text_length, updated_at = row
+    return {
+        "pageNumber": page_number,
+        "totalPages": total_pages,
+        "textStart": text_start,
+        "textEnd": text_end,
+        "textLength": text_length,
+        "updatedAt": serialize_timestamp(updated_at),
+    }
+
+
+def serialize_audio_progress_row(row: tuple[Any, ...] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+
+    audio_url, current_time, was_playing, updated_at = row
+    return {
+        "url": audio_url,
+        "currentTime": current_time,
+        "wasPlaying": was_playing,
+        "updatedAt": serialize_timestamp(updated_at),
+    }
+
+
+def book_progress_payload(book_id: str) -> dict[str, Any]:
+    load_book_or_404(book_id)
+
+    if not progress_store_configured():
+        return {"reading": None, "audio": None}
+
+    try:
+        with progress_store_cursor() as cur:
+            cur.execute(
+                """
+                select page_number, total_pages, text_start, text_end, text_length, updated_at
+                from reader_progress
+                where book_id = %s
+                """,
+                (book_id,),
+            )
+            reading = serialize_reading_progress_row(cur.fetchone())
+            cur.execute(
+                """
+                select audio_url, playback_time, was_playing, updated_at
+                from audio_progress
+                where book_id = %s
+                """,
+                (book_id,),
+            )
+            audio = serialize_audio_progress_row(cur.fetchone())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "reading": reading,
+        "audio": audio,
+    }
+
+
+def write_book_reading_progress(book_id: str, request: ReadingProgressRequest) -> dict[str, Any]:
+    load_book_or_404(book_id)
+
+    if request.textEnd < request.textStart:
+        raise HTTPException(status_code=400, detail="Reading progress end must be after the start.")
+    if request.textLength and request.textEnd > request.textLength:
+        raise HTTPException(status_code=400, detail="Reading progress end cannot exceed the book length.")
+
+    updated_at = parse_client_timestamp(request.updatedAt)
+    payload = {
+        "pageNumber": request.pageNumber,
+        "totalPages": request.totalPages,
+        "textStart": request.textStart,
+        "textEnd": request.textEnd,
+        "textLength": request.textLength,
+        "updatedAt": serialize_timestamp(updated_at),
+    }
+
+    if not progress_store_configured():
+        return payload
+
+    try:
+        with progress_store_cursor() as cur:
+            cur.execute(
+                """
+                insert into reader_progress (
+                    book_id,
+                    page_number,
+                    total_pages,
+                    text_start,
+                    text_end,
+                    text_length,
+                    updated_at
+                )
+                values (%s, %s, %s, %s, %s, %s, %s)
+                on conflict (book_id) do update
+                set
+                    page_number = excluded.page_number,
+                    total_pages = excluded.total_pages,
+                    text_start = excluded.text_start,
+                    text_end = excluded.text_end,
+                    text_length = excluded.text_length,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    book_id,
+                    request.pageNumber,
+                    request.totalPages,
+                    request.textStart,
+                    request.textEnd,
+                    request.textLength,
+                    updated_at,
+                ),
+            )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return payload
+
+
+def write_book_audio_progress(book_id: str, request: AudioProgressRequest) -> dict[str, Any]:
+    load_book_or_404(book_id)
+
+    updated_at = parse_client_timestamp(request.updatedAt)
+    payload = {
+        "url": request.audioUrl,
+        "currentTime": request.currentTime,
+        "wasPlaying": request.wasPlaying,
+        "updatedAt": serialize_timestamp(updated_at),
+    }
+
+    if not progress_store_configured():
+        return payload
+
+    try:
+        with progress_store_cursor() as cur:
+            cur.execute(
+                """
+                insert into audio_progress (
+                    book_id,
+                    audio_url,
+                    playback_time,
+                    was_playing,
+                    updated_at
+                )
+                values (%s, %s, %s, %s, %s)
+                on conflict (book_id) do update
+                set
+                    audio_url = excluded.audio_url,
+                    playback_time = excluded.playback_time,
+                    was_playing = excluded.was_playing,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    book_id,
+                    request.audioUrl,
+                    request.currentTime,
+                    request.wasPlaying,
+                    updated_at,
+                ),
+            )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return payload
+
+
+def delete_book_audio_progress(book_id: str) -> dict[str, bool]:
+    load_book_or_404(book_id)
+
+    if not progress_store_configured():
+        return {"ok": True}
+
+    try:
+        with progress_store_cursor() as cur:
+            cur.execute("delete from audio_progress where book_id = %s", (book_id,))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {"ok": True}
+
+
+def delete_book_progress_records(book_id: str) -> None:
+    if not progress_store_configured():
+        return
+
+    try:
+        with progress_store_cursor() as cur:
+            cur.execute("delete from reader_progress where book_id = %s", (book_id,))
+            cur.execute("delete from audio_progress where book_id = %s", (book_id,))
+    except RuntimeError:
+        return
+
+
+def relative_url(path: Path) -> str:
+    return f"/library/{path.relative_to(DATA_ROOT).as_posix()}"
+
+
+def book_dir(book_id: str) -> Path:
+    return BOOKS_ROOT / book_id
+
+
+def book_meta_path(book_id: str) -> Path:
+    return book_dir(book_id) / "meta.json"
+
+
+def book_text_path(book_id: str) -> Path:
+    return book_dir(book_id) / "cleaned.txt"
+
+
+def book_live_audio_dir(book_id: str) -> Path:
+    return book_dir(book_id) / "live_audio"
+
+
+def book_highlights_path(book_id: str) -> Path:
+    return book_dir(book_id) / "highlights.json"
+
+
+def job_path(job_id: str) -> Path:
+    return JOBS_ROOT / f"{job_id}.json"
+
+
+def book_storage_enabled() -> bool:
+    return BOOK_STORAGE_BUCKET is not None
+
+
+def storage_key(*parts: str) -> str:
+    cleaned = [part.strip("/") for part in parts if part and part.strip("/")]
+    if BOOK_STORAGE_PREFIX:
+        cleaned.insert(0, BOOK_STORAGE_PREFIX)
+    return "/".join(cleaned)
+
+
+def book_storage_base_prefix(book_id: str) -> str:
+    return storage_key("books", book_id)
+
+
+def book_source_storage_key(book_id: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/source.pdf"
+
+
+def book_meta_storage_key(book_id: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/meta.json"
+
+
+def book_text_storage_key(book_id: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/cleaned.txt"
+
+
+def book_highlights_storage_key(book_id: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/highlights.json"
+
+
+def book_live_audio_storage_key(book_id: str, file_name: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/live-audio/{file_name}"
+
+
+def preview_audio_storage_key(file_name: str) -> str:
+    return storage_key("previews", file_name)
+
+
+def read_storage_bytes(key: str) -> bytes | None:
+    if not BOOK_STORAGE_BUCKET:
+        raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
+
+    client = create_book_storage_client()
+    _, _, _, ClientError, _, _, _ = load_boto3()
+
+    try:
+        response = client.get_object(Bucket=BOOK_STORAGE_BUCKET, Key=key)
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return None
+        raise RuntimeError(f"Failed to read book storage object {key}: {exc}") from exc
+
+    return response["Body"].read()
+
+
+def write_storage_bytes(key: str, payload: bytes, *, content_type: str) -> None:
+    if not BOOK_STORAGE_BUCKET:
+        raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
+
+    client = create_book_storage_client()
+    try:
+        client.put_object(
+            Bucket=BOOK_STORAGE_BUCKET,
+            Key=key,
+            Body=payload,
+            ContentType=content_type,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write book storage object {key}: {exc}") from exc
+
+
+def read_storage_json(key: str) -> dict[str, Any] | None:
+    payload = read_storage_bytes(key)
+    if payload is None:
+        return None
+    return json.loads(payload.decode("utf-8"))
+
+
+def write_storage_json(key: str, payload: dict[str, Any]) -> None:
+    write_storage_bytes(key, json.dumps(payload, indent=2).encode("utf-8"), content_type="application/json")
+
+
+def list_storage_meta_payloads() -> list[dict[str, Any]]:
+    if not BOOK_STORAGE_BUCKET:
+        return []
+
+    client = create_book_storage_client()
+    prefix = f"{storage_key('books')}/"
+    paginator = client.get_paginator("list_objects_v2")
+    results: list[dict[str, Any]] = []
+
+    try:
+        for page in paginator.paginate(Bucket=BOOK_STORAGE_BUCKET, Prefix=prefix):
+            for item in page.get("Contents", []):
+                key = str(item.get("Key", ""))
+                if not key.endswith("/meta.json"):
+                    continue
+                payload = read_storage_json(key)
+                if payload is not None:
+                    results.append(payload)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to list stored books: {exc}") from exc
+
+    return results
+
+
+def delete_storage_prefix(prefix: str) -> None:
+    if not BOOK_STORAGE_BUCKET:
+        return
+
+    client = create_book_storage_client()
+    paginator = client.get_paginator("list_objects_v2")
+    keys: list[dict[str, str]] = []
+
+    for page in paginator.paginate(Bucket=BOOK_STORAGE_BUCKET, Prefix=prefix.rstrip("/") + "/"):
+        for item in page.get("Contents", []):
+            key = item.get("Key")
+            if key:
+                keys.append({"Key": str(key)})
+
+    if not keys:
+        return
+
+    for start in range(0, len(keys), 1000):
+        batch = keys[start : start + 1000]
+        client.delete_objects(Bucket=BOOK_STORAGE_BUCKET, Delete={"Objects": batch, "Quiet": True})
+
+
+def download_storage_object(key: str, destination: Path) -> None:
+    payload = read_storage_bytes(key)
+    if payload is None:
+        raise FileNotFoundError(key)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+
+
+def read_book_meta(book_id: str) -> dict[str, Any] | None:
+    if book_storage_enabled():
+        return read_storage_json(book_meta_storage_key(book_id))
+
+    path = book_meta_path(book_id)
+    if not path.exists():
+        return None
+    return read_json(path)
+
+
+def write_book_meta(book_id: str, payload: dict[str, Any]) -> None:
+    if book_storage_enabled():
+        write_storage_json(book_meta_storage_key(book_id), payload)
+        return
+
+    write_json(book_meta_path(book_id), payload)
+
+
+def read_book_text(book_id: str) -> str:
+    if book_storage_enabled():
+        payload = read_storage_bytes(book_text_storage_key(book_id))
+        if payload is None:
+            raise FileNotFoundError(book_id)
+        return payload.decode("utf-8")
+
+    return book_text_path(book_id).read_text(encoding="utf-8")
+
+
+def write_book_text(book_id: str, text: str) -> None:
+    if book_storage_enabled():
+        write_storage_bytes(book_text_storage_key(book_id), text.encode("utf-8"), content_type="text/plain; charset=utf-8")
+        return
+
+    book_text_path(book_id).write_text(text, encoding="utf-8")
+
+
+def source_url_for_book(meta: dict[str, Any]) -> str:
+    if meta.get("sourceStorage"):
+        return f"/api/books/{meta['id']}/source"
+    return relative_url(Path(meta["sourcePath"]))
+
+
+def list_book_meta_payloads() -> list[dict[str, Any]]:
+    if book_storage_enabled():
+        return list_storage_meta_payloads()
+
+    results: list[dict[str, Any]] = []
+    for meta_file in BOOKS_ROOT.glob("*/meta.json"):
+        results.append(read_json(meta_file))
+    return results
+
+
+def get_voice_models() -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    for voice_path in sorted(VOICES_ROOT.glob("*.onnx")):
+        results.append(
+            {
+                "id": str(voice_path.resolve()),
+                "label": voice_path.stem.replace("-", " "),
+            }
+        )
+    return results
+
+
+def read_neutts_reference_meta(reference_dir: Path) -> dict[str, Any]:
+    meta_path = reference_dir / "meta.json"
+    if not meta_path.exists():
+        return {}
+
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def neutts_reference_pack_path(voice_id: str) -> Path:
+    root = NEUTTS_VOICES_ROOT.resolve()
+    candidate = (root / voice_id).resolve()
+    if candidate == root or root not in candidate.parents:
+        raise RuntimeError(f"Invalid NeuTTS voice id: {voice_id}")
+    if not candidate.is_dir():
+        raise RuntimeError(f"NeuTTS voice pack not found: {voice_id}")
+    return candidate
+
+
+def neutts_reference_pack_complete(reference_dir: Path) -> bool:
+    return (reference_dir / "reference.wav").exists() and (reference_dir / "reference.txt").exists()
+
+
+def list_neutts_reference_packs() -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for reference_dir in sorted(NEUTTS_VOICES_ROOT.iterdir()):
+        if not reference_dir.is_dir() or not neutts_reference_pack_complete(reference_dir):
+            continue
+
+        meta = read_neutts_reference_meta(reference_dir)
+        label = str(meta.get("label") or "").strip() or reference_dir.name.replace("-", " ")
+        gender = meta.get("gender")
+        gender_source = meta.get("genderSource")
+        style = str(meta.get("style") or "").strip() or None
+        tags = [str(item).strip() for item in meta.get("tags", []) if str(item).strip()] if isinstance(meta.get("tags"), list) else None
+        models = (
+            [str(item).strip() for item in meta.get("models", []) if str(item).strip()]
+            if isinstance(meta.get("models"), list)
+            else None
+        )
+        results.append(
+            voice_option(
+                reference_dir.name,
+                label,
+                gender=gender if gender in {"male", "female", "neutral"} else None,
+                gender_source=gender_source if gender_source in {"provider", "estimated"} else None,
+                style=style,
+                tags=tags or None,
+                models=models or None,
+            )
+        )
+    return results
+
+
+def polly_sdk_available() -> bool:
+    return importlib.util.find_spec("boto3") is not None
+
+
+def load_boto3():
+    if not polly_sdk_available():
+        raise RuntimeError("Amazon Polly support requires boto3. Reinstall with `pip install -r requirements.txt`.")
+
+    try:
+        import boto3
+        from botocore.config import Config
+        from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, NoRegionError, ProfileNotFound
+    except ImportError as exc:
+        raise RuntimeError("Amazon Polly support requires boto3. Reinstall with `pip install -r requirements.txt`.") from exc
+
+    return boto3, Config, BotoCoreError, ClientError, NoCredentialsError, NoRegionError, ProfileNotFound
+
+
+def dashscope_sdk_available() -> bool:
+    return importlib.util.find_spec("dashscope") is not None
+
+
+def load_dashscope():
+    if not dashscope_sdk_available():
+        raise RuntimeError("Qwen TTS support requires dashscope. Reinstall with `pip install -r requirements.txt`.")
+
+    try:
+        import dashscope
+    except ImportError as exc:
+        raise RuntimeError("Qwen TTS support requires dashscope. Reinstall with `pip install -r requirements.txt`.") from exc
+
+    dashscope.base_http_api_url = DASHSCOPE_BASE_HTTP_API_URL
+    return dashscope
+
+
+def qwen_local_python_path() -> Path:
+    if not QWEN_LOCAL_PYTHON:
+        raise RuntimeError(
+            "QWEN_LOCAL_PYTHON is not configured. Point it at the Python executable inside your qwen-tts environment."
+        )
+
+    candidate = Path(QWEN_LOCAL_PYTHON).expanduser()
+    if candidate.exists():
+        return candidate.resolve()
+
+    located = shutil.which(QWEN_LOCAL_PYTHON)
+    if located:
+        return Path(located).resolve()
+
+    raise RuntimeError(f"QWEN_LOCAL_PYTHON could not be resolved: {QWEN_LOCAL_PYTHON}")
+
+
+def qwen_local_runtime_configured() -> bool:
+    if not QWEN_LOCAL_HELPER.exists():
+        return False
+    try:
+        qwen_local_python_path()
+    except RuntimeError:
+        return False
+    return True
+
+
+def qwen_local_daemon_base_url() -> str:
+    return f"http://{QWEN_LOCAL_DAEMON_HOST}:{QWEN_LOCAL_DAEMON_PORT}"
+
+
+def qwen_local_daemon_healthcheck() -> bool:
+    try:
+        response = httpx.get(f"{qwen_local_daemon_base_url()}/health", timeout=2.0)
+    except httpx.HTTPError:
+        return False
+    return response.status_code == 200
+
+
+def start_qwen_local_daemon() -> None:
+    python_exe = qwen_local_python_path()
+    command = [
+        str(python_exe),
+        str(QWEN_LOCAL_HELPER),
+        "--daemon",
+        "--host",
+        QWEN_LOCAL_DAEMON_HOST,
+        "--port",
+        str(QWEN_LOCAL_DAEMON_PORT),
+    ]
+
+    daemon_log_path = ROOT / "output" / "qwen-local-daemon.log"
+    daemon_log_path.parent.mkdir(parents=True, exist_ok=True)
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    with daemon_log_path.open("a", encoding="utf-8") as log_handle:
+        subprocess.Popen(
+            command,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=log_handle,
+            creationflags=creationflags,
+        )
+
+
+def ensure_qwen_local_daemon_running() -> None:
+    if qwen_local_daemon_healthcheck():
+        return
+
+    with qwen_local_daemon_lock:
+        if qwen_local_daemon_healthcheck():
+            return
+
+        start_qwen_local_daemon()
+        deadline = time.time() + max(5.0, QWEN_LOCAL_DAEMON_STARTUP_SECONDS)
+        while time.time() < deadline:
+            if qwen_local_daemon_healthcheck():
+                return
+            time.sleep(0.5)
+
+    raise RuntimeError("Local Qwen daemon did not become ready in time.")
+
+
+def run_qwen_local_one_shot_request(request_payload: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+    python_exe = qwen_local_python_path()
+    if not QWEN_LOCAL_HELPER.exists():
+        raise RuntimeError(f"Local Qwen helper script not found: {QWEN_LOCAL_HELPER}")
+
+    with tempfile.TemporaryDirectory(prefix="storybook_qwen_request_", dir=str(DEFAULT_AUDIO_DIR)) as temp_dir:
+        request_path = Path(temp_dir) / "request.json"
+        request_path.write_text(json.dumps(request_payload), encoding="utf-8")
+        command = [str(python_exe), str(QWEN_LOCAL_HELPER), "--input-json", str(request_path)]
+        try:
+            with qwen_local_lock:
+                completed = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                    timeout=timeout_seconds,
+                )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Local Qwen synthesis timed out after {int(timeout_seconds)} seconds.") from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            raise RuntimeError(f"Local Qwen synthesis failed: {detail}") from exc
+
+    lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("Local Qwen synthesis did not return a result manifest.")
+    try:
+        payload = json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Local Qwen synthesis returned malformed JSON output.") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Local Qwen synthesis returned an invalid response payload.")
+    return payload
+
+
+def run_qwen_daemon_request(
+    path: str,
+    request_payload: dict[str, Any],
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    ensure_qwen_local_daemon_running()
+    url = f"{qwen_local_daemon_base_url()}{path}"
+    try:
+        response = httpx.post(url, json=request_payload, timeout=timeout_seconds)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Local Qwen daemon request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            payload = response.json()
+            detail = str(payload.get("error") or payload.get("detail") or detail)
+        except Exception:
+            pass
+        raise RuntimeError(f"Local Qwen daemon request failed: {detail}")
+
+    try:
+        payload = response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Local Qwen daemon returned malformed JSON output.") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Local Qwen daemon returned an invalid response payload.")
+    return payload
+
+
+def run_qwen_helper_request(
+    request_payload: dict[str, Any],
+    *,
+    timeout_seconds: float,
+    prefer_daemon: bool = True,
+) -> dict[str, Any]:
+    if prefer_daemon:
+        try:
+            return run_qwen_daemon_request("/v1/synthesize", request_payload, timeout_seconds=timeout_seconds)
+        except RuntimeError as exc:
+            print(f"Qwen local daemon unavailable, falling back to one-shot execution: {exc}")
+    return run_qwen_local_one_shot_request(request_payload, timeout_seconds=timeout_seconds)
+
+
+def warmup_qwen_local_runtime(model_name: str, voice_id: str) -> dict[str, Any]:
+    request_payload: dict[str, Any] = {
+        "action": "warmup",
+        "model": model_name,
+        "voice": voice_id,
+        "warmup_text": PROVIDER_TEST_LOCAL_SNIPPET,
+        "device": QWEN_LOCAL_DEVICE,
+        "dtype": QWEN_LOCAL_DTYPE,
+        "attn_implementation": QWEN_LOCAL_ATTN_IMPLEMENTATION,
+        "batch_size": QWEN_LOCAL_BATCH_SIZE,
+        "sox_dir": QWEN_LOCAL_SOX_DIR,
+    }
+
+    try:
+        return run_qwen_daemon_request(
+            "/v1/warmup",
+            request_payload,
+            timeout_seconds=max(30.0, min(QWEN_LOCAL_TIMEOUT_SECONDS, 300.0)),
+        )
+    except RuntimeError as exc:
+        print(f"Qwen local warmup could not start resident runtime: {exc}")
+        return {
+            "action": "warmup",
+            "warmed": False,
+            "voice": voice_id,
+            "model": model_name,
+        }
+
+
+def wsl_executable_path() -> Path:
+    located = shutil.which("wsl.exe") or shutil.which("wsl")
+    if located:
+        return Path(located).resolve()
+
+    system_root = os.environ.get("SystemRoot")
+    if system_root:
+        candidate = Path(system_root) / "System32" / "wsl.exe"
+        if candidate.exists():
+            return candidate.resolve()
+
+    raise RuntimeError("WSL is not available on this machine.")
+
+
+def neutts_local_wsl_python() -> str:
+    if not NEUTTS_WSL_PYTHON:
+        raise RuntimeError(
+            "NEUTTS_WSL_PYTHON is not configured. Point it at the Python executable inside your WSL NeuTTS environment."
+        )
+    return NEUTTS_WSL_PYTHON.strip()
+
+
+def windows_path_to_wsl(path: Path | str) -> str:
+    raw = str(path)
+    if raw.startswith("/"):
+        return raw
+
+    resolved = str(Path(raw).expanduser().resolve()).replace("\\", "/")
+    if len(resolved) >= 3 and resolved[1:3] == ":/":
+        return f"/mnt/{resolved[0].lower()}{resolved[2:]}"
+    return resolved
+
+
+def wsl_path_to_windows(path: Path | str) -> Path:
+    raw = str(path).strip()
+    if raw.startswith("/mnt/") and len(raw) > 6:
+        drive = raw[5]
+        remainder = raw[6:].replace("/", "\\")
+        return Path(f"{drive.upper()}:{remainder}")
+    return Path(raw)
+
+
+def neutts_local_runtime_configured() -> bool:
+    if not NEUTTS_LOCAL_HELPER.exists():
+        return False
+    try:
+        wsl_executable_path()
+        neutts_local_wsl_python()
+    except RuntimeError:
+        return False
+    return True
+
+
+def neutts_local_daemon_base_url() -> str:
+    return f"http://{NEUTTS_LOCAL_DAEMON_HOST}:{NEUTTS_LOCAL_DAEMON_PORT}"
+
+
+def neutts_remote_configured() -> bool:
+    """True when a remote NeuTTS server URL is configured (works on Vercel/production)."""
+    return bool(NEUTTS_REMOTE_URL)
+
+
+def neutts_runtime_configured() -> bool:
+    """True when NeuTTS can be used — either via remote server or local WSL."""
+    return neutts_remote_configured() or neutts_local_runtime_configured()
+
+
+def synthesize_neutts_remote(
+    chunks: list[str],
+    voice: str,
+    model: str,
+    output_path: Path,
+) -> None:
+    """
+    Call the remote NeuTTS server, receive WAV bytes, write to output_path.
+    The remote server handles its own disk cache, so repeat requests are instant.
+    """
+    url = f"{NEUTTS_REMOTE_URL}/v1/synthesize"
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if NEUTTS_REMOTE_API_KEY:
+        headers["X-Api-Key"] = NEUTTS_REMOTE_API_KEY
+
+    payload = {
+        "chunks": chunks,
+        "voice": voice,
+        "model": model,
+        "codec": NEUTTS_LOCAL_CODEC,
+    }
+
+    with httpx.Client(timeout=NEUTTS_REMOTE_TIMEOUT_SECONDS) as client:
+        response = client.post(url, json=payload, headers=headers)
+
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("error", response.text[:200])
+        except Exception:
+            detail = response.text[:200]
+        raise RuntimeError(f"Remote NeuTTS server returned {response.status_code}: {detail}")
+
+    if not response.content:
+        raise RuntimeError("Remote NeuTTS server returned an empty response.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(response.content)
+
+
+def kokoro_configured() -> bool:
+    """True when a remote Kokoro server URL is configured."""
+    return bool(KOKORO_REMOTE_URL)
+
+
+def synthesize_kokoro_remote(
+    text: str,
+    voice: str,
+    speed: float,
+    output_path: Path,
+) -> None:
+    """Call the remote Kokoro server, receive WAV bytes, write to output_path."""
+    url = f"{KOKORO_REMOTE_URL}/v1/synthesize"
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if KOKORO_REMOTE_API_KEY:
+        headers["X-Api-Key"] = KOKORO_REMOTE_API_KEY
+
+    with httpx.Client(timeout=KOKORO_REMOTE_TIMEOUT_SECONDS) as client:
+        response = client.post(url, json={"text": text, "voice": voice, "speed": speed}, headers=headers)
+
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("detail", response.text[:200])
+        except Exception:
+            detail = response.text[:200]
+        raise RuntimeError(f"Remote Kokoro server returned {response.status_code}: {detail}")
+
+    if not response.content:
+        raise RuntimeError("Remote Kokoro server returned an empty response.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(response.content)
+
+
+def neutts_local_daemon_healthcheck() -> bool:
+    try:
+        response = httpx.get(f"{neutts_local_daemon_base_url()}/health", timeout=2.0)
+    except httpx.HTTPError:
+        return False
+    return response.status_code == 200
+
+
+def start_neutts_local_daemon() -> None:
+    wsl_exe = wsl_executable_path()
+    linux_python = neutts_local_wsl_python()
+    helper_path = windows_path_to_wsl(NEUTTS_LOCAL_HELPER)
+
+    command = [str(wsl_exe), "-d", NEUTTS_WSL_DISTRO]
+    if NEUTTS_WSL_USER:
+        command.extend(["-u", NEUTTS_WSL_USER])
+    command.extend(
+        [
+            "--",
+            linux_python,
+            helper_path,
+            "--daemon",
+            "--host",
+            NEUTTS_LOCAL_DAEMON_HOST,
+            "--port",
+            str(NEUTTS_LOCAL_DAEMON_PORT),
+        ]
+    )
+
+    daemon_log_path = ROOT / "output" / "neutts-local-daemon.log"
+    daemon_log_path.parent.mkdir(parents=True, exist_ok=True)
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    with daemon_log_path.open("a", encoding="utf-8") as log_handle:
+        subprocess.Popen(
+            command,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=log_handle,
+            creationflags=creationflags,
+        )
+
+
+def reset_neutts_local_wsl_runtime() -> None:
+    wsl_exe = wsl_executable_path()
+    subprocess.run(
+        [str(wsl_exe), "--shutdown"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    time.sleep(2.0)
+
+
+def ensure_neutts_local_daemon_running() -> None:
+    if neutts_local_daemon_healthcheck():
+        return
+
+    last_error: Exception | None = None
+    with neutts_local_daemon_lock:
+        if neutts_local_daemon_healthcheck():
+            return
+
+        for attempt in range(2):
+            try:
+                if attempt == 1:
+                    reset_neutts_local_wsl_runtime()
+                start_neutts_local_daemon()
+            except Exception as exc:
+                last_error = exc
+                continue
+
+            deadline = time.time() + min(NEUTTS_LOCAL_DAEMON_STARTUP_SECONDS, 15.0)
+            while time.time() < deadline:
+                if neutts_local_daemon_healthcheck():
+                    return
+                time.sleep(0.5)
+
+    if last_error is not None:
+        raise RuntimeError(f"Local NeuTTS daemon could not start: {last_error}") from last_error
+    raise RuntimeError("Local NeuTTS daemon did not become ready in time.")
+
+
+def run_neutts_wsl_helper_request(request_payload: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+    wsl_exe = wsl_executable_path()
+    linux_python = neutts_local_wsl_python()
+    if not NEUTTS_LOCAL_HELPER.exists():
+        raise RuntimeError(f"NeuTTS WSL helper script not found: {NEUTTS_LOCAL_HELPER}")
+
+    with tempfile.TemporaryDirectory(prefix="storybook_neutts_request_", dir=str(DEFAULT_AUDIO_DIR)) as temp_dir:
+        request_path = Path(temp_dir) / "request.json"
+        request_path.write_text(json.dumps(request_payload), encoding="utf-8")
+
+        command = [str(wsl_exe), "-d", NEUTTS_WSL_DISTRO]
+        if NEUTTS_WSL_USER:
+            command.extend(["-u", NEUTTS_WSL_USER])
+        command.extend(
+            [
+                "--",
+                linux_python,
+                windows_path_to_wsl(NEUTTS_LOCAL_HELPER),
+                "--input-json",
+                windows_path_to_wsl(request_path),
+            ]
+        )
+
+        try:
+            completed = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                check=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Local NeuTTS synthesis timed out after {int(timeout_seconds)} seconds.") from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            raise RuntimeError(f"Local NeuTTS synthesis failed: {detail}") from exc
+
+    lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("Local NeuTTS synthesis did not return a result manifest.")
+    try:
+        return json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Local NeuTTS synthesis returned malformed JSON output.") from exc
+
+
+def run_neutts_daemon_request(
+    path: str,
+    request_payload: dict[str, Any],
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    ensure_neutts_local_daemon_running()
+    url = f"{neutts_local_daemon_base_url()}{path}"
+    try:
+        response = httpx.post(url, json=request_payload, timeout=timeout_seconds)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Local NeuTTS daemon request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            payload = response.json()
+            detail = str(payload.get("error") or payload.get("detail") or detail)
+        except Exception:
+            pass
+        raise RuntimeError(f"Local NeuTTS daemon request failed: {detail}")
+
+    try:
+        payload = response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Local NeuTTS daemon returned malformed JSON output.") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Local NeuTTS daemon returned an invalid response payload.")
+    return payload
+
+
+def run_neutts_helper_request(
+    request_payload: dict[str, Any],
+    *,
+    timeout_seconds: float,
+    prefer_daemon: bool = True,
+) -> dict[str, Any]:
+    if prefer_daemon:
+        try:
+            return run_neutts_daemon_request("/v1/synthesize", request_payload, timeout_seconds=timeout_seconds)
+        except RuntimeError as exc:
+            print(f"NeuTTS daemon unavailable, falling back to one-shot WSL execution: {exc}")
+    return run_neutts_wsl_helper_request(request_payload, timeout_seconds=timeout_seconds)
+
+
+def warmup_neutts_local_runtime(model_name: str, voice_id: str) -> dict[str, Any]:
+    request_payload: dict[str, Any] = {
+        "action": "warmup",
+        "model": model_name,
+        "codec": NEUTTS_LOCAL_CODEC,
+        "reference_dir": windows_path_to_wsl(neutts_reference_pack_path(voice_id)),
+    }
+    if NEUTTS_WSL_HF_HOME:
+        request_payload["hf_home"] = NEUTTS_WSL_HF_HOME
+
+    try:
+        return run_neutts_daemon_request("/v1/warmup", request_payload, timeout_seconds=max(30.0, min(NEUTTS_LOCAL_TIMEOUT_SECONDS, 300.0)))
+    except RuntimeError as exc:
+        print(f"NeuTTS warmup fell back to reference preparation only: {exc}")
+        result = run_neutts_wsl_helper_request(
+            {
+                "action": "prepare_reference",
+                "reference_dir": windows_path_to_wsl(neutts_reference_pack_path(voice_id)),
+                **({"hf_home": NEUTTS_WSL_HF_HOME} if NEUTTS_WSL_HF_HOME else {}),
+            },
+            timeout_seconds=max(30.0, min(NEUTTS_LOCAL_TIMEOUT_SECONDS, 300.0)),
+        )
+        return {
+            "action": "warmup",
+            "warmed": False,
+            "fallback": "prepare_reference",
+            "voicePack": voice_id,
+            "model": model_name,
+            "codec": NEUTTS_LOCAL_CODEC,
+            **result,
+        }
+
+
+def create_aws_session(*, region_name: str | None = None):
+    boto3, _, _, _, _, _, ProfileNotFound = load_boto3()
+
+    session_kwargs: dict[str, Any] = {}
+    if region_name:
+        session_kwargs["region_name"] = region_name
+    aws_profile = env_value("AWS_PROFILE")
+    if aws_profile:
+        session_kwargs["profile_name"] = aws_profile
+
+    try:
+        session = boto3.Session(**session_kwargs)
+    except ProfileNotFound as exc:
+        raise RuntimeError(f"AWS profile was not found: {exc}") from exc
+
+    credentials = session.get_credentials()
+    if credentials is None:
+        raise RuntimeError(
+            "AWS credentials were not found. Use the AWS CLI, set AWS_PROFILE, "
+            "or provide AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY."
+        )
+
+    return session
+
+
+def create_polly_session():
+    return create_aws_session(region_name=POLLY_REGION)
+
+
+def create_aws_client(service_name: str, *, region_name: str | None = None):
+    session = create_aws_session(region_name=region_name)
+    _, Config, _, _, _, _, _ = load_boto3()
+    client_config = Config(
+        connect_timeout=3,
+        read_timeout=10,
+        retries={"max_attempts": 1},
+    )
+    return session.client(service_name, config=client_config)
+
+
+def create_polly_client():
+    return create_aws_client("polly", region_name=POLLY_REGION)
+
+
+def regional_book_storage_api_url() -> str:
+    if not BOOK_STORAGE_REGION or BOOK_STORAGE_REGION == "us-east-1":
+        return "https://s3.amazonaws.com"
+    return f"https://s3.{BOOK_STORAGE_REGION}.amazonaws.com"
+
+
+def create_book_storage_client():
+    session = create_aws_session(region_name=BOOK_STORAGE_REGION)
+    _, Config, _, _, _, _, _ = load_boto3()
+    client_config = Config(
+        connect_timeout=3,
+        read_timeout=10,
+        retries={"max_attempts": 1},
+        s3={"addressing_style": "virtual"},
+    )
+    return session.client(
+        "s3",
+        config=client_config,
+        endpoint_url=regional_book_storage_api_url(),
+    )
+
+
+def generate_book_storage_download_url(key: str, *, expires_in: int = 3600) -> str:
+    if not BOOK_STORAGE_BUCKET:
+        raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
+
+    client = create_book_storage_client()
+    try:
+        return client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": BOOK_STORAGE_BUCKET, "Key": key},
+            ExpiresIn=expires_in,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to prepare a download URL for {key}: {exc}") from exc
+
+
+def regional_book_storage_upload_url() -> str:
+    if not BOOK_STORAGE_BUCKET:
+        raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
+    if not BOOK_STORAGE_REGION or BOOK_STORAGE_REGION == "us-east-1":
+        return f"https://{BOOK_STORAGE_BUCKET}.s3.amazonaws.com/"
+    return f"https://{BOOK_STORAGE_BUCKET}.s3.{BOOK_STORAGE_REGION}.amazonaws.com/"
+
+
+def gender_label(value: str | None) -> str:
+    if not value:
+        return "Voice"
+    return value.title()
+
+
+def get_polly_catalog(force_refresh: bool = False) -> dict[str, Any]:
+    global polly_catalog_cache, polly_catalog_cache_expires_at
+
+    if not force_refresh and polly_catalog_cache and time.monotonic() < polly_catalog_cache_expires_at:
+        return polly_catalog_cache
+
+    default_catalog = {
+        "available": False,
+        "description": "Configure AWS CLI credentials or AWS_PROFILE to use Amazon Polly.",
+        "voices": [],
+        "defaultVoice": POLLY_VOICE_ID,
+    }
+
+    try:
+        client = create_polly_client()
+        request: dict[str, Any] = {"Engine": POLLY_ENGINE, "LanguageCode": POLLY_LANGUAGE_CODE}
+        voices: list[dict[str, str]] = []
+
+        while True:
+            response = client.describe_voices(**request)
+            for voice in response.get("Voices", []):
+                supported_engines = voice.get("SupportedEngines", [])
+                if POLLY_ENGINE not in supported_engines:
+                    continue
+                voices.append(
+                    {
+                        "id": voice["Id"],
+                        "label": f"{voice['Name']} - {gender_label(voice.get('Gender'))}, {voice.get('LanguageCode', POLLY_LANGUAGE_CODE)}",
+                        "gender": (voice.get("Gender") or "").lower() or None,
+                        "genderSource": "provider",
+                        "style": voice.get("LanguageCode", POLLY_LANGUAGE_CODE),
+                    }
+                )
+
+            next_token = response.get("NextToken")
+            if not next_token:
+                break
+            request["NextToken"] = next_token
+
+        voices.sort(key=lambda item: item["label"])
+        if not voices:
+            catalog = {
+                "available": False,
+                "description": f"No Polly voices matched engine {POLLY_ENGINE} in {POLLY_LANGUAGE_CODE}.",
+                "voices": [],
+                "defaultVoice": POLLY_VOICE_ID,
+            }
+        else:
+            default_voice = POLLY_VOICE_ID if any(voice["id"] == POLLY_VOICE_ID for voice in voices) else voices[0]["id"]
+            region_label = POLLY_REGION or env_value("AWS_REGION") or "AWS default region"
+            catalog = {
+                "available": True,
+                "description": f"AWS Polly {POLLY_ENGINE} voices from {region_label}.",
+                "voices": voices,
+                "defaultVoice": default_voice,
+            }
+    except Exception as exc:
+        catalog = {
+            **default_catalog,
+            "description": f"Amazon Polly unavailable: {exc}",
+        }
+
+    polly_catalog_cache = catalog
+    polly_catalog_cache_expires_at = time.monotonic() + POLLY_CACHE_TTL_SECONDS
+    return catalog
+
+
+def get_polly_health(force_refresh: bool = False) -> dict[str, Any]:
+    catalog = get_polly_catalog(force_refresh=force_refresh)
+    aws_profile = env_value("AWS_PROFILE")
+    region_label = POLLY_REGION or env_value("AWS_REGION") or "AWS default region"
+
+    health = {
+        "connected": False,
+        "region": region_label,
+        "engine": POLLY_ENGINE,
+        "languageCode": POLLY_LANGUAGE_CODE,
+        "profile": aws_profile,
+        "defaultVoice": catalog.get("defaultVoice"),
+        "voiceCount": len(catalog.get("voices", [])),
+        "accountId": None,
+        "arn": None,
+        "message": catalog["description"],
+    }
+
+    if not catalog["available"]:
+        return health
+
+    try:
+        sts_client = create_aws_client("sts")
+        identity = sts_client.get_caller_identity()
+    except Exception as exc:
+        return {
+            **health,
+            "message": f"Polly voices loaded, but AWS identity lookup failed: {exc}",
+        }
+
+    return {
+        **health,
+        "connected": True,
+        "accountId": identity.get("Account"),
+        "arn": identity.get("Arn"),
+        "message": f"Connected to AWS account {identity.get('Account')} in {region_label}.",
+    }
+
+
+def provider_catalog() -> list[dict[str, Any]]:
+    polly_catalog = get_polly_catalog()
+    neutts_voices = neutts_local_voices_for_model(None)
+    neutts_available = neutts_runtime_configured() and bool(neutts_voices)
+    neutts_default_voice = neutts_voices[0]["id"] if neutts_voices else None
+    neutts_mode = "remote" if neutts_remote_configured() else ("local" if neutts_local_runtime_configured() else "unavailable")
+
+    return [
+        {
+            "id": "qwen",
+            "name": "Qwen TTS",
+            "available": bool(env_value("DASHSCOPE_API_KEY")) and dashscope_sdk_available(),
+            "recommended": True,
+            "description": "Instruction-guided narration through DashScope with expressive voices and lower-cost synthesis.",
+            "voices": QWEN_VOICES,
+            "defaultVoice": "Cherry",
+            "models": QWEN_TTS_MODELS,
+            "defaultModel": resolve_qwen_tts_model(None),
+            "voiceMetaNote": "Gender labels for Qwen voices come from Alibaba's voice catalog. Qwen TTS currently does not expose timestamps.",
+        },
+        {
+            "id": "qwen_local",
+            "name": "Qwen3 TTS Local",
+            "available": qwen_local_runtime_configured(),
+            "recommended": False,
+            "description": "Local open-weight Qwen3-TTS CustomVoice synthesis through a separate Python runtime.",
+            "voices": QWEN_LOCAL_VOICES,
+            "defaultVoice": "Ryan",
+            "models": QWEN_LOCAL_TTS_MODELS,
+            "defaultModel": resolve_qwen_local_tts_model(None),
+            "voiceMetaNote": (
+                "Requires QWEN_LOCAL_PYTHON pointing to a Python 3.12 environment with qwen-tts installed. "
+                "Best for full-book jobs; live page playback stays on the hosted providers."
+            ),
+        },
+        {
+            "id": "neutts_local",
+            "name": "NeuTTS",
+            "available": neutts_available,
+            "recommended": False,
+            "mode": neutts_mode,
+            "remoteUrl": NEUTTS_REMOTE_URL or None,
+            "description": (
+                "NeuTTS voice cloning via remote server (production-ready)."
+                if neutts_remote_configured() else
+                "WSL2-based local NeuTTS voice cloning using reference packs stored in voices/neutts."
+            ),
+            "voices": neutts_voices,
+            "defaultVoice": neutts_default_voice,
+            "models": NEUTTS_LOCAL_TTS_MODELS,
+            "defaultModel": resolve_neutts_local_tts_model(None),
+            "voiceMetaNote": (
+                "Set NEUTTS_REMOTE_URL to your deployed NeuTTS server for production. "
+                "Each voice pack needs reference.wav and reference.txt under voices/neutts/<voice_id>."
+            ),
+        },
+        {
+            "id": "kokoro",
+            "name": "Kokoro TTS",
+            "available": kokoro_configured(),
+            "recommended": kokoro_configured(),
+            "description": (
+                "High-quality open-source neural TTS via a remote Kokoro server. "
+                "Free, no API key required. Natural narration voices."
+            ),
+            "voices": KOKORO_VOICES,
+            "defaultVoice": "af_heart",
+            "models": [],
+            "defaultModel": None,
+            "voiceMetaNote": "Kokoro voices are fixed (no cloning). af_heart and bm_george are recommended for narration.",
+        },
+        {
+            "id": "google",
+            "name": "Google Gemini TTS",
+            "available": bool(env_value("GEMINI_API_KEY")),
+            "recommended": True,
+            "description": "Preview Gemini audiobook-style TTS with a free tier and promptable delivery.",
+            "voices": GEMINI_VOICES,
+            "defaultVoice": "Kore",
+            "models": GEMINI_TTS_MODELS,
+            "defaultModel": resolve_google_tts_model(None),
+            "voiceMetaNote": "Gender tags are estimated for Gemini voices. Style labels come from Google's voice catalog.",
+        },
+        {
+            "id": "polly",
+            "name": "Amazon Polly",
+            "available": polly_catalog["available"],
+            "recommended": False,
+            "description": polly_catalog["description"],
+            "voices": polly_catalog["voices"],
+            "defaultVoice": polly_catalog["defaultVoice"],
+            "models": [],
+            "defaultModel": None,
+            "voiceMetaNote": "Gender labels for Polly come from AWS voice metadata.",
+        },
+    ]
+
+
+def provider_details(provider_id: str) -> dict[str, Any]:
+    for provider in provider_catalog():
+        if provider["id"] == provider_id:
+            return provider
+    raise HTTPException(status_code=404, detail="Provider not found.")
+
+
+def read_highlights(book_id: str) -> list[dict[str, Any]]:
+    if book_storage_enabled():
+        payload = read_storage_json(book_highlights_storage_key(book_id)) or {"items": []}
+    else:
+        path = book_highlights_path(book_id)
+        if not path.exists():
+            return []
+        payload = read_json(path)
+    items = payload.get("items")
+    if isinstance(items, list):
+        return items
+    return []
+
+
+def write_highlights(book_id: str, items: list[dict[str, Any]]) -> None:
+    payload = {"items": items}
+    if book_storage_enabled():
+        write_storage_json(book_highlights_storage_key(book_id), payload)
+        return
+
+    write_json(book_highlights_path(book_id), payload)
+
+
+def normalize_highlight_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_single_word_highlight_text(value: str) -> bool:
+    normalized = normalize_highlight_text(value)
+    return bool(normalized) and len(normalized.split()) == 1
+
+
+def resolve_highlight_kind(
+    kind: str | None,
+    *,
+    text: str,
+    note: str | None = None,
+) -> Literal["highlight", "note", "vocabulary"]:
+    single_word = is_single_word_highlight_text(text)
+    return "vocabulary" if single_word else "note"
+
+
+def serialize_highlight(item: dict[str, Any]) -> dict[str, Any]:
+    selected_text = item.get("text", "")
+    note = item.get("note")
+    kind = resolve_highlight_kind(item.get("kind"), text=selected_text, note=note)
+    return {
+        "id": item["id"],
+        "start": item["start"],
+        "end": item["end"],
+        "color": item["color"],
+        "kind": kind,
+        "text": item["text"],
+        "note": note,
+        "createdAt": item["createdAt"],
+    }
+
+
+def list_highlights(book_id: str) -> list[dict[str, Any]]:
+    items = [serialize_highlight(item) for item in read_highlights(book_id)]
+    items.sort(key=lambda item: (item["start"], item["createdAt"]))
+    return items
+
+
+def serialize_book(meta: dict[str, Any]) -> dict[str, Any]:
+    latest_audio = meta.get("latestAudio")
+    if latest_audio:
+        latest_audio = {
+            **latest_audio,
+            "url": relative_url(Path(latest_audio["path"])),
+            "timingUrl": relative_url(Path(latest_audio["timingPath"])) if latest_audio.get("timingPath") else None,
+        }
+
+    highlight_count = len(read_highlights(meta["id"]))
+
+    return {
+        "id": meta["id"],
+        "title": meta["title"],
+        "fileName": meta["fileName"],
+        "uploadedAt": meta["uploadedAt"],
+        "pageCount": meta["pageCount"],
+        "textCharacters": meta["textCharacters"],
+        "sourceUrl": source_url_for_book(meta),
+        "excerpt": meta["excerpt"],
+        "highlightCount": highlight_count,
+        "latestAudio": latest_audio,
+    }
+
+
+def list_books() -> list[dict[str, Any]]:
+    books = [serialize_book(meta) for meta in list_book_meta_payloads()]
+    books.sort(key=lambda item: item["uploadedAt"], reverse=True)
+    return books
+
+
+def parse_iso_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def continue_book_payload() -> dict[str, Any] | None:
+    books = list_books()
+    best_book: dict[str, Any] | None = None
+    best_progress: dict[str, Any] | None = None
+    best_sort_key: tuple[int, datetime] | None = None
+
+    for book in books:
+        progress = book_progress_payload(book["id"])
+        reading = progress.get("reading")
+        audio = progress.get("audio")
+        reading_updated = parse_iso_timestamp(reading.get("updatedAt")) if reading else None
+        audio_updated = parse_iso_timestamp(audio.get("updatedAt")) if audio else None
+        uploaded_at = parse_iso_timestamp(book.get("uploadedAt")) or datetime.fromtimestamp(0, tz=timezone.utc)
+        activity_time = max(
+            [timestamp for timestamp in (reading_updated, audio_updated, uploaded_at) if timestamp is not None],
+            default=uploaded_at,
+        )
+        activity_score = 2 if reading or audio else 1 if book.get("latestAudio") else 0
+        sort_key = (activity_score, activity_time)
+        if best_sort_key is None or sort_key > best_sort_key:
+            best_book = book
+            best_progress = progress
+            best_sort_key = sort_key
+
+    if best_book is None:
+        return None
+
+    reading = best_progress.get("reading") if best_progress else None
+    completion_ratio = 0.0
+    if reading and reading.get("textLength"):
+        completion_ratio = min(1.0, max(0.0, float(reading.get("textEnd", 0)) / float(reading["textLength"])))
+    elif reading and reading.get("totalPages"):
+        completion_ratio = min(1.0, max(0.0, float(reading.get("pageNumber", 1)) / float(reading["totalPages"])))
+
+    return {
+        "book": best_book,
+        "progress": best_progress,
+        "completionRatio": round(completion_ratio, 4),
+        "ctaLabel": "Resume chapter" if reading else "Open book",
+    }
+
+
+def persist_job(payload: dict[str, Any]) -> dict[str, Any]:
+    with job_lock:
+        job_state[payload["id"]] = payload
+        write_json(job_path(payload["id"]), payload)
+    return payload
+
+
+def read_job_payload(job_id: str) -> dict[str, Any]:
+    payload = job_state.get(job_id)
+    if payload is not None:
+        return payload
+
+    path = job_path(job_id)
+    if not path.exists():
+        raise KeyError(job_id)
+
+    payload = read_json(path)
+    job_state[job_id] = payload
+    return payload
+
+
+def update_job(job_id: str, **changes: Any) -> dict[str, Any]:
+    with job_lock:
+        payload = read_job_payload(job_id)
+        payload.update(changes)
+        job_state[job_id] = payload
+        write_json(job_path(job_id), payload)
+    return payload
+
+
+def maybe_update_job(job_id: str | None, **changes: Any) -> None:
+    if not job_id:
+        return
+
+    path = job_path(job_id)
+    if job_id in job_state or path.exists():
+        update_job(job_id, **changes)
+
+
+def raise_if_job_cancelled(job_id: str | None) -> None:
+    if not job_id:
+        return
+
+    try:
+        payload = read_job_payload(job_id)
+    except KeyError:
+        return
+
+    if payload.get("cancelRequested"):
+        raise JobCancelledError("Audiobook generation was cancelled.")
+
+
+def record_job_progress(
+    *,
+    job_id: str | None,
+    index: int,
+    total: int,
+    message: str,
+) -> None:
+    if not job_id:
+        return
+
+    path = job_path(job_id)
+    if job_id not in job_state and not path.exists():
+        return
+
+    with job_lock:
+        payload = read_job_payload(job_id)
+        preserve_message = payload.get("status") == "cancelling"
+
+        payload.update(
+            completedChunks=max(int(payload.get("completedChunks", 0) or 0), index),
+            totalChunks=total,
+            progress=round(index / total * 100, 1),
+            message=payload.get("message") if preserve_message else message,
+        )
+        job_state[job_id] = payload
+        write_json(path, payload)
+
+
+def clamp_chunk_size(provider: str, requested: int | None) -> int:
+    if provider == "qwen":
+        return min(max(requested or 560, 200), 600)
+    if provider == "qwen_local":
+        return min(max(requested or 1800, 500), 4000)
+    if provider == "neutts_local":
+        return min(max(requested or 320, 150), 450)
+    if provider == "google":
+        return min(max(requested or 2200, 500), 4000)
+    if provider == "polly":
+        return min(max(requested or 2200, 500), 2800)
+    if provider == "openai":
+        return min(max(requested or 1400, 400), 2500)
+    return min(max(requested or 900, 300), 1600)
+
+
+def gemini_tts_url(model_name: str) -> str:
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+
+
+def resolve_google_tts_model(requested_model: str | None) -> str:
+    model_name = requested_model or GEMINI_TTS_MODEL
+    if model_name not in GEMINI_TTS_MODEL_IDS:
+        if requested_model is None:
+            return GEMINI_TTS_MODELS[0]["id"]
+        raise RuntimeError(f"Unsupported Gemini TTS model: {model_name}")
+    return model_name
+
+
+def resolve_qwen_tts_model(requested_model: str | None) -> str:
+    model_name = requested_model or QWEN_TTS_MODEL
+    if model_name not in QWEN_TTS_MODEL_IDS:
+        if requested_model is None:
+            return QWEN_TTS_MODELS[0]["id"]
+        raise RuntimeError(f"Unsupported Qwen TTS model: {model_name}")
+    return model_name
+
+
+def resolve_qwen_local_tts_model(requested_model: str | None) -> str:
+    model_name = requested_model or QWEN_LOCAL_MODEL
+    if model_name not in QWEN_LOCAL_TTS_MODEL_IDS:
+        if requested_model is None:
+            return QWEN_LOCAL_TTS_MODELS[0]["id"]
+        raise RuntimeError(f"Unsupported local Qwen TTS model: {model_name}")
+    return model_name
+
+
+def resolve_neutts_local_tts_model(requested_model: str | None) -> str:
+    model_name = requested_model or NEUTTS_LOCAL_MODEL
+    if model_name not in NEUTTS_LOCAL_TTS_MODEL_IDS:
+        if requested_model is None:
+            return NEUTTS_LOCAL_TTS_MODELS[0]["id"]
+        raise RuntimeError(f"Unsupported local NeuTTS model: {model_name}")
+    return model_name
+
+
+def qwen_voices_for_model(model_name: str | None) -> list[dict[str, Any]]:
+    if not model_name:
+        return QWEN_VOICES
+    return [voice for voice in QWEN_VOICES if not voice.get("models") or model_name in voice["models"]]
+
+
+def qwen_local_voices_for_model(model_name: str | None) -> list[dict[str, Any]]:
+    return QWEN_LOCAL_VOICES
+
+
+def neutts_local_voices_for_model(model_name: str | None) -> list[dict[str, Any]]:
+    voices = list_neutts_reference_packs()
+    if not model_name:
+        return voices
+    return [voice for voice in voices if not voice.get("models") or model_name in voice["models"]]
+
+
+def resolve_qwen_tts_voice(requested_voice: str | None, model_name: str | None) -> str:
+    voices = qwen_voices_for_model(model_name)
+    if requested_voice:
+        if any(voice["id"] == requested_voice for voice in voices):
+            return requested_voice
+        supported = ", ".join(voice["id"] for voice in voices) or "no voices"
+        raise RuntimeError(f"Voice '{requested_voice}' is not supported by {model_name or 'Qwen TTS'}. Try: {supported}.")
+
+    default_voice = "Cherry"
+    if any(voice["id"] == default_voice for voice in voices):
+        return default_voice
+    if voices:
+        return voices[0]["id"]
+    raise RuntimeError(f"No Qwen voices are available for {model_name or 'the selected model'}.")
+
+
+def resolve_qwen_local_tts_voice(requested_voice: str | None, model_name: str | None) -> str:
+    voices = qwen_local_voices_for_model(model_name)
+    if requested_voice:
+        if any(voice["id"] == requested_voice for voice in voices):
+            return requested_voice
+        supported = ", ".join(voice["id"] for voice in voices) or "no voices"
+        raise RuntimeError(
+            f"Voice '{requested_voice}' is not supported by {model_name or 'Local Qwen TTS'}. Try: {supported}."
+        )
+
+    default_voice = "Ryan"
+    if any(voice["id"] == default_voice for voice in voices):
+        return default_voice
+    if voices:
+        return voices[0]["id"]
+    raise RuntimeError(f"No local Qwen voices are available for {model_name or 'the selected model'}.")
+
+
+def resolve_neutts_local_tts_voice(requested_voice: str | None, model_name: str | None) -> str:
+    voices = neutts_local_voices_for_model(model_name)
+    if requested_voice:
+        if any(voice["id"] == requested_voice for voice in voices):
+            return requested_voice
+        supported = ", ".join(voice["id"] for voice in voices) or "no voices"
+        raise RuntimeError(
+            f"Voice '{requested_voice}' is not supported by {model_name or 'Local NeuTTS'}. Try: {supported}."
+        )
+
+    if voices:
+        return voices[0]["id"]
+    raise RuntimeError("No local NeuTTS reference packs are available. Add one under voices/neutts/<voice_id>.")
+
+
+def resolve_openai_tts_model(requested_model: str | None) -> str:
+    return requested_model or OPENAI_TTS_MODEL
+
+
+def qwen_language_type(text: str) -> str:
+    return "Chinese" if re.search(r"[\u4e00-\u9fff]", text) else "English"
+
+
+def qwen_input_units(text: str) -> int:
+    total = 0
+    for char in text:
+        codepoint = ord(char)
+        if (
+            0x3400 <= codepoint <= 0x4DBF
+            or 0x4E00 <= codepoint <= 0x9FFF
+            or 0xF900 <= codepoint <= 0xFAFF
+            or 0x20000 <= codepoint <= 0x2EBEF
+        ):
+            total += 2
+        else:
+            total += 1
+    return total
+
+
+def qwen_split_long_text(text: str, max_units: int) -> list[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    if qwen_input_units(stripped) <= max_units:
+        return [stripped]
+
+    pieces: list[str] = []
+    start = 0
+    while start < len(stripped):
+        end = min(start + max_units, len(stripped))
+        while end > start and qwen_input_units(stripped[start:end]) > max_units:
+            end -= 1
+        if end <= start:
+            end = start + 1
+
+        if end < len(stripped):
+            split_at = max(
+                stripped.rfind(". ", start, end),
+                stripped.rfind("? ", start, end),
+                stripped.rfind("! ", start, end),
+                stripped.rfind("; ", start, end),
+                stripped.rfind(", ", start, end),
+                stripped.rfind(" ", start, end),
+            )
+            if split_at > start:
+                candidate_end = split_at + 1
+                if qwen_input_units(stripped[start:candidate_end]) <= max_units:
+                    end = candidate_end
+
+        chunk = stripped[start:end].strip()
+        if chunk:
+            pieces.append(chunk)
+        start = end
+
+    return pieces
+
+
+def qwen_chunk_text(text: str, max_units: int) -> list[str]:
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
+    chunks: list[str] = []
+    current = ""
+
+    for paragraph in paragraphs:
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", paragraph) if s.strip()]
+        if not sentences:
+            sentences = [paragraph]
+
+        for sentence in sentences:
+            for candidate in qwen_split_long_text(sentence, max_units):
+                if not current:
+                    current = candidate
+                    continue
+
+                combined = f"{current} {candidate}"
+                if qwen_input_units(combined) <= max_units:
+                    current = combined
+                else:
+                    chunks.append(current)
+                    current = candidate
+
+        if current:
+            chunks.append(current)
+            current = ""
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def prepare_synthesis_chunks(text: str, provider: str, requested: int | None) -> list[str]:
+    chunk_size = clamp_chunk_size(provider, requested)
+    if provider == "qwen":
+        return qwen_chunk_text(text, chunk_size)
+    return pdf_to_audio.chunk_text(text, chunk_size)
+
+
+def prepare_live_synthesis_chunks(text: str, provider: str) -> list[str]:
+    if provider == "neutts_local":
+        return prepare_synthesis_chunks(text, provider, 220)
+    if provider == "kokoro":
+        # Kokoro handles up to ~1000 chars well; larger chunks = fewer round-trips
+        return prepare_synthesis_chunks(text, provider, 800)
+    return prepare_synthesis_chunks(text, provider, None)
+
+
+def shape_neutts_local_transcript(transcript: str, *, length_scale: float, sentence_silence: float) -> str:
+    normalized = normalize_tts_transcript(transcript)
+    if not normalized:
+        return ""
+
+    sentence_gap = "\n\n" if sentence_silence >= 0.08 or length_scale >= 1.0 else "\n"
+    paragraph_gap = "\n\n\n" if sentence_silence >= 0.18 or length_scale >= 1.05 else "\n\n"
+    clause_gap = "\n" if sentence_silence >= 0.14 or length_scale >= 1.1 else " "
+    comma_gap = "\n" if sentence_silence >= 0.32 or length_scale >= 1.25 else " "
+
+    def add_phrase_breaks(sentence: str) -> str:
+        shaped = re.sub(r"(\.\.\.|…)(?=\s+)", rf"\1{sentence_gap}", sentence)
+        if clause_gap != " ":
+            shaped = re.sub(r"([;:])(?=\s+)", rf"\1{clause_gap}", shaped)
+            shaped = re.sub(r"([—–])(?=\s+)", rf"\1{clause_gap}", shaped)
+        if comma_gap != " ":
+            shaped = re.sub(
+                r",(?=\s+(?:and|but|or|so|yet|for|nor|because|which|who|that|when|while|although|though|however)\b)",
+                rf",{comma_gap}",
+                shaped,
+                flags=re.IGNORECASE,
+            )
+        shaped = re.sub(r"[ \t]+", " ", shaped)
+        shaped = re.sub(r" *\n *", "\n", shaped)
+        return shaped.strip()
+
+    paragraphs: list[str] = []
+    for paragraph in split_tts_paragraphs(normalized):
+        sentence_parts = [add_phrase_breaks(sentence) for sentence in split_tts_sentences(paragraph) if sentence.strip()]
+        if sentence_parts:
+            paragraphs.append(sentence_gap.join(sentence_parts))
+
+    return paragraph_gap.join(paragraphs) or normalized
+
+
+def build_qwen_tts_instructions(narration_style: str, *, length_scale: float, sentence_silence: float) -> str:
+    return (
+        f"{narration_style.strip()}\n"
+        f"Pacing: {describe_tts_pacing(length_scale)}\n"
+        f"Pause guidance: {describe_tts_pauses(sentence_silence)}"
+    ).strip()
+
+
+def gemini_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            return error["message"]
+
+    return response.text.strip()
+
+
+def gemini_retry_delay_seconds(response: httpx.Response) -> float | None:
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(0.0, min(float(retry_after), GEMINI_MAX_RETRY_DELAY_SECONDS))
+        except ValueError:
+            pass
+
+    detail = gemini_error_detail(response)
+    match = re.search(r"retry in\s+([0-9]+(?:\.[0-9]+)?)s", detail, re.IGNORECASE)
+    if not match:
+        return None
+
+    return max(0.0, min(float(match.group(1)), GEMINI_MAX_RETRY_DELAY_SECONDS))
+
+
+def gemini_response_is_retryable(response: httpx.Response) -> bool:
+    if response.status_code in {429, 500, 502, 503, 504}:
+        return True
+
+    detail = gemini_error_detail(response).lower()
+    return (
+        "quota" in detail
+        or "rate limit" in detail
+        or "rate-limit" in detail
+        or "too many requests" in detail
+        or "retry in" in detail
+    )
+
+
+def post_gemini_tts_with_retry(
+    client: httpx.Client,
+    *,
+    model: str,
+    api_key: str,
+    narration_style: str,
+    chunk: str,
+    voice: str,
+    length_scale: float,
+    sentence_silence: float,
+) -> httpx.Response:
+    attempt = 0
+
+    while True:
+        response = client.post(
+            gemini_tts_url(model),
+            headers={
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "text": build_directed_transcript(
+                                    narration_style,
+                                    chunk,
+                                    length_scale=length_scale,
+                                    sentence_silence=sentence_silence,
+                                ),
+                            }
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": {
+                                "voiceName": voice,
+                            }
+                        }
+                    },
+                },
+                "model": model,
+            },
+        )
+
+        if response.is_success:
+            return response
+
+        if attempt >= GEMINI_MAX_RETRY_ATTEMPTS or not gemini_response_is_retryable(response):
+            response.raise_for_status()
+
+        delay = gemini_retry_delay_seconds(response)
+        if delay is None:
+            delay = min(2 ** attempt, GEMINI_MAX_RETRY_DELAY_SECONDS)
+
+        time.sleep(delay)
+        attempt += 1
+
+
+def normalize_tts_transcript(transcript: str) -> str:
+    text = transcript.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def split_tts_paragraphs(transcript: str) -> list[str]:
+    normalized = normalize_tts_transcript(transcript)
+    return [part.strip() for part in re.split(r"\n{2,}", normalized) if part.strip()]
+
+
+def split_tts_sentences(paragraph: str) -> list[str]:
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", paragraph) if part.strip()]
+    return sentences or [paragraph.strip()]
+
+
+def describe_tts_pacing(length_scale: float) -> str:
+    if length_scale >= 1.3:
+        return "Speak noticeably slower than normal conversation, with very deliberate phrasing."
+    if length_scale >= 1.1:
+        return "Speak slightly slower than normal conversation, with room at sentence endings."
+    if length_scale <= 0.8:
+        return "Speak a bit faster than normal conversation, but keep sentence endings clear."
+    if length_scale <= 0.95:
+        return "Speak slightly faster than normal conversation while keeping the phrasing controlled."
+    return "Speak at a natural conversational pace."
+
+
+def describe_tts_pauses(sentence_silence: float) -> str:
+    sentence_pause_ms = max(0, int(round(sentence_silence * 1000)))
+    paragraph_pause_ms = max(350, sentence_pause_ms * 2 or 350)
+    if sentence_pause_ms <= 50:
+        return (
+            "Keep sentence-end pauses light, but still resolve each sentence before continuing. "
+            f"Use a longer pause of about {paragraph_pause_ms} milliseconds between paragraphs."
+        )
+    return (
+        f"Pause for about {sentence_pause_ms} milliseconds at sentence endings. "
+        f"At paragraph breaks, pause a little longer, around {paragraph_pause_ms} milliseconds."
+    )
+
+
+def build_directed_transcript(narration_style: str, transcript: str, *, length_scale: float, sentence_silence: float) -> str:
+    formatted_transcript = "\n\n".join(split_tts_paragraphs(transcript))
+    return (
+        "Read the transcript exactly as written.\n"
+        "Do not add commentary, titles, or extra words.\n"
+        "Let punctuation shape the delivery naturally. Do not run sentences together.\n"
+        "Use lighter pauses for commas and stronger pauses at the end of full sentences.\n"
+        f"Pacing: {describe_tts_pacing(length_scale)}\n"
+        f"Pause guidance: {describe_tts_pauses(sentence_silence)}\n"
+        f"Direction: {narration_style}\n\n"
+        f"Transcript:\n{formatted_transcript}"
+    )
+
+
+def build_polly_ssml(transcript: str, *, length_scale: float, sentence_silence: float) -> str:
+    def add_phrase_breaks(text: str, *, comma_pause_ms: int, clause_pause_ms: int) -> str:
+        marked = text
+        if comma_pause_ms > 0:
+            marked = re.sub(r",(?=\s)", f",<break time='{comma_pause_ms}ms'/>", marked)
+        if clause_pause_ms > 0:
+            marked = re.sub(r"([;:])(?=\s)", rf"\1<break time='{clause_pause_ms}ms'/>", marked)
+            marked = re.sub(r"([—–])(?=\s)", rf"\1<break time='{clause_pause_ms}ms'/>", marked)
+        return marked
+
+    paragraph_parts: list[str] = []
+    sentence_pause_ms = max(0, int(round(sentence_silence * 1000)))
+    paragraph_pause_ms = max(350, sentence_pause_ms * 2 or 350)
+    comma_pause_ms = max(0, min(110, int(round(sentence_pause_ms * 0.4)) if sentence_pause_ms else 60))
+    clause_pause_ms = max(90, min(220, int(round(sentence_pause_ms * 0.7)) if sentence_pause_ms else 140))
+
+    for paragraph in split_tts_paragraphs(transcript):
+        sentence_parts: list[str] = []
+        for sentence in split_tts_sentences(paragraph):
+            escaped_sentence = escape_html(sentence)
+            escaped_sentence = re.sub(r"\s+", " ", escaped_sentence).strip()
+            if not escaped_sentence:
+                continue
+            escaped_sentence = add_phrase_breaks(
+                escaped_sentence,
+                comma_pause_ms=comma_pause_ms,
+                clause_pause_ms=clause_pause_ms,
+            )
+            if sentence_parts:
+                if sentence_pause_ms > 0:
+                    sentence_parts.append(f"<break time='{sentence_pause_ms}ms'/>")
+                else:
+                    sentence_parts.append("<break strength='medium'/>")
+            sentence_parts.append(f"<s>{escaped_sentence}</s>")
+
+        if not sentence_parts:
+            continue
+
+        if paragraph_parts:
+            paragraph_parts.append(f"<break time='{paragraph_pause_ms}ms'/>")
+        paragraph_parts.append(f"<p>{''.join(sentence_parts)}</p>")
+
+    if paragraph_parts:
+        paragraph_parts.append(f"<break time='{max(sentence_pause_ms or 180, 180)}ms'/>")
+
+    # The existing length-scale slider is slower when the value goes up,
+    # so Polly's speaking rate is inverted to match the rest of the app.
+    rate_percent = max(20, min(200, int(round(100 / max(length_scale, 0.1)))))
+    body = "".join(paragraph_parts) or escape_html(normalize_tts_transcript(transcript))
+    return f'<speak><prosody rate="{rate_percent}%">{body}</prosody></speak>'
+
+
+def trim_text_range(text: str, start: int, end: int) -> tuple[int, int]:
+    next_start = start
+    next_end = end
+
+    while next_start < next_end and text[next_start].isspace():
+        next_start += 1
+
+    while next_end > next_start and text[next_end - 1].isspace():
+        next_end -= 1
+
+    return next_start, next_end
+
+
+def build_text_sentence_spans(text: str) -> list[dict[str, Any]]:
+    if not text.strip():
+        return []
+
+    boundary_pattern = re.compile(r'(?:[.!?]["\')\]]*(?=\s+|$))|\n{2,}')
+    spans: list[dict[str, Any]] = []
+    cursor = 0
+
+    for match in boundary_pattern.finditer(text):
+        start, end = trim_text_range(text, cursor, match.end())
+        if end > start:
+            spans.append({"start": start, "end": end, "text": text[start:end]})
+        cursor = match.end()
+
+    start, end = trim_text_range(text, cursor, len(text))
+    if end > start:
+        spans.append({"start": start, "end": end, "text": text[start:end]})
+
+    return spans
+
+
+def tokenize_non_whitespace(text: str) -> list[dict[str, Any]]:
+    return [{"token": match.group(0), "start": match.start(), "end": match.end()} for match in re.finditer(r"\S+", text)]
+
+
+def map_chunks_to_text_spans(text: str, chunks: list[str]) -> list[dict[str, Any]]:
+    source_tokens = tokenize_non_whitespace(text)
+    token_cursor = 0
+    spans: list[dict[str, Any]] = []
+
+    for chunk in chunks:
+        chunk_tokens = re.findall(r"\S+", chunk)
+        if not chunk_tokens:
+            continue
+
+        matched_index = -1
+        if token_cursor + len(chunk_tokens) <= len(source_tokens):
+            direct_window = source_tokens[token_cursor : token_cursor + len(chunk_tokens)]
+            if [item["token"] for item in direct_window] == chunk_tokens:
+                matched_index = token_cursor
+
+        if matched_index < 0:
+            for candidate in range(token_cursor, len(source_tokens) - len(chunk_tokens) + 1):
+                window = source_tokens[candidate : candidate + len(chunk_tokens)]
+                if [item["token"] for item in window] == chunk_tokens:
+                    matched_index = candidate
+                    break
+
+        if matched_index < 0:
+            fallback_start = spans[-1]["end"] if spans else 0
+            fallback_end = min(len(text), max(fallback_start, fallback_start + len(chunk)))
+            spans.append({"start": fallback_start, "end": fallback_end, "text": text[fallback_start:fallback_end]})
+            continue
+
+        start_token = source_tokens[matched_index]
+        end_token = source_tokens[matched_index + len(chunk_tokens) - 1]
+        spans.append(
+            {
+                "start": start_token["start"],
+                "end": end_token["end"],
+                "text": text[start_token["start"] : end_token["end"]],
+            }
+        )
+        token_cursor = matched_index + len(chunk_tokens)
+
+    return spans
+
+
+def estimate_timing_weight(text: str) -> float:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return 1.0
+
+    token_count = len(re.findall(r"\S+", normalized))
+    comma_count = normalized.count(",")
+    pause_mark_count = normalized.count(";") + normalized.count(":")
+    return max(1.0, token_count + comma_count * 0.35 + pause_mark_count * 0.5 + 0.25)
+
+
+def wav_duration_seconds(path: Path) -> float:
+    with wave.open(str(path), "rb") as wav_file:
+        frame_rate = wav_file.getframerate()
+        if frame_rate <= 0:
+            return 0.0
+        return wav_file.getnframes() / frame_rate
+
+
+def build_audio_timing_manifest(text: str, chunks: list[str], chunk_wavs: list[Path], *, audio_url: str) -> dict[str, Any]:
+    sentence_spans = build_text_sentence_spans(text)
+    chunk_spans = map_chunks_to_text_spans(text, chunks)
+    cues: list[dict[str, Any]] = []
+    time_cursor = 0.0
+    total_duration = 0.0
+
+    for chunk_span, chunk_wav in zip(chunk_spans, chunk_wavs):
+        chunk_duration = max(0.0, wav_duration_seconds(chunk_wav))
+        chunk_start = int(chunk_span["start"])
+        chunk_end = int(chunk_span["end"])
+        if chunk_end <= chunk_start:
+            total_duration += chunk_duration
+            time_cursor += chunk_duration
+            continue
+
+        chunk_segments = [
+            {
+                "start": max(int(sentence["start"]), chunk_start),
+                "end": min(int(sentence["end"]), chunk_end),
+                "text": text[max(int(sentence["start"]), chunk_start) : min(int(sentence["end"]), chunk_end)],
+            }
+            for sentence in sentence_spans
+            if int(sentence["end"]) > chunk_start and int(sentence["start"]) < chunk_end
+        ]
+        chunk_segments = [segment for segment in chunk_segments if segment["end"] > segment["start"]]
+
+        if not chunk_segments:
+            chunk_segments = [{"start": chunk_start, "end": chunk_end, "text": text[chunk_start:chunk_end]}]
+
+        weights = [estimate_timing_weight(segment["text"]) for segment in chunk_segments]
+        total_weight = sum(weights) or float(len(chunk_segments))
+        chunk_time_start = time_cursor
+
+        for index, segment in enumerate(chunk_segments):
+            if index == len(chunk_segments) - 1:
+                next_time = chunk_time_start + chunk_duration
+            else:
+                next_time = time_cursor + (chunk_duration * (weights[index] / total_weight))
+
+            cues.append(
+                {
+                    "start": int(segment["start"]),
+                    "end": int(segment["end"]),
+                    "timeStart": round(time_cursor, 4),
+                    "timeEnd": round(max(time_cursor, next_time), 4),
+                }
+            )
+            time_cursor = max(time_cursor, next_time)
+
+        total_duration += chunk_duration
+        time_cursor = chunk_time_start + chunk_duration
+
+    return {
+        "version": 1,
+        "audioUrl": audio_url,
+        "textLength": len(text),
+        "duration": round(total_duration, 4),
+        "cues": cues,
+    }
+
+
+def pcm_to_wav(pcm_bytes: bytes, wav_path: Path, *, channels: int = 1, rate: int = 24000, sample_width: int = 2) -> None:
+    with wave.open(str(wav_path), "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(rate)
+        wav_file.writeframes(pcm_bytes)
+
+
+def normalize_chunk_wav(wav_path: Path, *, ffmpeg_exe: Path) -> None:
+    normalized_path = wav_path.with_name(f"{wav_path.stem}.normalized.wav")
+    pdf_to_audio.normalize_wav_with_ffmpeg(
+        wav_path,
+        ffmpeg_exe=ffmpeg_exe,
+        output_path=normalized_path,
+        sample_rate=CANONICAL_WAV_SAMPLE_RATE,
+    )
+    normalized_path.replace(wav_path)
+
+
+def concat_provider_audio_chunks(
+    wav_paths: list[Path],
+    *,
+    ffmpeg_exe: Path,
+    output_path: Path,
+    output_format: str,
+) -> None:
+    if not wav_paths:
+        raise RuntimeError("No audio chunks were generated for concatenation.")
+    pdf_to_audio.concat_with_ffmpeg(
+        wav_paths,
+        ffmpeg_exe=ffmpeg_exe,
+        output_path=output_path,
+        codec=output_format,
+    )
+
+
+def restore_file_from_storage(key: str, destination: Path) -> bool:
+    payload = read_storage_bytes(key)
+    if payload is None:
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+    return True
+
+
+def cleanup_preview_files(limit: int = 20) -> None:
+    previews = sorted(PREVIEW_ROOT.glob("provider-test-*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for stale_file in previews[limit:]:
+        stale_file.unlink(missing_ok=True)
+
+
+def load_book_or_404(book_id: str) -> dict[str, Any]:
+    payload = read_book_meta(book_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Book not found.")
+    return payload
+
+
+def import_book_source(
+    book_id: str,
+    file_name: str,
+    source_path: Path,
+    *,
+    source_storage: dict[str, str] | None = None,
+    title_override: str | None = None,
+) -> dict[str, Any]:
+    try:
+        raw_text = pdf_to_audio.extract_text(source_path)
+        cleaned_text = pdf_to_audio.clean_text(raw_text)
+        page_count = len(PdfReader(str(source_path)).pages)
+    except Exception:
+        if not book_storage_enabled():
+            shutil.rmtree(book_dir(book_id), ignore_errors=True)
+        raise
+
+    if not cleaned_text:
+        if not book_storage_enabled():
+            shutil.rmtree(book_dir(book_id), ignore_errors=True)
+        raise HTTPException(
+            status_code=422,
+            detail="No extractable text was found in this PDF. Scanned PDFs need OCR first.",
+        )
+
+    write_book_text(book_id, cleaned_text)
+
+    title = resolve_book_title(title_override, file_name)
+    meta = {
+        "id": book_id,
+        "title": title,
+        "fileName": file_name,
+        "uploadedAt": utc_now(),
+        "pageCount": page_count,
+        "textCharacters": len(cleaned_text),
+        "excerpt": cleaned_text[:260],
+        "latestAudio": None,
+        "audioHistory": [],
+    }
+    if source_storage:
+        meta["sourceStorage"] = source_storage
+    else:
+        meta["sourcePath"] = str(source_path.resolve())
+
+    write_book_meta(book_id, meta)
+    return serialize_book(meta)
+
+
+def save_uploaded_book(upload: UploadFile, title_override: str | None = None) -> dict[str, Any]:
+    if not upload.filename:
+        raise HTTPException(status_code=400, detail="Missing filename.")
+
+    suffix = Path(upload.filename).suffix.lower()
+    if suffix != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF uploads are supported in the web app.")
+
+    book_id = uuid.uuid4().hex[:12]
+    target_dir = book_dir(book_id)
+    source_path = target_dir / f"source{suffix}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    with source_path.open("wb") as handle:
+        shutil.copyfileobj(upload.file, handle)
+
+    source_storage: dict[str, str] | None = None
+    try:
+        if book_storage_enabled():
+            object_key = book_source_storage_key(book_id)
+            write_storage_bytes(object_key, source_path.read_bytes(), content_type="application/pdf")
+            source_storage = {
+                "bucket": BOOK_STORAGE_BUCKET,
+                "key": object_key,
+            }
+
+        return import_book_source(
+            book_id,
+            upload.filename,
+            source_path,
+            source_storage=source_storage,
+            title_override=title_override,
+        )
+    except Exception:
+        if book_storage_enabled():
+            delete_storage_prefix(book_storage_base_prefix(book_id))
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise
+    finally:
+        upload.file.close()
+
+
+def create_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str, Any]:
+    if not book_storage_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Direct book uploads are not configured. Set BOOK_STORAGE_BUCKET and AWS credentials for durable hosted uploads.",
+        )
+
+    suffix = Path(request.fileName).suffix.lower()
+    if suffix != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF uploads are supported in the web app.")
+
+    book_id = uuid.uuid4().hex[:12]
+    object_key = book_source_storage_key(book_id)
+    client = create_book_storage_client()
+
+    try:
+        upload = client.generate_presigned_post(
+            Bucket=BOOK_STORAGE_BUCKET,
+            Key=object_key,
+            Fields={
+                "Content-Type": "application/pdf",
+            },
+            Conditions=[
+                {"Content-Type": "application/pdf"},
+                ["content-length-range", 1, BOOK_STORAGE_MAX_UPLOAD_BYTES],
+            ],
+            ExpiresIn=3600,
+        )
+    except Exception as exc:
+        logger.error("Failed to prepare direct upload for book %s: %s", book_id, exc)
+        raise HTTPException(status_code=503, detail="Failed to prepare direct upload. Check storage configuration.") from exc
+
+    return {
+        "bookId": book_id,
+        "upload": {
+            "url": regional_book_storage_upload_url(),
+            "fields": upload["fields"],
+        },
+    }
+
+
+def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dict[str, Any]:
+    if not book_storage_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Direct book uploads are not configured. Set BOOK_STORAGE_BUCKET and AWS credentials for durable hosted uploads.",
+        )
+
+    suffix = Path(request.fileName).suffix.lower()
+    if suffix != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF uploads are supported in the web app.")
+
+    object_key = book_source_storage_key(request.bookId)
+    temp_root = RUNTIME_ROOT / "direct-imports"
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="storybook_import_", dir=str(temp_root)) as temp_dir:
+        temp_source = Path(temp_dir) / f"source{suffix}"
+        try:
+            download_storage_object(object_key, temp_source)
+            return import_book_source(
+                request.bookId,
+                request.fileName,
+                temp_source,
+                source_storage={
+                    "bucket": BOOK_STORAGE_BUCKET,
+                    "key": object_key,
+                },
+                title_override=request.title,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Uploaded PDF was not found in storage.") from exc
+        except HTTPException:
+            delete_storage_prefix(book_storage_base_prefix(request.bookId))
+            raise
+        except Exception as exc:
+            logger.error("Failed to import uploaded PDF for book %s: %s", request.bookId, exc)
+            delete_storage_prefix(book_storage_base_prefix(request.bookId))
+            raise HTTPException(status_code=500, detail="Failed to import the uploaded PDF. Check the file is a valid PDF and try again.") from exc
+
+
+def source_file_response(book_id: str):
+    meta = load_book_or_404(book_id)
+    source_storage = meta.get("sourceStorage")
+    if source_storage:
+        key = source_storage.get("key")
+        if not isinstance(key, str) or not key:
+            raise HTTPException(status_code=500, detail="Stored source file metadata is invalid.")
+
+        client = create_book_storage_client()
+        _, _, _, ClientError, _, _, _ = load_boto3()
+        try:
+            response = client.get_object(Bucket=BOOK_STORAGE_BUCKET, Key=key)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                raise HTTPException(status_code=404, detail="Source PDF not found.") from exc
+            logger.error("Failed to load source PDF from storage (book %s, key %s): %s", book_id, key, exc)
+            raise HTTPException(status_code=503, detail="Failed to load the source PDF from storage.") from exc
+
+        headers = {
+            "Content-Disposition": f'inline; filename="{meta.get("fileName", "book.pdf")}"',
+            "Cache-Control": "private, max-age=300",
+        }
+        return StreamingResponse(
+            response["Body"].iter_chunks(),
+            media_type=response.get("ContentType") or "application/pdf",
+            headers=headers,
+        )
+
+    source_path = Path(meta["sourcePath"])
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Source PDF not found.")
+    return FileResponse(source_path, media_type="application/pdf", filename=meta.get("fileName") or source_path.name)
+
+
+def append_audio_version(book_id: str, version: dict[str, Any]) -> dict[str, Any]:
+    meta = load_book_or_404(book_id)
+    meta["latestAudio"] = version
+    meta["audioHistory"] = [version, *meta.get("audioHistory", [])][:8]
+    write_book_meta(book_id, meta)
+    return serialize_book(meta)
+
+
+def reader_payload(book_id: str) -> dict[str, Any]:
+    meta = load_book_or_404(book_id)
+    text = read_book_text(book_id)
+    return {
+        "book": serialize_book(meta),
+        "text": text,
+        "highlights": list_highlights(book_id),
+    }
+
+
+def create_highlight(book_id: str, request: HighlightCreateRequest) -> dict[str, Any]:
+    load_book_or_404(book_id)
+    text = read_book_text(book_id)
+    if request.end > len(text):
+        raise HTTPException(status_code=400, detail="Highlight extends past the end of the book text.")
+    if request.end <= request.start:
+        raise HTTPException(status_code=400, detail="Highlight end must be after the start.")
+
+    selected_text = normalize_highlight_text(text[request.start:request.end])
+    submitted_text = normalize_highlight_text(request.text)
+    if not selected_text:
+        raise HTTPException(status_code=400, detail="Highlight selection cannot be empty.")
+    if selected_text != submitted_text:
+        raise HTTPException(status_code=400, detail="Highlight text does not match the selected range.")
+
+    items = read_highlights(book_id)
+    items = [
+        item
+        for item in items
+        if not (request.start == item["start"] and request.end == item["end"])
+    ]
+
+    note = normalize_highlight_text(request.note) if request.note else None
+    kind = resolve_highlight_kind(request.kind, text=selected_text, note=note)
+
+    highlight = {
+        "id": uuid.uuid4().hex[:12],
+        "start": request.start,
+        "end": request.end,
+        "color": request.color,
+        "kind": kind,
+        "text": selected_text,
+        "note": note,
+        "createdAt": utc_now(),
+    }
+    items.append(highlight)
+    write_highlights(book_id, items)
+    return serialize_highlight(highlight)
+
+
+def delete_highlight(book_id: str, highlight_id: str) -> None:
+    load_book_or_404(book_id)
+    items = read_highlights(book_id)
+    remaining = [item for item in items if item["id"] != highlight_id]
+    if len(remaining) == len(items):
+        raise HTTPException(status_code=404, detail="Highlight not found.")
+    write_highlights(book_id, remaining)
+
+
+def delete_book_files(book_id: str) -> None:
+    load_book_or_404(book_id)
+    if book_storage_enabled():
+        delete_storage_prefix(book_storage_base_prefix(book_id))
+    shutil.rmtree(book_dir(book_id), ignore_errors=True)
+    delete_book_progress_records(book_id)
+
+    with job_lock:
+        stale_job_ids = [job_id for job_id, payload in job_state.items() if payload.get("bookId") == book_id]
+        for job_id in stale_job_ids:
+            job_state.pop(job_id, None)
+
+    for path in JOBS_ROOT.glob("*.json"):
+        try:
+            payload = read_json(path)
+        except Exception:
+            continue
+        if payload.get("bookId") == book_id:
+            path.unlink(missing_ok=True)
+
+
+def synthesize_piper(
+    *,
+    chunks: list[str],
+    output_path: Path,
+    chunk_dir: Path | None,
+    voice: str | None,
+    output_format: str,
+    length_scale: float,
+    sentence_silence: float,
+    job_id: str | None,
+) -> None:
+    model_path = Path(voice or provider_catalog()[0]["defaultVoice"] or pdf_to_audio.DEFAULT_MODEL).expanduser().resolve()
+    config_path = Path(f"{model_path}.json")
+    if not model_path.exists():
+        raise RuntimeError(f"Piper voice model not found: {model_path}")
+    if not config_path.exists():
+        raise RuntimeError(f"Piper voice config not found: {config_path}")
+
+    piper_exe = pdf_to_audio.find_binary(None, "PIPER_EXE", pdf_to_audio.DEFAULT_PIPER_EXE)
+    ffmpeg_exe = pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
+    espeak_data = Path(env_value("PIPER_ESPEAK_DATA") or str(pdf_to_audio.DEFAULT_ESPEAK_DATA)).expanduser().resolve()
+
+    with tempfile.TemporaryDirectory(prefix="storybook_piper_", dir=str(output_path.parent)) as temp_dir:
+        wav_dir = chunk_dir or Path(temp_dir)
+        wav_dir.mkdir(parents=True, exist_ok=True)
+        wav_paths: list[Path] = []
+        total = len(chunks)
+
+        for index, chunk in enumerate(chunks, start=1):
+            raise_if_job_cancelled(job_id)
+            wav_path = wav_dir / f"chunk_{index:05d}.wav"
+            command = [
+                str(piper_exe),
+                "-m",
+                str(model_path),
+                "-c",
+                str(config_path),
+                "-f",
+                str(wav_path),
+                "--espeak_data",
+                str(espeak_data),
+                "--speaker",
+                "0",
+                "--length_scale",
+                str(length_scale),
+                "--noise_scale",
+                "0.667",
+                "--noise_w",
+                "0.8",
+                "--sentence_silence",
+                str(sentence_silence),
+            ]
+            pdf_to_audio.run_subprocess(command, input_text=chunk)
+            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
+            wav_paths.append(wav_path)
+            record_job_progress(
+                job_id=job_id,
+                index=index,
+                total=total,
+                message=f"Synthesizing audio chunk {index} of {total} with Piper.",
+            )
+
+        raise_if_job_cancelled(job_id)
+        concat_provider_audio_chunks(
+            wav_paths,
+            ffmpeg_exe=ffmpeg_exe,
+            output_path=output_path,
+            output_format=output_format,
+        )
+
+
+def synthesize_openai(
+    *,
+    chunks: list[str],
+    output_path: Path,
+    chunk_dir: Path | None,
+    model: str | None,
+    voice: str | None,
+    narration_style: str,
+    output_format: str,
+    job_id: str | None,
+) -> None:
+    api_key = env_value("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    ffmpeg_exe = pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
+    chosen_model = resolve_openai_tts_model(model)
+    chosen_voice = voice or "coral"
+
+    with tempfile.TemporaryDirectory(prefix="storybook_openai_", dir=str(output_path.parent)) as temp_dir:
+        wav_dir = chunk_dir or Path(temp_dir)
+        wav_dir.mkdir(parents=True, exist_ok=True)
+        wav_paths: list[Path] = []
+        total = len(chunks)
+
+        with httpx.Client(timeout=120.0) as client:
+            for index, chunk in enumerate(chunks, start=1):
+                raise_if_job_cancelled(job_id)
+                response = client.post(
+                    OPENAI_TTS_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": chosen_model,
+                        "voice": chosen_voice,
+                        "input": chunk,
+                        "instructions": narration_style,
+                        "response_format": "wav",
+                    },
+                )
+                response.raise_for_status()
+                wav_path = wav_dir / f"chunk_{index:05d}.wav"
+                wav_path.write_bytes(response.content)
+                normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
+                wav_paths.append(wav_path)
+                record_job_progress(
+                    job_id=job_id,
+                    index=index,
+                    total=total,
+                    message=f"Synthesizing audio chunk {index} of {total} with OpenAI.",
+                )
+
+        raise_if_job_cancelled(job_id)
+        concat_provider_audio_chunks(
+            wav_paths,
+            ffmpeg_exe=ffmpeg_exe,
+            output_path=output_path,
+            output_format=output_format,
+        )
+
+
+def synthesize_google(
+    *,
+    chunks: list[str],
+    output_path: Path,
+    chunk_dir: Path | None,
+    model: str | None,
+    voice: str | None,
+    narration_style: str,
+    output_format: str,
+    length_scale: float,
+    sentence_silence: float,
+    job_id: str | None,
+) -> None:
+    api_key = env_value("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+
+    ffmpeg_exe = pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
+    chosen_model = resolve_google_tts_model(model)
+    chosen_voice = voice or "Kore"
+
+    with tempfile.TemporaryDirectory(prefix="storybook_google_", dir=str(output_path.parent)) as temp_dir:
+        wav_dir = chunk_dir or Path(temp_dir)
+        wav_dir.mkdir(parents=True, exist_ok=True)
+        wav_paths: list[Path] = []
+        total = len(chunks)
+
+        with httpx.Client(timeout=180.0) as client:
+            for index, chunk in enumerate(chunks, start=1):
+                raise_if_job_cancelled(job_id)
+                response = post_gemini_tts_with_retry(
+                    client,
+                    model=chosen_model,
+                    api_key=api_key,
+                    narration_style=narration_style,
+                    chunk=chunk,
+                    voice=chosen_voice,
+                    length_scale=length_scale,
+                    sentence_silence=sentence_silence,
+                )
+                payload = response.json()
+                encoded_audio = payload["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+                wav_path = wav_dir / f"chunk_{index:05d}.wav"
+                pcm_to_wav(b64decode(encoded_audio), wav_path)
+                normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
+                wav_paths.append(wav_path)
+                record_job_progress(
+                    job_id=job_id,
+                    index=index,
+                    total=total,
+                    message=f"Synthesizing audio chunk {index} of {total} with Google Gemini.",
+                )
+
+        raise_if_job_cancelled(job_id)
+        concat_provider_audio_chunks(
+            wav_paths,
+            ffmpeg_exe=ffmpeg_exe,
+            output_path=output_path,
+            output_format=output_format,
+        )
+
+
+def synthesize_qwen(
+    *,
+    chunks: list[str],
+    output_path: Path,
+    chunk_dir: Path | None,
+    model: str | None,
+    voice: str | None,
+    narration_style: str,
+    output_format: str,
+    length_scale: float,
+    sentence_silence: float,
+    job_id: str | None,
+) -> None:
+    api_key = env_value("DASHSCOPE_API_KEY")
+    if not api_key:
+        raise RuntimeError("DASHSCOPE_API_KEY is not configured.")
+
+    dashscope = load_dashscope()
+    ffmpeg_exe = pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
+    chosen_model = resolve_qwen_tts_model(model)
+    chosen_voice = resolve_qwen_tts_voice(voice, chosen_model)
+    use_instructions = "instruct" in chosen_model
+
+    with tempfile.TemporaryDirectory(prefix="storybook_qwen_", dir=str(output_path.parent)) as temp_dir:
+        wav_dir = chunk_dir or Path(temp_dir)
+        wav_dir.mkdir(parents=True, exist_ok=True)
+        wav_paths: list[Path] = []
+        total = len(chunks)
+
+        with httpx.Client(timeout=180.0, follow_redirects=True) as client:
+            for index, chunk in enumerate(chunks, start=1):
+                raise_if_job_cancelled(job_id)
+                request_kwargs: dict[str, Any] = {
+                    "model": chosen_model,
+                    "api_key": api_key,
+                    "text": chunk,
+                    "voice": chosen_voice,
+                    "language_type": qwen_language_type(chunk),
+                    "stream": False,
+                }
+                if use_instructions:
+                    request_kwargs["instructions"] = build_qwen_tts_instructions(
+                        narration_style,
+                        length_scale=length_scale,
+                        sentence_silence=sentence_silence,
+                    )
+                    request_kwargs["optimize_instructions"] = True
+
+                response = dashscope.MultiModalConversation.call(**request_kwargs)
+                if int(getattr(response, "status_code", HTTPStatus.INTERNAL_SERVER_ERROR)) != int(HTTPStatus.OK):
+                    code = getattr(response, "code", None)
+                    message = getattr(response, "message", None)
+                    raise RuntimeError(message or code or "Qwen TTS request failed.")
+
+                audio = getattr(getattr(response, "output", None), "audio", None)
+                wav_path = wav_dir / f"chunk_{index:05d}.wav"
+                if audio is None:
+                    raise RuntimeError("Qwen TTS returned no audio output.")
+                if getattr(audio, "data", None):
+                    wav_path.write_bytes(b64decode(audio.data))
+                elif getattr(audio, "url", None):
+                    download = client.get(audio.url)
+                    download.raise_for_status()
+                    wav_path.write_bytes(download.content)
+                else:
+                    raise RuntimeError("Qwen TTS returned no downloadable audio payload.")
+
+                normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
+                wav_paths.append(wav_path)
+                record_job_progress(
+                    job_id=job_id,
+                    index=index,
+                    total=total,
+                    message=f"Synthesizing audio chunk {index} of {total} with Qwen TTS.",
+                )
+
+        raise_if_job_cancelled(job_id)
+        concat_provider_audio_chunks(
+            wav_paths,
+            ffmpeg_exe=ffmpeg_exe,
+            output_path=output_path,
+            output_format=output_format,
+        )
+
+
+def synthesize_qwen_local(
+    *,
+    chunks: list[str],
+    output_path: Path,
+    chunk_dir: Path | None,
+    model: str | None,
+    voice: str | None,
+    narration_style: str,
+    output_format: str,
+    job_id: str | None,
+) -> None:
+    if not QWEN_LOCAL_HELPER.exists():
+        raise RuntimeError(f"Local Qwen helper script not found: {QWEN_LOCAL_HELPER}")
+
+    ffmpeg_exe = pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
+    chosen_model = resolve_qwen_local_tts_model(model)
+    chosen_voice = resolve_qwen_local_tts_voice(voice, chosen_model)
+    total = len(chunks)
+
+    with tempfile.TemporaryDirectory(prefix="storybook_qwen_local_", dir=str(output_path.parent)) as temp_dir:
+        temp_path = Path(temp_dir)
+        wav_dir = chunk_dir or temp_path / "chunks"
+        wav_dir.mkdir(parents=True, exist_ok=True)
+
+        request_payload: dict[str, Any] = {
+            "action": "synthesize",
+            "model": chosen_model,
+            "voice": chosen_voice,
+            "narration_style": narration_style,
+            "chunks": chunks,
+            "output_dir": str(wav_dir),
+            "device": QWEN_LOCAL_DEVICE,
+            "dtype": QWEN_LOCAL_DTYPE,
+            "attn_implementation": QWEN_LOCAL_ATTN_IMPLEMENTATION,
+            "batch_size": QWEN_LOCAL_BATCH_SIZE,
+            "sox_dir": QWEN_LOCAL_SOX_DIR,
+        }
+
+        record_job_progress(
+            job_id=job_id,
+            index=0,
+            total=total,
+            message=(
+                "Loading the local Qwen3-TTS runtime and generating audio. "
+                "The first run can take a while while weights warm up."
+            ),
+        )
+        manifest = run_qwen_helper_request(
+            request_payload,
+            timeout_seconds=QWEN_LOCAL_TIMEOUT_SECONDS,
+            prefer_daemon=True,
+        )
+
+        file_items = manifest.get("files")
+        if not isinstance(file_items, list) or not file_items:
+            raise RuntimeError("Local Qwen synthesis returned no audio chunk files.")
+
+        wav_paths: list[Path] = []
+        for index, file_item in enumerate(file_items, start=1):
+            raise_if_job_cancelled(job_id)
+            wav_path = Path(str(file_item))
+            if not wav_path.exists():
+                raise RuntimeError(f"Local Qwen synthesis reported a missing chunk file: {wav_path}")
+            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
+            wav_paths.append(wav_path)
+            record_job_progress(
+                job_id=job_id,
+                index=index,
+                total=total,
+                message=f"Preparing local Qwen audio chunk {index} of {total}.",
+            )
+
+        raise_if_job_cancelled(job_id)
+        concat_provider_audio_chunks(
+            wav_paths,
+            ffmpeg_exe=ffmpeg_exe,
+            output_path=output_path,
+            output_format=output_format,
+        )
+
+
+def synthesize_neutts_local(
+    *,
+    chunks: list[str],
+    output_path: Path,
+    chunk_dir: Path | None,
+    model: str | None,
+    voice: str | None,
+    narration_style: str,
+    output_format: str,
+    length_scale: float,
+    sentence_silence: float,
+    job_id: str | None,
+) -> None:
+    if not NEUTTS_LOCAL_HELPER.exists():
+        raise RuntimeError(f"NeuTTS WSL helper script not found: {NEUTTS_LOCAL_HELPER}")
+
+    ffmpeg_exe = pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
+    chosen_model = resolve_neutts_local_tts_model(model)
+    chosen_voice = resolve_neutts_local_tts_voice(voice, chosen_model)
+    reference_dir = neutts_reference_pack_path(chosen_voice)
+    prepared_chunks = [
+        shape_neutts_local_transcript(chunk, length_scale=length_scale, sentence_silence=sentence_silence)
+        for chunk in chunks
+    ]
+    prepared_chunks = [chunk for chunk in prepared_chunks if chunk.strip()]
+    if not prepared_chunks:
+        raise RuntimeError("Local NeuTTS synthesis received no usable text after punctuation shaping.")
+    total = len(chunks)
+
+    with tempfile.TemporaryDirectory(prefix="storybook_neutts_local_", dir=str(output_path.parent)) as temp_dir:
+        temp_path = Path(temp_dir)
+        wav_dir = chunk_dir or temp_path / "chunks"
+        wav_dir.mkdir(parents=True, exist_ok=True)
+
+        request_payload: dict[str, Any] = {
+            "action": "synthesize",
+            "model": chosen_model,
+            "codec": NEUTTS_LOCAL_CODEC,
+            "reference_dir": windows_path_to_wsl(reference_dir),
+            "output_dir": windows_path_to_wsl(wav_dir),
+            "chunks": prepared_chunks,
+            "narration_style": narration_style,
+            "length_scale": length_scale,
+            "sentence_silence": sentence_silence,
+        }
+        if NEUTTS_WSL_HF_HOME:
+            request_payload["hf_home"] = NEUTTS_WSL_HF_HOME
+
+        record_job_progress(
+            job_id=job_id,
+            index=0,
+            total=total,
+            message=(
+                "Loading the WSL NeuTTS runtime and generating audio. "
+                "The first run can take a while while the model and codec warm up."
+            ),
+        )
+        manifest = run_neutts_helper_request(
+            request_payload,
+            timeout_seconds=NEUTTS_LOCAL_TIMEOUT_SECONDS,
+            prefer_daemon=True,
+        )
+
+        file_items = manifest.get("files")
+        if not isinstance(file_items, list) or not file_items:
+            raise RuntimeError("Local NeuTTS synthesis returned no audio chunk files.")
+
+        wav_paths: list[Path] = []
+        for index, file_item in enumerate(file_items, start=1):
+            raise_if_job_cancelled(job_id)
+            wav_path = wsl_path_to_windows(str(file_item))
+            if not wav_path.exists():
+                raise RuntimeError(f"Local NeuTTS synthesis reported a missing chunk file: {wav_path}")
+            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
+            wav_paths.append(wav_path)
+            record_job_progress(
+                job_id=job_id,
+                index=index,
+                total=total,
+                message=f"Preparing local NeuTTS audio chunk {index} of {total}.",
+            )
+
+        raise_if_job_cancelled(job_id)
+        concat_provider_audio_chunks(
+            wav_paths,
+            ffmpeg_exe=ffmpeg_exe,
+            output_path=output_path,
+            output_format=output_format,
+        )
+
+
+def synthesize_polly(
+    *,
+    chunks: list[str],
+    output_path: Path,
+    chunk_dir: Path | None,
+    voice: str | None,
+    output_format: str,
+    length_scale: float,
+    sentence_silence: float,
+    job_id: str | None,
+) -> None:
+    client = create_polly_client()
+    ffmpeg_exe = pdf_to_audio.find_binary(
+        None,
+        "FFMPEG_EXE",
+        Path("ffmpeg.exe"),
+        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
+    )
+    chosen_voice = voice or POLLY_VOICE_ID
+
+    with tempfile.TemporaryDirectory(prefix="storybook_polly_", dir=str(output_path.parent)) as temp_dir:
+        wav_dir = chunk_dir or Path(temp_dir)
+        wav_dir.mkdir(parents=True, exist_ok=True)
+        wav_paths: list[Path] = []
+        total = len(chunks)
+
+        for index, chunk in enumerate(chunks, start=1):
+            raise_if_job_cancelled(job_id)
+            response = client.synthesize_speech(
+                Text=build_polly_ssml(chunk, length_scale=length_scale, sentence_silence=sentence_silence),
+                TextType="ssml",
+                Engine=POLLY_ENGINE,
+                VoiceId=chosen_voice,
+                OutputFormat="pcm",
+                SampleRate=POLLY_PCM_SAMPLE_RATE,
+                LanguageCode=POLLY_LANGUAGE_CODE,
+            )
+            audio_stream = response.get("AudioStream")
+            if audio_stream is None:
+                raise RuntimeError("Amazon Polly returned no audio stream.")
+
+            try:
+                pcm_bytes = audio_stream.read()
+            finally:
+                audio_stream.close()
+
+            wav_path = wav_dir / f"chunk_{index:05d}.wav"
+            pcm_to_wav(pcm_bytes, wav_path, rate=int(POLLY_PCM_SAMPLE_RATE))
+            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
+            wav_paths.append(wav_path)
+            record_job_progress(
+                job_id=job_id,
+                index=index,
+                total=total,
+                message=f"Synthesizing audio chunk {index} of {total} with Amazon Polly.",
+            )
+
+        raise_if_job_cancelled(job_id)
+        concat_provider_audio_chunks(
+            wav_paths,
+            ffmpeg_exe=ffmpeg_exe,
+            output_path=output_path,
+            output_format=output_format,
+        )
+
+
+def synthesize_provider_audio(
+    *,
+    provider_id: Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local", "kokoro"],
+    chunks: list[str],
+    output_path: Path,
+    chunk_dir: Path | None,
+    voice: str | None,
+    model: str | None,
+    narration_style: str,
+    output_format: str,
+    length_scale: float,
+    sentence_silence: float,
+    job_id: str | None,
+) -> str:
+    chosen_model = ""
+
+    if provider_id == "piper":
+        synthesize_piper(
+            chunks=chunks,
+            output_path=output_path,
+            chunk_dir=chunk_dir,
+            voice=voice,
+            output_format=output_format,
+            length_scale=length_scale,
+            sentence_silence=sentence_silence,
+            job_id=job_id,
+        )
+    elif provider_id == "google":
+        chosen_model = resolve_google_tts_model(model)
+        synthesize_google(
+            chunks=chunks,
+            output_path=output_path,
+            chunk_dir=chunk_dir,
+            model=chosen_model,
+            voice=voice,
+            narration_style=narration_style,
+            output_format=output_format,
+            length_scale=length_scale,
+            sentence_silence=sentence_silence,
+            job_id=job_id,
+        )
+    elif provider_id == "openai":
+        chosen_model = resolve_openai_tts_model(model)
+        synthesize_openai(
+            chunks=chunks,
+            output_path=output_path,
+            chunk_dir=chunk_dir,
+            model=chosen_model,
+            voice=voice,
+            narration_style=narration_style,
+            output_format=output_format,
+            job_id=job_id,
+        )
+    elif provider_id == "polly":
+        synthesize_polly(
+            chunks=chunks,
+            output_path=output_path,
+            chunk_dir=chunk_dir,
+            voice=voice,
+            output_format=output_format,
+            length_scale=length_scale,
+            sentence_silence=sentence_silence,
+            job_id=job_id,
+        )
+    elif provider_id == "qwen":
+        chosen_model = resolve_qwen_tts_model(model)
+        synthesize_qwen(
+            chunks=chunks,
+            output_path=output_path,
+            chunk_dir=chunk_dir,
+            model=chosen_model,
+            voice=voice,
+            narration_style=narration_style,
+            output_format=output_format,
+            length_scale=length_scale,
+            sentence_silence=sentence_silence,
+            job_id=job_id,
+        )
+    elif provider_id == "qwen_local":
+        chosen_model = resolve_qwen_local_tts_model(model)
+        synthesize_qwen_local(
+            chunks=chunks,
+            output_path=output_path,
+            chunk_dir=chunk_dir,
+            model=chosen_model,
+            voice=voice,
+            narration_style=narration_style,
+            output_format=output_format,
+            job_id=job_id,
+        )
+    elif provider_id == "neutts_local":
+        chosen_model = resolve_neutts_local_tts_model(model)
+        chosen_voice_for_remote = resolve_neutts_local_tts_voice(voice, chosen_model)
+        prepared_chunks = [
+            shape_neutts_local_transcript(chunk, length_scale=length_scale, sentence_silence=sentence_silence)
+            for chunk in chunks
+        ]
+        prepared_chunks = [c for c in prepared_chunks if c.strip()]
+        if not prepared_chunks:
+            raise RuntimeError("NeuTTS synthesis received no usable text after punctuation shaping.")
+
+        if neutts_remote_configured():
+            # Production path: call the remote NeuTTS server (works on Vercel)
+            synthesize_neutts_remote(prepared_chunks, chosen_voice_for_remote, chosen_model, output_path)
+        else:
+            # Local path: use WSL2 daemon (development only)
+            synthesize_neutts_local(
+                chunks=chunks,
+                output_path=output_path,
+                chunk_dir=chunk_dir,
+                model=chosen_model,
+                voice=voice,
+                narration_style=narration_style,
+                output_format=output_format,
+                length_scale=length_scale,
+                sentence_silence=sentence_silence,
+                job_id=job_id,
+            )
+    elif provider_id == "kokoro":
+        if not kokoro_configured():
+            raise RuntimeError("Kokoro remote server is not configured (set KOKORO_REMOTE_URL).")
+        # Kokoro takes the full text in one call per chunk — join then send
+        full_text = " ".join(chunk.strip() for chunk in chunks if chunk.strip())
+        speed = max(0.5, min(2.0, length_scale if length_scale else 1.0))
+        synthesize_kokoro_remote(full_text, voice or "af_heart", speed, output_path)
+    else:
+        raise RuntimeError(f"Unsupported provider: {provider_id}")
+
+    return chosen_model
+
+
+def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[str, Any]:
+    load_book_or_404(book_id)
+    provider = provider_details(request.provider)
+    if not provider["available"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{provider['name']} is not configured yet.",
+        )
+
+    text = read_book_text(book_id)
+    if request.end > len(text):
+        raise HTTPException(status_code=400, detail="Live audio range extends past the end of the book text.")
+    if request.end <= request.start:
+        raise HTTPException(status_code=400, detail="Live audio end must be after the start.")
+
+    selected_text = text[request.start:request.end]
+    submitted_text = normalize_highlight_text(request.text)
+    canonical_text = normalize_highlight_text(selected_text)
+    if not canonical_text:
+        raise HTTPException(status_code=400, detail="Live audio selection cannot be empty.")
+    if canonical_text != submitted_text:
+        raise HTTPException(status_code=400, detail="Live audio text does not match the selected range.")
+
+    synthesis_text = selected_text.strip()
+    if not synthesis_text:
+        raise HTTPException(status_code=400, detail="Live audio selection cannot be only whitespace.")
+
+    chosen_model: str | None = None
+    chosen_voice = request.voice or provider.get("defaultVoice")
+    if request.provider == "google":
+        chosen_model = resolve_google_tts_model(request.model)
+    elif request.provider == "qwen":
+        chosen_model = resolve_qwen_tts_model(request.model)
+        chosen_voice = resolve_qwen_tts_voice(chosen_voice, chosen_model)
+    elif request.provider == "qwen_local":
+        chosen_model = resolve_qwen_local_tts_model(request.model)
+        chosen_voice = resolve_qwen_local_tts_voice(chosen_voice, chosen_model)
+    elif request.provider == "neutts_local":
+        chosen_model = resolve_neutts_local_tts_model(request.model)
+        chosen_voice = resolve_neutts_local_tts_voice(chosen_voice, chosen_model)
+    elif request.provider == "kokoro":
+        chosen_voice = chosen_voice or "af_heart"
+    elif request.provider == "openai":
+        chosen_model = resolve_openai_tts_model(request.model)
+
+    playback_format = "wav"
+
+    cache_key = {
+        "version": LIVE_AUDIO_CACHE_VERSION,
+        "bookId": book_id,
+        "provider": request.provider,
+        "voice": chosen_voice,
+        "model": chosen_model or request.model,
+        "outputFormat": playback_format,
+        "narrationStyle": request.narration_style,
+        "lengthScale": request.length_scale,
+        "sentenceSilence": request.sentence_silence,
+        "start": request.start,
+        "end": request.end,
+    }
+    digest = hashlib.sha1(json.dumps(cache_key, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    output_dir = book_live_audio_dir(book_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{request.provider}-{digest}.{playback_format}"
+    storage_key = book_live_audio_storage_key(book_id, output_path.name) if book_storage_enabled() else None
+    cached = output_path.exists() and output_path.stat().st_size > 0
+    if not cached and storage_key:
+        cached = restore_file_from_storage(storage_key, output_path)
+
+    resolved_model = chosen_model or ""
+    if not cached:
+        chunks = prepare_live_synthesis_chunks(synthesis_text, request.provider)
+        resolved_model = synthesize_provider_audio(
+            provider_id=request.provider,
+            chunks=chunks,
+            output_path=output_path,
+            chunk_dir=None,
+            voice=chosen_voice,
+            model=request.model,
+            narration_style=request.narration_style,
+            output_format=playback_format,
+            length_scale=request.length_scale,
+            sentence_silence=request.sentence_silence,
+            job_id=None,
+        )
+    if storage_key and output_path.exists():
+        write_storage_bytes(storage_key, output_path.read_bytes(), content_type="audio/wav")
+
+    return {
+        "provider": request.provider,
+        "voice": chosen_voice,
+        "model": resolved_model or None,
+        "format": playback_format,
+        "url": generate_book_storage_download_url(storage_key) if storage_key else relative_url(output_path),
+        "start": request.start,
+        "end": request.end,
+        "pageNumber": request.pageNumber,
+        "cached": cached,
+    }
+
+
+def run_generation_job(job_id: str, book_id: str, request: GenerateAudioRequest) -> None:
+    raise_if_job_cancelled(job_id)
+    meta = load_book_or_404(book_id)
+    cleaned_text = read_book_text(book_id)
+    chunks = prepare_synthesis_chunks(cleaned_text, request.provider, request.chunk_size)
+    chosen_model = ""
+
+    audio_dir = book_dir(book_id) / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    output_path = audio_dir / f"{request.provider}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{request.output_format}"
+    timing_path = output_path.parent / f"{output_path.name}.timing.json"
+    chunk_dir = audio_dir / f".{output_path.stem}-chunks"
+    shutil.rmtree(chunk_dir, ignore_errors=True)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+
+    raise_if_job_cancelled(job_id)
+    update_job(
+        job_id,
+        status="running",
+        progress=0.0,
+        message=f"Prepared {len(chunks)} chunks for synthesis.",
+        startedAt=utc_now(),
+        totalChunks=len(chunks),
+        completedChunks=0,
+    )
+
+    timing_path_value: str | None = None
+    try:
+        chosen_model = synthesize_provider_audio(
+            provider_id=request.provider,
+            chunks=chunks,
+            output_path=output_path,
+            chunk_dir=chunk_dir,
+            voice=request.voice,
+            model=request.model,
+            narration_style=request.narration_style,
+            output_format=request.output_format,
+            length_scale=request.length_scale,
+            sentence_silence=request.sentence_silence,
+            job_id=job_id,
+        )
+
+        raise_if_job_cancelled(job_id)
+        try:
+            chunk_wavs = sorted(chunk_dir.glob("chunk_*.wav"))
+            if chunk_wavs:
+                write_json(
+                    timing_path,
+                    build_audio_timing_manifest(
+                        cleaned_text,
+                        chunks,
+                        chunk_wavs,
+                        audio_url=relative_url(output_path),
+                    ),
+                )
+                timing_path_value = str(timing_path.resolve())
+        except Exception as exc:
+            print(f"Failed to build timing manifest for {output_path.name}: {exc}")
+    finally:
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+
+    version = {
+        "provider": request.provider,
+        "voice": request.voice or "",
+        "model": chosen_model,
+        "format": request.output_format,
+        "createdAt": utc_now(),
+        "path": str(output_path.resolve()),
+        "timingPath": timing_path_value,
+    }
+    book = append_audio_version(book_id, version)
+    update_job(
+        job_id,
+        status="completed",
+        progress=100.0,
+        message=f"Finished {meta['title']}.",
+        finishedAt=utc_now(),
+        result={
+            "audioUrl": relative_url(output_path),
+            "book": book,
+        },
+    )
+
+
+def dispatch_generation_job(book_id: str, request: GenerateAudioRequest) -> dict[str, Any]:
+    job_id = uuid.uuid4().hex
+    payload = {
+        "id": job_id,
+        "bookId": book_id,
+        "provider": request.provider,
+        "status": "queued",
+        "progress": 0.0,
+        "message": "Queued for processing.",
+        "createdAt": utc_now(),
+        "finishedAt": None,
+        "error": None,
+        "result": None,
+        "totalChunks": 0,
+        "completedChunks": 0,
+        "cancelRequested": False,
+    }
+    persist_job(payload)
+
+    def runner() -> None:
+        try:
+            run_generation_job(job_id, book_id, request)
+        except JobCancelledError:
+            update_job(
+                job_id,
+                status="cancelled",
+                error=None,
+                message="Generation cancelled before the audiobook was finalized.",
+                finishedAt=utc_now(),
+                result=None,
+            )
+        except Exception as exc:
+            update_job(
+                job_id,
+                status="failed",
+                error=str(exc),
+                message="Audio generation failed.",
+                finishedAt=utc_now(),
+            )
+
+    threading.Thread(
+        target=runner,
+        name=f"storybook-job-{job_id[:8]}",
+        daemon=True,
+    ).start()
+    return payload
+
+
+def cancel_generation_job(job_id: str) -> dict[str, Any]:
+    payload = read_job_payload(job_id)
+    status = payload.get("status")
+    if status in {"completed", "failed", "cancelled"}:
+        return payload
+
+    if payload.get("cancelRequested"):
+        return payload
+
+    notice = (
+        "Cancellation requested. The current chunk will stop after finishing."
+        if status in {"running", "cancelling"}
+        else "Cancellation requested. The job will stop before synthesis starts."
+    )
+    return update_job(
+        job_id,
+        status="cancelling",
+        cancelRequested=True,
+        message=notice,
+        error=None,
+    )
+
+
+def provider_test_snippet(provider_id: str) -> str:
+    if provider_id in {"qwen_local", "neutts_local"}:
+        return PROVIDER_TEST_LOCAL_SNIPPET
+    return PROVIDER_TEST_SNIPPET
+
+
+def provider_test_preview_path(
+    *,
+    provider_id: str,
+    voice: str | None,
+    model: str | None,
+    narration_style: str,
+    length_scale: float,
+    sentence_silence: float,
+    sample_text: str,
+) -> Path:
+    cache_key = {
+        "version": PROVIDER_TEST_CACHE_VERSION,
+        "provider": provider_id,
+        "voice": voice or "",
+        "model": model or "",
+        "narrationStyle": narration_style,
+        "lengthScale": length_scale,
+        "sentenceSilence": sentence_silence,
+        "sampleText": sample_text,
+    }
+    digest = hashlib.sha1(json.dumps(cache_key, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    return PREVIEW_ROOT / f"provider-test-{provider_id}-{digest}.wav"
+
+
+def run_provider_test(request: ProviderTestRequest) -> dict[str, Any]:
+    provider = provider_details(request.provider)
+    if not provider["available"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{provider['name']} is not configured yet.",
+        )
+
+    chosen_model: str | None = None
+    chosen_voice = request.voice or provider.get("defaultVoice")
+    if request.provider == "google":
+        chosen_model = resolve_google_tts_model(request.model)
+    elif request.provider == "qwen":
+        chosen_model = resolve_qwen_tts_model(request.model)
+        chosen_voice = resolve_qwen_tts_voice(chosen_voice, chosen_model)
+    elif request.provider == "qwen_local":
+        chosen_model = resolve_qwen_local_tts_model(request.model)
+        chosen_voice = resolve_qwen_local_tts_voice(chosen_voice, chosen_model)
+    elif request.provider == "neutts_local":
+        chosen_model = resolve_neutts_local_tts_model(request.model)
+        chosen_voice = resolve_neutts_local_tts_voice(chosen_voice, chosen_model)
+    elif request.provider == "openai":
+        chosen_model = resolve_openai_tts_model(request.model)
+
+    resolved_model = chosen_model or ""
+    sample_text = provider_test_snippet(request.provider)
+    preview_path = provider_test_preview_path(
+        provider_id=request.provider,
+        voice=chosen_voice,
+        model=chosen_model or request.model,
+        narration_style=request.narration_style,
+        length_scale=request.length_scale,
+        sentence_silence=request.sentence_silence,
+        sample_text=sample_text,
+    )
+    preview_storage_key = preview_audio_storage_key(preview_path.name) if book_storage_enabled() else None
+    cached = preview_path.exists() and preview_path.stat().st_size > 0
+    if not cached and preview_storage_key:
+        cached = restore_file_from_storage(preview_storage_key, preview_path)
+    was_cached = cached
+
+    temporary_preview_path: Path | None = None
+
+    try:
+        if not cached:
+            temporary_preview_path = PREVIEW_ROOT / f".provider-test-{request.provider}-{uuid.uuid4().hex[:10]}.wav"
+            resolved_model = synthesize_provider_audio(
+                provider_id=request.provider,
+                chunks=[sample_text],
+                output_path=temporary_preview_path,
+                chunk_dir=None,
+                voice=chosen_voice,
+                model=request.model,
+                narration_style=request.narration_style,
+                output_format="wav",
+                length_scale=request.length_scale,
+                sentence_silence=request.sentence_silence,
+                job_id=None,
+            )
+            temporary_preview_path.replace(preview_path)
+            cached = True
+            temporary_preview_path = None
+    except HTTPException:
+        if temporary_preview_path is not None:
+            temporary_preview_path.unlink(missing_ok=True)
+        raise
+    except httpx.HTTPStatusError as exc:
+        if temporary_preview_path is not None:
+            temporary_preview_path.unlink(missing_ok=True)
+        try:
+            detail = exc.response.json().get("error", {}).get("message")
+        except Exception:
+            detail = None
+        raise HTTPException(status_code=400, detail=detail or str(exc)) from exc
+    except Exception as exc:
+        if temporary_preview_path is not None:
+            temporary_preview_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    cleanup_preview_files()
+    if preview_storage_key:
+        write_storage_bytes(preview_storage_key, preview_path.read_bytes(), content_type="audio/wav")
+    return {
+        "provider": request.provider,
+        "voice": chosen_voice,
+        "model": resolved_model,
+        "sampleText": sample_text,
+        "audioUrl": generate_book_storage_download_url(preview_storage_key) if preview_storage_key else relative_url(preview_path),
+        "message": (
+            f"{provider['name']} preview is ready."
+            if was_cached
+            else f"{provider['name']} generated a short sample successfully."
+        ),
+    }
+
+
+def run_provider_warmup(request: ProviderWarmupRequest) -> dict[str, Any]:
+    provider = provider_details(request.provider)
+    if not provider["available"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{provider['name']} is not configured yet.",
+        )
+
+    if request.provider == "neutts_local":
+        chosen_model = resolve_neutts_local_tts_model(request.model)
+        chosen_voice = resolve_neutts_local_tts_voice(request.voice or provider.get("defaultVoice"), chosen_model)
+        result = warmup_neutts_local_runtime(chosen_model, chosen_voice)
+    elif request.provider == "qwen_local":
+        chosen_model = resolve_qwen_local_tts_model(request.model)
+        chosen_voice = resolve_qwen_local_tts_voice(request.voice or provider.get("defaultVoice"), chosen_model)
+        result = warmup_qwen_local_runtime(chosen_model, chosen_voice)
+    else:
+        raise HTTPException(status_code=400, detail=f"Warmup is unsupported for provider {request.provider}.")
+
+    return {
+        "provider": request.provider,
+        "voice": chosen_voice,
+        "model": chosen_model,
+        "warmed": bool(result.get("warmed")),
+        "message": (
+            f"{provider['name']} warmed {chosen_voice}."
+            if result.get("warmed")
+            else f"{provider['name']} prepared {chosen_voice}, but the resident runtime is not ready yet."
+        ),
+    }
+
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    """
+    Extended health check.
+    Returns DB connectivity, psycopg availability, and which TTS providers are configured.
+    Always returns HTTP 200 — callers should inspect the individual fields.
+    """
+    # --- Database / progress store ---
+    db_status: dict[str, Any] = {"configured": progress_store_configured(), "ok": False, "error": None}
+    if db_status["configured"]:
+        try:
+            psycopg = load_psycopg()
+            with psycopg.connect(SUPABASE_DB_URL, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            db_status["ok"] = True
+            db_status["error"] = None
+        except ImportError:
+            db_status["error"] = "psycopg not installed — run: pip install -r requirements.txt"
+        except Exception as exc:
+            db_status["error"] = str(exc)
+    else:
+        db_status["ok"] = None  # not applicable — no DB URL configured
+
+    # --- Configured TTS providers (key-presence only, no live API call) ---
+    providers_configured = {
+        "gemini": bool(env_value("GEMINI_API_KEY")),
+        "qwen": bool(env_value("DASHSCOPE_API_KEY")),
+        "qwen_local": qwen_local_runtime_configured(),
+        "neutts_local": neutts_runtime_configured(),
+        "polly": bool(POLLY_REGION and (env_value("AWS_ACCESS_KEY_ID") or env_value("AWS_PROFILE"))),
+        "openai": bool(env_value("OPENAI_API_KEY")),
+        "piper": bool(env_value("PIPER_EXE")),
+    }
+
+    # --- Storage ---
+    storage_configured = bool(env_value("BOOK_STORAGE_BUCKET"))
+
+    return {
+        "status": "ok",
+        "db": db_status,
+        "providers": providers_configured,
+        "storage": {"s3": storage_configured},
+        "runtimeRoot": str(RUNTIME_ROOT),
+    }
+
+
+@app.get("/api/providers")
+def providers() -> dict[str, Any]:
+    return {
+        "defaultNarrationStyle": DEFAULT_NARRATION_STYLE,
+        "providers": provider_catalog(),
+    }
+
+
+@app.get("/api/providers/polly/health")
+def polly_health() -> dict[str, Any]:
+    return get_polly_health(force_refresh=True)
+
+
+@app.post("/api/providers/test")
+def provider_test(request: ProviderTestRequest) -> dict[str, Any]:
+    return run_provider_test(request)
+
+
+@app.post("/api/providers/warmup")
+def provider_warmup(request: ProviderWarmupRequest) -> dict[str, Any]:
+    return run_provider_warmup(request)
+
+
+@app.get("/api/dictionary/lookup")
+def dictionary_lookup(term: str) -> dict[str, Any]:
+    return lookup_offline_dictionary(term)
+
+
+def resolve_vocab_context_provider() -> Literal["auto", "gemma", "openai", "off"]:
+    raw_value = (env_value("VOCAB_CONTEXT_PROVIDER") or "auto").lower()
+    if raw_value in {"auto", "gemma", "openai", "off"}:
+        return raw_value
+    return "auto"
+
+
+def build_vocabulary_context_runtime() -> tuple[list[Any], list[Any], list[Any], list[Any], bool]:
+    provider = resolve_vocab_context_provider()
+    context_generators: list[Any] = []
+    lesson_generators: list[Any] = []
+    coach_generators: list[Any] = []
+    sentence_generators: list[Any] = []
+    allow_openai_fallback = provider in {"auto", "openai"}
+
+    if provider == "gemma" or (provider == "auto" and gemma_runtime_configured()):
+        context_generators.append(build_gemma_context_generator())
+        lesson_generators.append(build_gemma_lesson_generator())
+        coach_generators.append(build_gemma_answer_coach())
+        sentence_generators.append(build_gemma_sentence_coach())
+
+    if provider == "off":
+        allow_openai_fallback = False
+
+    return context_generators, lesson_generators, coach_generators, sentence_generators, allow_openai_fallback
+
+
+(
+    vocabulary_context_generators,
+    vocabulary_lesson_generators,
+    vocabulary_coach_generators,
+    vocabulary_sentence_generators,
+    vocabulary_openai_fallback,
+) = build_vocabulary_context_runtime()
+vocabulary_service = VocabularyStudioService(
+    DATA_ROOT,
+    dictionary_lookup=lookup_offline_dictionary,
+    context_generators=vocabulary_context_generators,
+    lesson_generators=vocabulary_lesson_generators,
+    coach_generators=vocabulary_coach_generators,
+    sentence_generators=vocabulary_sentence_generators,
+    allow_openai_fallback=vocabulary_openai_fallback,
+)
+app.include_router(create_vocabulary_router(vocabulary_service))
+
+
+@app.get("/api/learning/home")
+def learning_home() -> dict[str, Any]:
+    payload = vocabulary_service.learning_home_summary()
+    return {
+        **payload,
+        "continueBook": continue_book_payload(),
+    }
+
+
+@app.post("/api/learning/events")
+def create_learning_event(request: LearningEventCreateRequest) -> dict[str, Any]:
+    return vocabulary_service.record_learning_event(
+        {
+            "type": request.type,
+            "xpDelta": request.xpDelta,
+            "bookId": request.bookId,
+            "deckId": request.deckId,
+            "cardId": request.cardId,
+            "label": request.label,
+            "detail": request.detail,
+        }
+    )
+
+
+@app.get("/api/books")
+def books() -> dict[str, Any]:
+    return {"items": list_books()}
+
+
+@app.get("/api/books/{book_id}")
+def book(book_id: str) -> dict[str, Any]:
+    return serialize_book(load_book_or_404(book_id))
+
+
+@app.get("/api/books/{book_id}/reader")
+def book_reader(book_id: str) -> dict[str, Any]:
+    return reader_payload(book_id)
+
+
+@app.post("/api/books/{book_id}/live-audio")
+def create_live_audio(book_id: str, request: LiveAudioRequest) -> dict[str, Any]:
+    try:
+        return build_live_audio_payload(book_id, request)
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as exc:
+        try:
+            detail = exc.response.json().get("error", {}).get("message")
+        except Exception:
+            detail = None
+        raise HTTPException(status_code=400, detail=detail or str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/books/{book_id}/progress")
+def book_progress(book_id: str) -> dict[str, Any]:
+    return book_progress_payload(book_id)
+
+
+@app.put("/api/books/{book_id}/progress/reading")
+def update_book_progress(book_id: str, request: ReadingProgressRequest) -> dict[str, Any]:
+    return write_book_reading_progress(book_id, request)
+
+
+@app.put("/api/books/{book_id}/progress/audio")
+def update_book_audio(book_id: str, request: AudioProgressRequest) -> dict[str, Any]:
+    return write_book_audio_progress(book_id, request)
+
+
+@app.delete("/api/books/{book_id}/progress/audio")
+def clear_book_audio(book_id: str) -> dict[str, bool]:
+    return delete_book_audio_progress(book_id)
+
+
+@app.get("/api/books/{book_id}/highlights")
+def book_highlights(book_id: str) -> dict[str, Any]:
+    load_book_or_404(book_id)
+    return {"items": list_highlights(book_id)}
+
+
+@app.post("/api/books/{book_id}/highlights")
+def create_book_highlight(book_id: str, request: HighlightCreateRequest) -> dict[str, Any]:
+    return create_highlight(book_id, request)
+
+
+@app.delete("/api/books/{book_id}/highlights/{highlight_id}")
+def remove_book_highlight(book_id: str, highlight_id: str) -> dict[str, bool]:
+    delete_highlight(book_id, highlight_id)
+    return {"ok": True}
+
+
+@app.post("/api/books")
+def upload_book(file: UploadFile = File(...), title: str | None = Form(default=None)) -> dict[str, Any]:
+    return save_uploaded_book(file, title_override=title)
+
+
+@app.post("/api/books/direct-upload")
+def init_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str, Any]:
+    return create_direct_book_upload(request)
+
+
+@app.post("/api/books/direct-upload/complete")
+def finalize_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dict[str, Any]:
+    return complete_direct_book_upload(request)
+
+
+@app.get("/api/books/{book_id}/source", response_model=None)
+def book_source(book_id: str):
+    return source_file_response(book_id)
+
+
+@app.delete("/api/books/{book_id}")
+def delete_book(book_id: str) -> dict[str, bool]:
+    delete_book_files(book_id)
+    return {"ok": True}
+
+
+@app.post("/api/books/{book_id}/jobs")
+def create_job(book_id: str, request: GenerateAudioRequest) -> dict[str, Any]:
+    load_book_or_404(book_id)
+    return dispatch_generation_job(book_id, request)
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str) -> dict[str, Any]:
+    path = job_path(job_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return read_json(path)
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict[str, Any]:
+    try:
+        return cancel_generation_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Job not found.") from exc
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def spa_fallback(full_path: str) -> FileResponse:
+    if not WEB_DIST.exists():
+        raise HTTPException(status_code=404, detail="Frontend build not found.")
+
+    requested = (WEB_DIST / full_path).resolve()
+    if full_path and requested.exists() and requested.is_file() and WEB_DIST in requested.parents:
+        return FileResponse(requested)
+    return FileResponse(WEB_DIST / "index.html")

@@ -1,0 +1,62 @@
+# ── NeuTTS Remote Synthesis Server ───────────────────────────────────────────
+# Deploy to Railway, Fly.io, Hetzner, or any Linux host with Docker.
+#
+# Quick deploy (Railway):
+#   railway up --dockerfile Dockerfile.neutts
+#
+# Quick deploy (Fly.io):
+#   fly launch --dockerfile Dockerfile.neutts
+#   fly volumes create neutts_data --size 10  # for voices + cache
+#   fly deploy
+#
+# Local test:
+#   docker build -f Dockerfile.neutts -t neutts-server .
+#   docker run -p 8765:8765 \
+#     -v ./voices/neutts:/app/voices:ro \
+#     -v neutts-cache:/app/cache \
+#     -e NEUTTS_API_KEY=your-secret \
+#     neutts-server
+# ─────────────────────────────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps for librosa (soundfile/libsndfile) and audio processing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsndfile1 \
+        ffmpeg \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps — pin torch to CPU-only build to keep image small (~1.5 GB vs 4 GB)
+RUN pip install --no-cache-dir \
+        torch==2.3.1+cpu \
+        torchaudio==2.3.1+cpu \
+        --index-url https://download.pytorch.org/whl/cpu
+
+RUN pip install --no-cache-dir \
+        neutts \
+        neucodec \
+        soundfile \
+        librosa \
+        numpy
+
+# Copy only what the server needs
+COPY scripts/neutts_remote_server.py /app/server.py
+
+# Persistent directories — mount as volumes in production
+RUN mkdir -p /app/voices /app/cache
+
+ENV NEUTTS_VOICES_DIR=/app/voices
+ENV NEUTTS_CACHE_DIR=/app/cache
+ENV HF_HOME=/app/.hf_cache
+ENV HOST=0.0.0.0
+ENV PORT=8765
+
+EXPOSE 8765
+
+# Health check — Railway/Fly.io use this to confirm the service is up
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/v1/health')"
+
+CMD ["python", "/app/server.py"]

@@ -1,0 +1,28 @@
+# Railway deployment for the Edge-TTS remote server.
+# Free neural TTS — no API key needed from Microsoft.
+#
+# Deploy:
+#   railway login
+#   railway link          # link to your Railway project
+#   railway up --service edgetts --dockerfile Dockerfile.edgetts
+#
+# Set in Railway dashboard:
+#   EDGETTS_API_KEY   (openssl rand -hex 32)  — protects this server
+#
+# After deploy, set in Vercel:
+#   EDGETTS_REMOTE_URL     https://edgetts-production-xxxx.up.railway.app
+#   EDGETTS_REMOTE_API_KEY <same value as EDGETTS_API_KEY>
+
+[build]
+dockerfile = "Dockerfile.edgetts"
+
+[deploy]
+startCommand = "python /app/server.py"
+healthcheckPath = "/v1/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+[[volumes]]
+mountPath = "/data/cache"
+name = "edgetts-cache"

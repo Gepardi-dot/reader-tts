@@ -1,0 +1,54 @@
+# Fly.io deployment for the NeuTTS remote server.
+#
+# First-time setup:
+#   fly launch --dockerfile Dockerfile.neutts --name neutts-reader --no-deploy
+#   fly volumes create neutts_voices --size 5   --region <your-region>
+#   fly volumes create neutts_cache  --size 10  --region <your-region>
+#   fly volumes create neutts_hf     --size 20  --region <your-region>
+#   fly secrets set NEUTTS_API_KEY=<openssl rand -hex 32>
+#   fly deploy --dockerfile Dockerfile.neutts
+#
+# Recommended machine: shared-cpu-2x with 2 GB RAM (model needs ~1.5 GB)
+#   fly scale vm shared-cpu-2x --memory 2048
+#
+# After deploy, get the URL with: fly info
+# Then set in Vercel:
+#   NEUTTS_REMOTE_URL=https://neutts-reader.fly.dev
+#   NEUTTS_REMOTE_API_KEY=<same as NEUTTS_API_KEY>
+#
+# Sync voice packs:
+#   NEUTTS_REMOTE_URL=https://neutts-reader.fly.dev NEUTTS_REMOTE_API_KEY=... \
+#     python scripts/neutts_sync_voices.py
+
+app = "neutts-reader"
+primary_region = "ams"  # change to your nearest region
+
+[build]
+  dockerfile = "Dockerfile.neutts"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "8765"
+  NEUTTS_VOICES_DIR = "/data/voices"
+  NEUTTS_CACHE_DIR  = "/data/cache"
+  HF_HOME           = "/data/hf_cache"
+
+[http_service]
+  internal_port = 8765
+  force_https   = true
+  auto_stop_machines  = false   # keep model warm — don't let the machine sleep
+  auto_start_machines = true
+  min_machines_running = 1      # always one warm instance
+
+  [http_service.concurrency]
+    type       = "requests"
+    hard_limit = 4
+    soft_limit = 2
+
+[[mounts]]
+  source      = "neutts_data"
+  destination = "/data"
+
+[[vm]]
+  size   = "shared-cpu-2x"
+  memory = "2048mb"

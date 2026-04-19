@@ -1,0 +1,215 @@
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) 360px;
+  gap: 1rem;
+}
+
+.primaryColumn,
+.sideColumn {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) auto;
+  gap: 1rem;
+  padding: 1.5rem;
+}
+
+.heroCopy h2,
+.actionCard h3,
+.sessionCard h3,
+.sessionEmpty h3 {
+  margin: 0 0 0.75rem;
+  color: var(--ink-strong);
+  font: 600 clamp(2rem, 4vw, 3.6rem) / 0.94 var(--font-display);
+  letter-spacing: -0.05em;
+}
+
+.heroCopy p:last-child,
+.actionCard p,
+.sessionCard p,
+.sessionEmpty p,
+.feedbackBlock p {
+  margin: 0;
+  color: var(--ink-soft);
+  font: 500 0.95rem/1.65 var(--font-ui);
+}
+
+.heroStats {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 16rem;
+}
+
+.heroStats div,
+.sessionMeter {
+  display: grid;
+  padding: 1rem;
+  border-radius: 1.2rem;
+  background: rgba(35, 47, 44, 0.05);
+}
+
+.heroStats span,
+.sessionMeter span,
+.lessonContext span {
+  color: var(--ink-faint);
+  font: 800 0.7rem/1 var(--font-ui);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.heroStats strong,
+.sessionMeter strong {
+  color: var(--ink-strong);
+  font: 700 1.1rem/1.1 var(--font-ui);
+}
+
+.heroStats small,
+.sessionMeter small {
+  color: var(--ink-faint);
+}
+
+.actionsGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.actionCard,
+.sessionCard,
+.sessionEmpty,
+.activityPanel {
+  padding: 1.35rem;
+}
+
+.actionCard {
+  display: grid;
+  gap: 1rem;
+}
+
+.sessionSurface {
+  min-width: 0;
+}
+
+.sessionCard {
+  display: grid;
+  gap: 1rem;
+}
+
+.sessionHeader,
+.sessionActions,
+.ratingRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.lessonContext,
+.feedbackBlock,
+.productionArea {
+  display: grid;
+  gap: 0.6rem;
+  padding: 1rem;
+  border-radius: 1.2rem;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.lessonContext strong,
+.feedbackBlock strong {
+  color: var(--ink-strong);
+  font: 700 1rem/1.25 var(--font-ui);
+}
+
+.answerKey {
+  color: var(--accent-strong);
+  font: 700 0.9rem/1.4 var(--font-ui);
+}
+
+.activityList {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.activityItem {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.activityItem:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.activityItem strong {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--ink-strong);
+  font: 700 0.95rem/1.2 var(--font-ui);
+}
+
+.activityItem p,
+.activityItem span {
+  margin: 0;
+  color: var(--ink-soft);
+  font: 500 0.88rem/1.5 var(--font-ui);
+}
+
+.deckPulse {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.deckPulse div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.deckPulse div:last-child {
+  border-bottom: 0;
+}
+
+.deckPulse span {
+  color: var(--ink-soft);
+  font: 700 0.8rem/1.2 var(--font-ui);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.deckPulse strong {
+  color: var(--ink-strong);
+  font: 700 0.95rem/1.2 var(--font-ui);
+}
+
+@media (max-width: 1180px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .actionsGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+
+  .heroCopy h2,
+  .actionCard h3,
+  .sessionCard h3,
+  .sessionEmpty h3 {
+    font-size: 2rem;
+  }
+}

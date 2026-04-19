@@ -1,0 +1,12 @@
+{
+  "sentence_silence": 0.2,
+  "provider": "polly",
+  "narration_style": "Read like a premium audiobook narrator. Keep the pacing controlled, the phrasing natural, and the delivery emotionally aware without adding or changing any words from the text.",
+  "length_scale": 1.0,
+  "output_format": "mp3",
+  "start": 0,
+  "pageNumber": 1,
+  "text": "Praise for\nStoryworthy\nand Matthew Dicks\n“Offers countless tips, exercises, and examples to get you on your way to better stories. Anyone who\nwants to take the stage, become a better writer, or simply tell better stories at Thanksgiving will benefit\nfrom\nStoryworthy\n.”\n— Jeff Vibes,\nfilmmaker\n“I laughed, gasped, took notes, and carried this book around like a dear friend — because that’s exactly\nw",
+  "voice": "Matthew",
+  "end": 400
+}

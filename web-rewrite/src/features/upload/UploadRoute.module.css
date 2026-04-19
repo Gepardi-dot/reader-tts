@@ -1,0 +1,48 @@
+.layout {
+  display: grid;
+}
+
+.panel {
+  display: grid;
+  gap: 1.2rem;
+  padding: 1.5rem;
+}
+
+.panel h2 {
+  margin: 0;
+  max-width: 12ch;
+  color: var(--ink-strong);
+  font: 600 clamp(2rem, 4vw, 3.5rem) / 0.94 var(--font-display);
+  letter-spacing: -0.05em;
+}
+
+.dropzone {
+  display: grid;
+  place-items: center;
+  gap: 0.45rem;
+  min-height: 18rem;
+  padding: 1.5rem;
+  border: 1px dashed rgba(138, 92, 24, 0.38);
+  border-radius: 1.5rem;
+  background: rgba(255, 255, 255, 0.42);
+  text-align: center;
+}
+
+.dropzone input {
+  display: none;
+}
+
+.dropzone strong {
+  color: var(--ink-strong);
+  font: 700 1.1rem/1.2 var(--font-ui);
+}
+
+.dropzone span,
+.error {
+  color: var(--ink-soft);
+  font: 500 0.95rem/1.6 var(--font-ui);
+}
+
+.error {
+  color: var(--danger);
+}

@@ -1,0 +1,369 @@
+/* ── Root: break out of AppShell main padding to go full-width ─────────────── */
+.root {
+  margin: -1.25rem -1.35rem 0;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────────── */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  background: #1b2620;
+}
+
+.backBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.4rem 0.85rem 0.4rem 0.55rem;
+  border: 1.5px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.9);
+  font: 700 0.78rem/1 var(--font-ui);
+  letter-spacing: 0.03em;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.backBtn:hover { background: rgba(255, 255, 255, 0.08); }
+
+.backChevron {
+  font-size: 1.5rem;
+  line-height: 0.85;
+  font-weight: 300;
+  opacity: 0.8;
+}
+
+.headerCenter {
+  text-align: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.bookTitle {
+  margin: 0;
+  color: #fff;
+  font: 700 0.95rem/1.2 var(--font-ui);
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.headerProgress {
+  margin: 0.22rem 0 0;
+  color: rgba(255, 255, 255, 0.48);
+  font: 500 0.7rem/1 var(--font-ui);
+  letter-spacing: 0.02em;
+}
+
+.headerSpacer {
+  min-width: 5rem; /* mirror back button width to keep title centered */
+}
+
+/* ── Tab bar ─────────────────────────────────────────────────────────────────── */
+.tabBarWrap {
+  padding: 0.6rem 1rem;
+  background: var(--surface-muted, rgba(244, 237, 225, 0.92));
+  border-bottom: 1px solid rgba(28, 40, 37, 0.07);
+}
+
+.tabBar {
+  display: flex;
+  background: rgba(28, 40, 37, 0.08);
+  border-radius: 999px;
+  padding: 0.22rem;
+  gap: 0;
+}
+
+.tab {
+  flex: 1;
+  padding: 0.5rem 0.5rem;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(28, 40, 37, 0.5);
+  font: 600 0.88rem/1 var(--font-ui);
+  cursor: pointer;
+  transition: background 0.18s, color 0.18s, box-shadow 0.18s;
+  white-space: nowrap;
+}
+
+.tabActive {
+  background: #fff;
+  color: #17211f;
+  font-weight: 700;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+}
+
+/* ── Reader pane ─────────────────────────────────────────────────────────────── */
+.readerPane {
+  padding: 1.75rem 1.5rem 2.5rem;
+  display: grid;
+  gap: 2rem;
+}
+
+.pageText {
+  margin: 0 auto;
+  width: 100%;
+  color: var(--ink, #20312d);
+}
+
+.paragraph {
+  margin: 0 0 1.5em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.paragraph:last-child { margin-bottom: 0; }
+
+.highlight {
+  padding: 0.05rem 0.15rem;
+  border-radius: 0.35rem;
+  cursor: default;
+}
+
+.highlightAmber { background: rgba(221, 184, 118, 0.35); }
+.highlightSky   { background: rgba(110, 153, 171, 0.28); }
+.highlightRose  { background: rgba(190, 125, 133, 0.26); }
+
+/* ── Page navigation ─────────────────────────────────────────────────────────── */
+.pageNav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  max-width: 36rem;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.navBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  flex-shrink: 0;
+  border: 1.5px solid var(--line-strong, rgba(28, 40, 37, 0.18));
+  border-radius: 50%;
+  background: var(--surface-strong, rgba(255, 254, 250, 0.98));
+  color: var(--ink-strong, #17211f);
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.navBtn:hover:not(:disabled) {
+  background: #1b2620;
+  border-color: #1b2620;
+  color: #fff;
+}
+
+.navBtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.progressTrack {
+  flex: 1;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--line, rgba(28, 40, 37, 0.1));
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent, #bd8a3f);
+  transition: width 0.3s ease;
+  min-width: 4px;
+}
+
+/* ── Sheet (Edit & Audio panels) ─────────────────────────────────────────────── */
+.sheet {
+  border-top: 1px solid var(--line, rgba(28, 40, 37, 0.1));
+  border-radius: 1.75rem 1.75rem 0 0;
+  background: var(--surface-strong, rgba(255, 254, 250, 0.99));
+  padding: 0.75rem 1.5rem 2.5rem;
+  display: grid;
+  gap: 0;
+  box-shadow: 0 -6px 28px rgba(0, 0, 0, 0.07);
+  animation: slideUp 0.2s ease-out;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+.sheetHandle {
+  width: 2.5rem;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.12);
+  margin: 0 auto 1.1rem;
+}
+
+/* ── Sheet rows ──────────────────────────────────────────────────────────────── */
+.sheetRow {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.9rem 0;
+}
+
+/* FORMAT row: label | font pills | size slider */
+.sheetRowFormat {
+  grid-template-columns: 4.5rem auto 1fr;
+}
+
+.sheetLabel {
+  color: rgba(28, 40, 37, 0.42);
+  font: 700 0.68rem/1.3 var(--font-ui);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: pre-line;
+}
+
+.sheetDivider {
+  height: 1px;
+  background: var(--line, rgba(28, 40, 37, 0.08));
+}
+
+/* ── Pill buttons ─────────────────────────────────────────────────────────────── */
+.pillGroup {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.pill {
+  padding: 0.48rem 0.9rem;
+  border: 1.5px solid rgba(28, 40, 37, 0.14);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft, rgba(28, 40, 37, 0.72));
+  font: 600 0.82rem/1 var(--font-ui);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.pill:hover:not(.pillActive) {
+  background: var(--surface-muted, rgba(244, 237, 225, 0.92));
+  border-color: rgba(28, 40, 37, 0.22);
+}
+
+.pillActive {
+  background: #1b2620;
+  border-color: #1b2620;
+  color: #fff;
+  font-weight: 700;
+}
+
+/* ── Font size slider (A- A+) ────────────────────────────────────────────────── */
+.sizeRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sizeLabel {
+  color: var(--ink-soft, rgba(28, 40, 37, 0.72));
+  font: 600 0.88rem/1 var(--font-ui);
+  flex-shrink: 0;
+  width: 1.6rem;
+  text-align: center;
+}
+
+.sizeLabelPlus {
+  font-weight: 800;
+  font-size: 1rem;
+}
+
+.sizeSlider {
+  flex: 1;
+  accent-color: var(--accent, #bd8a3f);
+  cursor: pointer;
+  min-width: 0;
+}
+
+/* ── Audio sheet ─────────────────────────────────────────────────────────────── */
+.audioGrid {
+  display: grid;
+  gap: 0.85rem;
+  padding: 0.25rem 0 1.25rem;
+}
+
+.audioField {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.hearBtn {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  font: 700 1rem/1 var(--font-ui) !important;
+  border-radius: 999px !important;
+  margin-bottom: 0.85rem;
+}
+
+.audioError {
+  margin: 0 0 0.5rem;
+  color: var(--danger, #8d4b42);
+  font: 500 0.82rem/1.5 var(--font-ui);
+}
+
+.audioSettingsLink {
+  display: block;
+  text-align: center;
+  color: var(--accent-strong, #8a5c18);
+  font: 700 0.82rem/1 var(--font-ui);
+  text-decoration: none;
+  padding-top: 0.25rem;
+}
+
+.audioSettingsLink:hover { text-decoration: underline; }
+
+/* ── Loading ─────────────────────────────────────────────────────────────────── */
+.loading {
+  display: grid;
+  place-items: start;
+}
+
+.loadingPanel {
+  padding: 1.75rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.loadingPanel h2 {
+  margin: 0;
+  color: var(--ink-strong);
+  font: 600 clamp(1.6rem, 4vw, 2.5rem) / 1.05 var(--font-display);
+  letter-spacing: -0.04em;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .root { margin: -1rem -1rem 0; }
+  .readerPane { padding: 1.25rem 1rem 2rem; }
+  .sheet { padding: 0.75rem 1rem 2rem; border-radius: 1.25rem 1.25rem 0 0; }
+  .sheetRow { grid-template-columns: 3.75rem 1fr; gap: 0.5rem; }
+  .sheetRowFormat { grid-template-columns: 3.75rem auto 1fr; }
+  .headerSpacer { min-width: 3.5rem; }
+}
+
+@media (max-width: 420px) {
+  .pillGroup { gap: 0.25rem; }
+  .pill { padding: 0.42rem 0.7rem; font-size: 0.78rem; }
+}

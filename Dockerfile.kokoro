@@ -1,0 +1,33 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# System deps for audio processing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps — kokoro-onnx has no PyTorch requirement, image stays small (~600 MB)
+RUN pip install --no-cache-dir \
+    kokoro-onnx \
+    numpy \
+    fastapi \
+    "uvicorn[standard]" \
+    pydantic \
+    huggingface_hub
+
+COPY scripts/kokoro_server.py /app/server.py
+
+# Pre-download model at build time so the first request isn't cold
+ENV HF_HOME=/data/hf_cache
+RUN mkdir -p /data/hf_cache /data/cache && \
+    python -c "from kokoro_onnx import Kokoro; Kokoro.from_pretrained()" || true
+
+ENV HOST=0.0.0.0 \
+    PORT=8767 \
+    KOKORO_CACHE_DIR=/data/cache \
+    HF_HOME=/data/hf_cache
+
+EXPOSE 8767
+
+CMD ["python", "/app/server.py"]

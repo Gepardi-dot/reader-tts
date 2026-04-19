@@ -1,0 +1,18 @@
+beautifulsoup4
+boto3
+dashscope>=1.24.6
+ebooklib
+fastapi
+fsrs>=6.3.1,<7
+httpx
+lxml
+nltk
+python-dotenv
+python-multipart
+pypdf
+psycopg[binary]>=3.2,<4
+# sentry-sdk[fastapi]>=2.0,<3  — excluded: Vercel Lambda is at the 245 MB size limit.
+# To enable Sentry on Vercel, add it via Vercel's native Sentry integration instead
+# (https://vercel.com/integrations/sentry) which injects the DSN without adding package size.
+# For local / self-hosted deployments, uncomment the line above and set SENTRY_DSN in .env.
+uvicorn[standard]

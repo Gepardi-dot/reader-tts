@@ -1,0 +1,87 @@
+.layout,
+.groups {
+  display: grid;
+  gap: 1rem;
+}
+
+.hero,
+.groupCard,
+.empty {
+  padding: 1.4rem;
+}
+
+.hero {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.hero h2,
+.groupHead h3,
+.empty h3 {
+  margin: 0;
+  color: var(--ink-strong);
+  font: 600 clamp(1.9rem, 4vw, 3.2rem) / 0.94 var(--font-display);
+  letter-spacing: -0.05em;
+}
+
+.hero strong {
+  color: var(--ink-strong);
+  font: 700 0.92rem/1.2 var(--font-ui);
+}
+
+.groupCard,
+.entryList {
+  display: grid;
+  gap: 1rem;
+}
+
+.groupHead {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.entryList {
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+}
+
+.entryCard {
+  display: grid;
+  gap: 0.45rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.44);
+}
+
+.entryCard strong,
+.entryCard p,
+.entryCard span,
+.empty p {
+  margin: 0;
+  font-family: var(--font-ui);
+}
+
+.entryCard strong {
+  color: var(--ink-strong);
+  font-size: 0.95rem;
+}
+
+.entryCard p,
+.entryCard span,
+.empty p {
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+@media (max-width: 720px) {
+  .hero,
+  .groupHead {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

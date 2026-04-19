@@ -1,0 +1,5 @@
+# Enforce LF line endings in the repo; prevent CRLF noise on Windows checkouts
+* text=auto eol=lf
+
+# PowerShell scripts must keep CRLF or they fail on Windows
+*.ps1 text eol=crlf

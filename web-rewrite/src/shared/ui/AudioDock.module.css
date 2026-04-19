@@ -1,0 +1,207 @@
+.dock {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  left: 1rem;
+  z-index: 50;
+  border: 1px solid rgba(235, 198, 140, 0.14);
+  border-radius: 1.5rem;
+  background:
+    radial-gradient(circle at top left, rgba(217, 171, 98, 0.18), transparent 28%),
+    linear-gradient(180deg, rgba(22, 30, 29, 0.97), rgba(30, 39, 37, 0.95));
+  box-shadow: 0 28px 60px rgba(10, 14, 14, 0.32);
+  backdrop-filter: blur(24px);
+  overflow: hidden;
+}
+
+/* Progress track behind everything */
+.progressTrack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.progressFill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(239, 205, 143, 0.9), rgba(255, 247, 226, 1));
+  transition: width 0.3s linear;
+  min-width: 3px;
+}
+
+.inner {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.85rem 1.1rem 0.9rem;
+}
+
+/* Track info */
+.identity {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.trackTitle {
+  overflow: hidden;
+  color: #fff8ed;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 700 1rem/1.15 var(--font-ui);
+}
+
+.trackSub {
+  overflow: hidden;
+  color: rgba(242, 231, 210, 0.62);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 0.82rem/1.2 var(--font-ui);
+}
+
+/* Seek row */
+.seekRow {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.time {
+  color: rgba(242, 231, 210, 0.6);
+  font: 700 0.68rem/1 var(--font-ui);
+  letter-spacing: 0.06em;
+  min-width: 2.5rem;
+}
+
+.seekRow .time:last-child {
+  text-align: right;
+}
+
+.seeker {
+  flex: 1;
+  accent-color: rgba(239, 205, 143, 0.9);
+  cursor: pointer;
+}
+
+/* Controls row */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.playBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff8ed;
+  font-size: 1rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 140ms ease, transform 120ms ease;
+}
+
+.playBtn:hover { background: rgba(255, 255, 255, 0.14); transform: scale(1.06); }
+.playing { background: rgba(239, 205, 143, 0.2); border-color: rgba(239, 205, 143, 0.4); }
+
+/* Playback rate */
+.rates {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: nowrap;
+}
+
+.rateBtn {
+  min-height: 1.8rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(242, 231, 210, 0.65);
+  font: 700 0.7rem/1 var(--font-ui);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.rateBtn:hover { background: rgba(255, 255, 255, 0.1); color: #fff8ed; }
+
+.rateBtnActive {
+  background: rgba(239, 205, 143, 0.2) !important;
+  border-color: rgba(239, 205, 143, 0.4) !important;
+  color: rgba(255, 247, 226, 0.95) !important;
+}
+
+/* Volume */
+.volumeGroup {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.muteBtn {
+  background: none;
+  border: none;
+  color: rgba(242, 231, 210, 0.7);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.volumeSlider {
+  width: 5rem;
+  accent-color: rgba(239, 205, 143, 0.8);
+}
+
+/* Close */
+.closeBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  background: none;
+  color: rgba(242, 231, 210, 0.55);
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.closeBtn:hover { background: rgba(255, 255, 255, 0.08); color: #fff8ed; }
+
+/* Error */
+.error {
+  margin: 0;
+  color: rgba(243, 185, 174, 0.9);
+  font: 500 0.8rem/1.45 var(--font-ui);
+}
+
+/* ── Mobile: dock sits above bottom nav ──────────────────────────────────── */
+@media (max-width: 768px) {
+  .dock {
+    bottom: calc(64px + env(safe-area-inset-bottom, 0px) + 0.5rem);
+  }
+
+  .rates {
+    flex-wrap: wrap;
+  }
+
+  .volumeSlider {
+    width: 4rem;
+  }
+}
+
+@media (max-width: 440px) {
+  .volumeGroup {
+    display: none;
+  }
+}
