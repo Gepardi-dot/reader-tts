@@ -20,8 +20,7 @@ COPY scripts/kokoro_server.py /app/server.py
 
 # Pre-download model at build time so the first request isn't cold
 ENV HF_HOME=/data/hf_cache
-RUN mkdir -p /data/hf_cache /data/cache && \
-    python -c "from kokoro_onnx import Kokoro; Kokoro.from_pretrained()" || true
+RUN mkdir -p /data/hf_cache /data/cache
 
 ENV HOST=0.0.0.0 \
     PORT=8767 \

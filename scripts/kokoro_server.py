@@ -73,7 +73,10 @@ def load_model() -> None:
     log.info("Loading Kokoro model from HuggingFace (first run downloads ~330 MB)…")
     try:
         from kokoro_onnx import Kokoro  # type: ignore
-        _kokoro = Kokoro.from_pretrained()
+        from huggingface_hub import hf_hub_download  # type: ignore
+        model_path  = hf_hub_download(repo_id="hexgrad/Kokoro-82M-ONNX", filename="kokoro-v1.0.onnx",  cache_dir=HF_HOME)
+        voices_path = hf_hub_download(repo_id="hexgrad/Kokoro-82M-ONNX", filename="voices-v1.0.bin", cache_dir=HF_HOME)
+        _kokoro = Kokoro(model_path, voices_path)
         _sample_rate = 24000
         log.info("Kokoro model ready.")
     except Exception as exc:
