@@ -13,8 +13,7 @@ RUN pip install --no-cache-dir \
     numpy \
     fastapi \
     "uvicorn[standard]" \
-    pydantic \
-    huggingface_hub
+    pydantic
 
 COPY scripts/kokoro_server.py /app/server.py
 

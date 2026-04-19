@@ -68,15 +68,29 @@ _kokoro: "Kokoro | None" = None  # type: ignore[name-defined]
 _sample_rate: int = 24000
 
 
+_GH_BASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+_MODEL_FILE  = CACHE_DIR / "kokoro-v1.0.onnx"
+_VOICES_FILE = CACHE_DIR / "voices-v1.0.bin"
+
+
+def _download(url: str, dest: Path) -> None:
+    import urllib.request
+    log.info("Downloading %s …", dest.name)
+    urllib.request.urlretrieve(url, dest)
+    log.info("Downloaded %s (%.1f MB)", dest.name, dest.stat().st_size / 1_048_576)
+
+
 def load_model() -> None:
     global _kokoro, _sample_rate
-    log.info("Loading Kokoro model from HuggingFace (first run downloads ~330 MB)…")
+    log.info("Loading Kokoro model (first run downloads ~330 MB)…")
     try:
         from kokoro_onnx import Kokoro  # type: ignore
-        from huggingface_hub import hf_hub_download  # type: ignore
-        model_path  = hf_hub_download(repo_id="hexgrad/Kokoro-82M-ONNX", filename="kokoro-v1.0.onnx",  cache_dir=HF_HOME)
-        voices_path = hf_hub_download(repo_id="hexgrad/Kokoro-82M-ONNX", filename="voices-v1.0.bin", cache_dir=HF_HOME)
-        _kokoro = Kokoro(model_path, voices_path)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        if not _MODEL_FILE.exists() or _MODEL_FILE.stat().st_size == 0:
+            _download(f"{_GH_BASE}/kokoro-v1.0.onnx", _MODEL_FILE)
+        if not _VOICES_FILE.exists() or _VOICES_FILE.stat().st_size == 0:
+            _download(f"{_GH_BASE}/voices-v1.0.bin", _VOICES_FILE)
+        _kokoro = Kokoro(str(_MODEL_FILE), str(_VOICES_FILE))
         _sample_rate = 24000
         log.info("Kokoro model ready.")
     except Exception as exc:
