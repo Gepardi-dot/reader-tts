@@ -1,0 +1,48 @@
+# Node modules
+web/node_modules/
+web-rewrite/node_modules/
+web-next/node_modules/
+
+# Build outputs (built on Vercel, not uploaded)
+web/dist/
+web-rewrite/dist/
+web-next/dist/
+public/
+
+# Local data / virtual envs
+library/
+output/
+.venv/
+.venv-qwen3-tts/
+
+# Large local-only assets
+voices/neutts/*
+dictionary/offline/*
+dictionary/extracted/*
+dictionary/open-wordnet/*
+
+# Dev / test artifacts
+web/test-results/
+web-rewrite/test-results/
+web-next/test-results/
+test-results/
+*.log
+*.err.log
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.playwright-cli/
+.agents/
+.stitch/designs/*
+.claude/worktrees/
+
+# Misc
+tmp-*.txt
+tmp-*.json
+tmp-*.js
+tmp-*.spec.js
+tmp-*.png
+tmp-*.har
+*.png
+*.har

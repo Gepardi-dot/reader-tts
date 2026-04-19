@@ -10,9 +10,7 @@ ROOT = Path(__file__).resolve().parent
 
 
 def main() -> None:
-    npm_command = "npm.cmd" if os.name == "nt" else "npm"
     subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=ROOT, check=True)
-    subprocess.run([npm_command, "ci", "--legacy-peer-deps"], cwd=ROOT / "web-next", check=True)
 
 
 if __name__ == "__main__":
