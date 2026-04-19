@@ -151,7 +151,7 @@ def runtime_root() -> Path:
 
 
 def frontend_root() -> Path:
-    candidates = [ROOT / "web-rewrite" / "dist", ROOT / "web" / "dist", ROOT / "public"]
+    candidates = [ROOT / "web-next" / "dist", ROOT / "web-rewrite" / "dist", ROOT / "web" / "dist", ROOT / "public"]
     for candidate in candidates:
         if candidate.exists():
             return candidate

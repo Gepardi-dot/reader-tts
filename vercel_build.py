@@ -17,6 +17,8 @@ def main() -> None:
     subprocess.run([npm_command, "--prefix", "web-next", "run", "build"], cwd=ROOT, check=True)
     if not WEB_DIST.exists():
         raise FileNotFoundError(f"Expected built frontend at {WEB_DIST}")
+    # Copy built assets into public/ so the FastAPI backend can serve index.html
+    shutil.copytree(WEB_DIST, PUBLIC_DIR)
 
 
 if __name__ == "__main__":
