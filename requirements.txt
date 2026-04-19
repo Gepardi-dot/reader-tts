@@ -16,3 +16,5 @@ psycopg[binary]>=3.2,<4
 # (https://vercel.com/integrations/sentry) which injects the DSN without adding package size.
 # For local / self-hosted deployments, uncomment the line above and set SENTRY_DSN in .env.
 uvicorn[standard]
+
+PyJWT>=2.8,<3

@@ -1,5 +1,7 @@
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BookOpen, FileText, Layers, Mic2, Library, Upload } from 'lucide-react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { BookOpen, FileText, Layers, Mic2, Library, Upload, LogOut } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { supabase } from '@/lib/supabase'
 import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
@@ -16,7 +18,24 @@ const MOBILE_NAV = NAV_ITEMS.slice(0, 5)
 
 export function AppShell() {
   const location = useLocation()
+  const navigate = useNavigate()
   const isReader = location.pathname.startsWith('/book/')
+  const [userEmail, setUserEmail] = useState<string | null>(null)
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setUserEmail(data.session?.user.email ?? null)
+    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
+      setUserEmail(session?.user.email ?? null)
+    })
+    return () => subscription.unsubscribe()
+  }, [])
+
+  async function handleSignOut() {
+    await supabase.auth.signOut()
+    navigate('/login', { replace: true })
+  }
 
   // Reader: full-screen, no shell chrome
   if (isReader) return <Outlet />
@@ -51,6 +70,17 @@ export function AppShell() {
             </NavLink>
           ))}
         </nav>
+
+        {/* User + sign-out */}
+        <div className="p-2 border-t border-border">
+          <button
+            onClick={handleSignOut}
+            className="flex items-center gap-2 w-full px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+          >
+            <LogOut size={13} className="shrink-0" />
+            <span className="truncate flex-1 text-left">{userEmail ?? 'Sign out'}</span>
+          </button>
+        </div>
       </aside>
 
       {/* ── Main area ───────────────────────────────────── */}

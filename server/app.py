@@ -19,6 +19,7 @@ import wave
 import xml.etree.ElementTree as ET
 from base64 import b64decode
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from html import escape as escape_html
 from http import HTTPStatus
@@ -137,6 +138,9 @@ for env_name in (
     "BOOK_STORAGE_BUCKET",
     "BOOK_STORAGE_PREFIX",
     "BOOK_STORAGE_REGION",
+    "BOOK_STORAGE_ENDPOINT",
+    "BOOK_STORAGE_ADDRESSING_STYLE",
+    "SUPABASE_JWT_SECRET",
     "ADB_EXE",
     "SAMSUNG_DICTIONARY_DEVICE_ID",
 ):
@@ -213,6 +217,10 @@ POLLY_LANGUAGE_CODE = env_value("AWS_POLLY_LANGUAGE_CODE") or env_value("POLLY_L
 POLLY_PCM_SAMPLE_RATE = "16000"
 POLLY_CACHE_TTL_SECONDS = 300
 APP_SECRET_KEY = env_value("APP_SECRET_KEY")
+SUPABASE_JWT_SECRET = env_value("SUPABASE_JWT_SECRET")
+BOOK_STORAGE_ENDPOINT = env_value("BOOK_STORAGE_ENDPOINT")
+BOOK_STORAGE_ADDRESSING_STYLE = (env_value("BOOK_STORAGE_ADDRESSING_STYLE") or "virtual").lower()
+LOCAL_DEV_USER_ID = "00000000-0000-0000-0000-000000000001"
 LIVE_AUDIO_CACHE_VERSION = 3
 PROVIDER_TEST_CACHE_VERSION = 2
 GEMINI_MAX_RETRY_ATTEMPTS = 3
@@ -551,43 +559,90 @@ app.mount("/library", StaticFiles(directory=str(DATA_ROOT)), name="library")
 _PROTECTED_PREFIXES = ("/api/", "/library/")
 
 
+def _verify_supabase_jwt(token: str) -> str:
+    """Validate a Supabase-issued JWT and return the user UUID (sub claim)."""
+    try:
+        import jwt as pyjwt
+    except ImportError as exc:
+        raise RuntimeError("PyJWT is required for Supabase auth. Run: pip install -r requirements.txt") from exc
+    try:
+        payload = pyjwt.decode(
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Session expired. Please sign in again.")
+    except pyjwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token missing user identity.")
+    return str(user_id)
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Require a Bearer token on all API and library routes when APP_SECRET_KEY is set.
+    """Authenticate requests and set the per-request user identity.
 
-    If APP_SECRET_KEY is not configured, all requests pass through unchanged so that
-    local development works without any extra setup.
+    Priority:
+      1. SUPABASE_JWT_SECRET set → validate Supabase JWT, extract real user UUID.
+      2. APP_SECRET_KEY set → shared-secret fallback (local dev), fixed user ID.
+      3. Neither set → unauthenticated local dev, fixed user ID, no DB isolation.
     """
-    if APP_SECRET_KEY is None:
-        return await call_next(request)
-
     path = request.url.path
 
-    # Allow CORS preflight and the health check without a key.
     if request.method == "OPTIONS" or path == "/api/health":
         return await call_next(request)
 
-    # Only protect API and library routes; static frontend assets are public.
     if not any(path.startswith(prefix) for prefix in _PROTECTED_PREFIXES):
         return await call_next(request)
 
-    auth = request.headers.get("authorization", "")
-    if auth.startswith("Bearer ") and auth[7:].strip() == APP_SECRET_KEY:
-        return await call_next(request)
+    auth_header = request.headers.get("authorization", "")
+    bearer = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
 
-    return JSONResponse({"detail": "Access key required."}, status_code=401)
+    if SUPABASE_JWT_SECRET:
+        if not bearer:
+            return JSONResponse({"detail": "Authentication required."}, status_code=401)
+        try:
+            user_id = _verify_supabase_jwt(bearer)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    elif APP_SECRET_KEY:
+        if bearer != APP_SECRET_KEY:
+            return JSONResponse({"detail": "Access key required."}, status_code=401)
+        user_id = LOCAL_DEV_USER_ID
+    else:
+        user_id = LOCAL_DEV_USER_ID
+
+    tok = _current_user_id.set(user_id)
+    try:
+        return await call_next(request)
+    finally:
+        _current_user_id.reset(tok)
+
+
+def current_user_id() -> str:
+    """Return the authenticated user's UUID for the current request."""
+    uid = _current_user_id.get()
+    if uid:
+        return uid
+    raise HTTPException(status_code=403, detail="Authentication required.")
 
 
 job_lock = threading.Lock()
 job_state: dict[str, dict[str, Any]] = {}
 polly_catalog_cache: dict[str, Any] | None = None
 polly_catalog_cache_expires_at = 0.0
-_books_cache: list[dict[str, Any]] | None = None
-_books_cache_expires_at: float = 0.0
+# Books cache: keyed by user_id → (list[book], expires_at)
+_books_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}
 _books_cache_lock = threading.Lock()
 BOOKS_CACHE_TTL = 60.0
 _book_storage_client: Any = None
 _book_storage_client_lock = threading.Lock()
+# Per-request user identity set by auth_middleware
+_current_user_id: ContextVar[str | None] = ContextVar("user_id", default=None)
 qwen_local_lock = threading.Lock()
 neutts_local_lock = threading.Lock()
 qwen_local_daemon_lock = threading.Lock()
@@ -1648,10 +1703,50 @@ _SCHEMA_MIGRATIONS: list[list[str]] = [
         )
         """,
     ],
-    # Version 2 — add future columns here as a new list entry, for example:
-    # [
-    #     "alter table reader_progress add column if not exists highlight_count integer not null default 0",
-    # ],
+    # Version 2 — books table (primary metadata store, replaces S3 meta.json)
+    [
+        """
+        create table if not exists books (
+            id             text        primary key,
+            user_id        uuid        not null references auth.users(id) on delete cascade,
+            title          text        not null,
+            file_name      text        not null,
+            uploaded_at    timestamptz not null default now(),
+            page_count     integer     not null default 0,
+            text_chars     integer     not null default 0,
+            excerpt        text        not null default '',
+            latest_audio   jsonb,
+            audio_history  jsonb       not null default '[]',
+            source_storage jsonb,
+            created_at     timestamptz not null default now()
+        )
+        """,
+        "create index if not exists books_user_uploaded on books(user_id, uploaded_at desc)",
+        """
+        create table if not exists highlights (
+            id         text        not null,
+            book_id    text        not null references books(id) on delete cascade,
+            user_id    uuid        not null references auth.users(id) on delete cascade,
+            start_pos  integer     not null,
+            end_pos    integer     not null,
+            color      text        not null default 'amber',
+            kind       text        not null default 'highlight',
+            text       text        not null,
+            note       text,
+            created_at timestamptz not null default now(),
+            primary key (book_id, id)
+        )
+        """,
+        "create index if not exists highlights_book on highlights(book_id)",
+        "create index if not exists highlights_user on highlights(user_id)",
+    ],
+    # Version 3 — add user_id to progress tables
+    [
+        "alter table reader_progress add column if not exists user_id uuid references auth.users(id) on delete cascade",
+        "create index if not exists reader_progress_user_book on reader_progress(user_id, book_id)",
+        "alter table audio_progress add column if not exists user_id uuid references auth.users(id) on delete cascade",
+        "create index if not exists audio_progress_user_book on audio_progress(user_id, book_id)",
+    ],
 ]
 
 
@@ -1720,6 +1815,178 @@ def progress_store_cursor():
         raise RuntimeError(f"Failed to access Supabase progress store: {exc}") from exc
 
 
+# ── Books DB CRUD ─────────────────────────────────────────────────────────────
+
+def _book_row_to_meta(row: tuple[Any, ...]) -> dict[str, Any]:
+    """Map a books table row (SELECT *) to the meta dict used throughout the app."""
+    (
+        id_, user_id, title, file_name, uploaded_at, page_count,
+        text_chars, excerpt, latest_audio, audio_history, source_storage,
+        created_at, highlight_count,
+    ) = row
+    return {
+        "id": id_,
+        "user_id": str(user_id),
+        "title": title,
+        "fileName": file_name,
+        "uploadedAt": serialize_timestamp(uploaded_at),
+        "pageCount": page_count,
+        "textCharacters": text_chars,
+        "excerpt": excerpt or "",
+        "latestAudio": latest_audio,
+        "audioHistory": audio_history or [],
+        "sourceStorage": source_storage,
+        "_highlightCount": highlight_count or 0,
+    }
+
+
+def _list_books_sql(user_id: str) -> list[dict[str, Any]]:
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            SELECT b.id, b.user_id, b.title, b.file_name, b.uploaded_at,
+                   b.page_count, b.text_chars, b.excerpt,
+                   b.latest_audio, b.audio_history, b.source_storage, b.created_at,
+                   COUNT(h.id) AS highlight_count
+            FROM books b
+            LEFT JOIN highlights h ON h.book_id = b.id AND h.user_id = b.user_id
+            WHERE b.user_id = %s
+            GROUP BY b.id
+            ORDER BY b.uploaded_at DESC
+            """,
+            (user_id,),
+        )
+        return [_book_row_to_meta(row) for row in cur.fetchall()]
+
+
+def _get_book_sql(book_id: str, user_id: str) -> dict[str, Any] | None:
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            SELECT b.id, b.user_id, b.title, b.file_name, b.uploaded_at,
+                   b.page_count, b.text_chars, b.excerpt,
+                   b.latest_audio, b.audio_history, b.source_storage, b.created_at,
+                   COUNT(h.id) AS highlight_count
+            FROM books b
+            LEFT JOIN highlights h ON h.book_id = b.id AND h.user_id = b.user_id
+            WHERE b.id = %s AND b.user_id = %s
+            GROUP BY b.id
+            """,
+            (book_id, user_id),
+        )
+        row = cur.fetchone()
+        return _book_row_to_meta(row) if row else None
+
+
+def _upsert_book_sql(meta: dict[str, Any], user_id: str) -> None:
+    uploaded_at = parse_iso_timestamp(meta.get("uploadedAt")) or datetime.now(timezone.utc)
+    import json as _json
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO books (id, user_id, title, file_name, uploaded_at,
+                               page_count, text_chars, excerpt,
+                               latest_audio, audio_history, source_storage)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                title          = EXCLUDED.title,
+                file_name      = EXCLUDED.file_name,
+                page_count     = EXCLUDED.page_count,
+                text_chars     = EXCLUDED.text_chars,
+                excerpt        = EXCLUDED.excerpt,
+                latest_audio   = EXCLUDED.latest_audio,
+                audio_history  = EXCLUDED.audio_history,
+                source_storage = EXCLUDED.source_storage
+            """,
+            (
+                meta["id"],
+                user_id,
+                meta.get("title", ""),
+                meta.get("fileName", ""),
+                uploaded_at,
+                meta.get("pageCount", 0),
+                meta.get("textCharacters", 0),
+                meta.get("excerpt", ""),
+                _json.dumps(meta["latestAudio"]) if meta.get("latestAudio") else None,
+                _json.dumps(meta.get("audioHistory") or []),
+                _json.dumps(meta["sourceStorage"]) if meta.get("sourceStorage") else None,
+            ),
+        )
+
+
+def _delete_book_sql(book_id: str, user_id: str) -> None:
+    with progress_store_cursor() as cur:
+        cur.execute("DELETE FROM books WHERE id = %s AND user_id = %s", (book_id, user_id))
+
+
+# ── Highlights DB CRUD ────────────────────────────────────────────────────────
+
+def _list_highlights_sql(book_id: str, user_id: str) -> list[dict[str, Any]]:
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, start_pos, end_pos, color, kind, text, note, created_at
+            FROM highlights
+            WHERE book_id = %s AND user_id = %s
+            ORDER BY start_pos, created_at
+            """,
+            (book_id, user_id),
+        )
+        rows = cur.fetchall()
+    result = []
+    for (hid, start_pos, end_pos, color, kind, text, note, created_at) in rows:
+        result.append({
+            "id": hid,
+            "start": start_pos,
+            "end": end_pos,
+            "color": color,
+            "kind": kind,
+            "text": text,
+            "note": note,
+            "createdAt": serialize_timestamp(created_at),
+        })
+    return result
+
+
+def _insert_highlight_sql(book_id: str, user_id: str, h: dict[str, Any]) -> None:
+    created_at = parse_iso_timestamp(h.get("createdAt")) or datetime.now(timezone.utc)
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO highlights (id, book_id, user_id, start_pos, end_pos,
+                                    color, kind, text, note, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (book_id, id) DO UPDATE SET
+                start_pos = EXCLUDED.start_pos,
+                end_pos   = EXCLUDED.end_pos,
+                color     = EXCLUDED.color,
+                kind      = EXCLUDED.kind,
+                text      = EXCLUDED.text,
+                note      = EXCLUDED.note
+            """,
+            (
+                h["id"], book_id, user_id,
+                h["start"], h["end"],
+                h.get("color", "amber"),
+                h.get("kind", "highlight"),
+                h["text"],
+                h.get("note"),
+                created_at,
+            ),
+        )
+
+
+def _delete_highlight_sql(book_id: str, highlight_id: str, user_id: str) -> bool:
+    with progress_store_cursor() as cur:
+        cur.execute(
+            "DELETE FROM highlights WHERE book_id = %s AND id = %s AND user_id = %s",
+            (book_id, highlight_id, user_id),
+        )
+        return (cur.rowcount or 0) > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 def serialize_reading_progress_row(row: tuple[Any, ...] | None) -> dict[str, Any] | None:
     if not row:
         return None
@@ -1754,24 +2021,29 @@ def book_progress_payload(book_id: str) -> dict[str, Any]:
     if not progress_store_configured():
         return {"reading": None, "audio": None}
 
+    uid = current_user_id()
     try:
         with progress_store_cursor() as cur:
             cur.execute(
                 """
                 select page_number, total_pages, text_start, text_end, text_length, updated_at
                 from reader_progress
-                where book_id = %s
+                where book_id = %s and (user_id = %s or user_id is null)
+                order by (user_id = %s) desc
+                limit 1
                 """,
-                (book_id,),
+                (book_id, uid, uid),
             )
             reading = serialize_reading_progress_row(cur.fetchone())
             cur.execute(
                 """
                 select audio_url, playback_time, was_playing, updated_at
                 from audio_progress
-                where book_id = %s
+                where book_id = %s and (user_id = %s or user_id is null)
+                order by (user_id = %s) desc
+                limit 1
                 """,
-                (book_id,),
+                (book_id, uid, uid),
             )
             audio = serialize_audio_progress_row(cur.fetchone())
     except RuntimeError as exc:
@@ -1804,36 +2076,31 @@ def write_book_reading_progress(book_id: str, request: ReadingProgressRequest) -
     if not progress_store_configured():
         return payload
 
+    uid = current_user_id()
     try:
         with progress_store_cursor() as cur:
             cur.execute(
                 """
                 insert into reader_progress (
-                    book_id,
-                    page_number,
-                    total_pages,
-                    text_start,
-                    text_end,
-                    text_length,
-                    updated_at
+                    book_id, user_id,
+                    page_number, total_pages,
+                    text_start, text_end, text_length, updated_at
                 )
-                values (%s, %s, %s, %s, %s, %s, %s)
+                values (%s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (book_id) do update
                 set
+                    user_id     = excluded.user_id,
                     page_number = excluded.page_number,
                     total_pages = excluded.total_pages,
-                    text_start = excluded.text_start,
-                    text_end = excluded.text_end,
+                    text_start  = excluded.text_start,
+                    text_end    = excluded.text_end,
                     text_length = excluded.text_length,
-                    updated_at = excluded.updated_at
+                    updated_at  = excluded.updated_at
                 """,
                 (
-                    book_id,
-                    request.pageNumber,
-                    request.totalPages,
-                    request.textStart,
-                    request.textEnd,
-                    request.textLength,
+                    book_id, uid,
+                    request.pageNumber, request.totalPages,
+                    request.textStart, request.textEnd, request.textLength,
                     updated_at,
                 ),
             )
@@ -1857,30 +2124,27 @@ def write_book_audio_progress(book_id: str, request: AudioProgressRequest) -> di
     if not progress_store_configured():
         return payload
 
+    uid = current_user_id()
     try:
         with progress_store_cursor() as cur:
             cur.execute(
                 """
                 insert into audio_progress (
-                    book_id,
-                    audio_url,
-                    playback_time,
-                    was_playing,
-                    updated_at
+                    book_id, user_id,
+                    audio_url, playback_time, was_playing, updated_at
                 )
-                values (%s, %s, %s, %s, %s)
+                values (%s, %s, %s, %s, %s, %s)
                 on conflict (book_id) do update
                 set
-                    audio_url = excluded.audio_url,
+                    user_id       = excluded.user_id,
+                    audio_url     = excluded.audio_url,
                     playback_time = excluded.playback_time,
-                    was_playing = excluded.was_playing,
-                    updated_at = excluded.updated_at
+                    was_playing   = excluded.was_playing,
+                    updated_at    = excluded.updated_at
                 """,
                 (
-                    book_id,
-                    request.audioUrl,
-                    request.currentTime,
-                    request.wasPlaying,
+                    book_id, uid,
+                    request.audioUrl, request.currentTime, request.wasPlaying,
                     updated_at,
                 ),
             )
@@ -1896,9 +2160,13 @@ def delete_book_audio_progress(book_id: str) -> dict[str, bool]:
     if not progress_store_configured():
         return {"ok": True}
 
+    uid = current_user_id()
     try:
         with progress_store_cursor() as cur:
-            cur.execute("delete from audio_progress where book_id = %s", (book_id,))
+            cur.execute(
+                "delete from audio_progress where book_id = %s and (user_id = %s or user_id is null)",
+                (book_id, uid),
+            )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -1908,11 +2176,19 @@ def delete_book_audio_progress(book_id: str) -> dict[str, bool]:
 def delete_book_progress_records(book_id: str) -> None:
     if not progress_store_configured():
         return
-
+    # Only called from delete_book_files; when DB path is active, CASCADE on
+    # books.id → highlights handles highlights; progress is deleted here.
+    uid = _current_user_id.get() or LOCAL_DEV_USER_ID
     try:
         with progress_store_cursor() as cur:
-            cur.execute("delete from reader_progress where book_id = %s", (book_id,))
-            cur.execute("delete from audio_progress where book_id = %s", (book_id,))
+            cur.execute(
+                "delete from reader_progress where book_id = %s and (user_id = %s or user_id is null)",
+                (book_id, uid),
+            )
+            cur.execute(
+                "delete from audio_progress where book_id = %s and (user_id = %s or user_id is null)",
+                (book_id, uid),
+            )
     except RuntimeError:
         return
 
@@ -1957,7 +2233,8 @@ def storage_key(*parts: str) -> str:
 
 
 def book_storage_base_prefix(book_id: str) -> str:
-    return storage_key("books", book_id)
+    uid = _current_user_id.get() or LOCAL_DEV_USER_ID
+    return storage_key("books", uid, book_id)
 
 
 def book_source_storage_key(book_id: str) -> str:
@@ -1970,10 +2247,6 @@ def book_meta_storage_key(book_id: str) -> str:
 
 def book_text_storage_key(book_id: str) -> str:
     return f"{book_storage_base_prefix(book_id)}/cleaned.txt"
-
-
-def book_highlights_storage_key(book_id: str) -> str:
-    return f"{book_storage_base_prefix(book_id)}/highlights.json"
 
 
 def book_live_audio_storage_key(book_id: str, file_name: str) -> str:
@@ -2093,9 +2366,10 @@ def download_storage_object(key: str, destination: Path) -> None:
 
 
 def read_book_meta(book_id: str) -> dict[str, Any] | None:
+    if progress_store_configured():
+        return _get_book_sql(book_id, current_user_id())
     if book_storage_enabled():
         return read_storage_json(book_meta_storage_key(book_id))
-
     path = book_meta_path(book_id)
     if not path.exists():
         return None
@@ -2103,10 +2377,12 @@ def read_book_meta(book_id: str) -> dict[str, Any] | None:
 
 
 def write_book_meta(book_id: str, payload: dict[str, Any]) -> None:
+    if progress_store_configured():
+        _upsert_book_sql(payload, current_user_id())
+        return
     if book_storage_enabled():
         write_storage_json(book_meta_storage_key(book_id), payload)
         return
-
     write_json(book_meta_path(book_id), payload)
 
 
@@ -2135,9 +2411,10 @@ def source_url_for_book(meta: dict[str, Any]) -> str:
 
 
 def list_book_meta_payloads() -> list[dict[str, Any]]:
+    if progress_store_configured():
+        return _list_books_sql(current_user_id())
     if book_storage_enabled():
         return list_storage_meta_payloads()
-
     results: list[dict[str, Any]] = []
     for meta_file in BOOKS_ROOT.glob("*/meta.json"):
         results.append(read_json(meta_file))
@@ -2835,6 +3112,8 @@ def create_polly_client():
 
 
 def regional_book_storage_api_url() -> str:
+    if BOOK_STORAGE_ENDPOINT:
+        return BOOK_STORAGE_ENDPOINT
     if not BOOK_STORAGE_REGION or BOOK_STORAGE_REGION == "us-east-1":
         return "https://s3.amazonaws.com"
     return f"https://s3.{BOOK_STORAGE_REGION}.amazonaws.com"
@@ -2853,7 +3132,7 @@ def create_book_storage_client():
             connect_timeout=3,
             read_timeout=10,
             retries={"max_attempts": 1},
-            s3={"addressing_style": "virtual"},
+            s3={"addressing_style": BOOK_STORAGE_ADDRESSING_STYLE},
         )
         _book_storage_client = session.client(
             "s3",
@@ -3162,6 +3441,8 @@ def serialize_highlight(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_highlights(book_id: str) -> list[dict[str, Any]]:
+    if progress_store_configured():
+        return _list_highlights_sql(book_id, current_user_id())
     items = [serialize_highlight(item) for item in read_highlights(book_id)]
     items.sort(key=lambda item: (item["start"], item["createdAt"]))
     return items
@@ -3170,13 +3451,20 @@ def list_highlights(book_id: str) -> list[dict[str, Any]]:
 def serialize_book(meta: dict[str, Any]) -> dict[str, Any]:
     latest_audio = meta.get("latestAudio")
     if latest_audio:
+        path_val = latest_audio.get("path")
+        timing_val = latest_audio.get("timingPath")
         latest_audio = {
             **latest_audio,
-            "url": relative_url(Path(latest_audio["path"])),
-            "timingUrl": relative_url(Path(latest_audio["timingPath"])) if latest_audio.get("timingPath") else None,
+            "url": relative_url(Path(path_val)) if path_val else latest_audio.get("url", ""),
+            "timingUrl": relative_url(Path(timing_val)) if timing_val else None,
         }
 
-    highlight_count = len(read_highlights(meta["id"]))
+    # _highlightCount is pre-computed by SQL JOIN in _book_row_to_meta;
+    # fall back to counting from storage for legacy/local paths.
+    if "_highlightCount" in meta:
+        highlight_count = meta["_highlightCount"]
+    else:
+        highlight_count = len(read_highlights(meta["id"]))
 
     return {
         "id": meta["id"],
@@ -3192,23 +3480,25 @@ def serialize_book(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def invalidate_books_cache() -> None:
-    global _books_cache
+def invalidate_books_cache(user_id: str | None = None) -> None:
     with _books_cache_lock:
-        _books_cache = None
+        if user_id:
+            _books_cache.pop(user_id, None)
+        else:
+            _books_cache.clear()
 
 
 def list_books() -> list[dict[str, Any]]:
-    global _books_cache, _books_cache_expires_at
+    uid = current_user_id()
     now = time.monotonic()
     with _books_cache_lock:
-        if _books_cache is not None and now < _books_cache_expires_at:
-            return list(_books_cache)
+        cached = _books_cache.get(uid)
+        if cached is not None and now < cached[1]:
+            return list(cached[0])
     books = [serialize_book(meta) for meta in list_book_meta_payloads()]
     books.sort(key=lambda item: item["uploadedAt"], reverse=True)
     with _books_cache_lock:
-        _books_cache = books
-        _books_cache_expires_at = now + BOOKS_CACHE_TTL
+        _books_cache[uid] = (books, now + BOOKS_CACHE_TTL)
     return list(books)
 
 
@@ -4302,13 +4592,6 @@ def create_highlight(book_id: str, request: HighlightCreateRequest) -> dict[str,
     if selected_text != submitted_text:
         raise HTTPException(status_code=400, detail="Highlight text does not match the selected range.")
 
-    items = read_highlights(book_id)
-    items = [
-        item
-        for item in items
-        if not (request.start == item["start"] and request.end == item["end"])
-    ]
-
     note = normalize_highlight_text(request.note) if request.note else None
     kind = resolve_highlight_kind(request.kind, text=selected_text, note=note)
 
@@ -4322,13 +4605,33 @@ def create_highlight(book_id: str, request: HighlightCreateRequest) -> dict[str,
         "note": note,
         "createdAt": utc_now(),
     }
-    items.append(highlight)
-    write_highlights(book_id, items)
+
+    if progress_store_configured():
+        # Remove any existing highlight at the same range before inserting
+        uid = current_user_id()
+        existing = _list_highlights_sql(book_id, uid)
+        for ex in existing:
+            if ex["start"] == request.start and ex["end"] == request.end:
+                _delete_highlight_sql(book_id, ex["id"], uid)
+        _insert_highlight_sql(book_id, uid, highlight)
+        invalidate_books_cache(uid)
+    else:
+        items = read_highlights(book_id)
+        items = [i for i in items if not (request.start == i["start"] and request.end == i["end"])]
+        items.append(highlight)
+        write_highlights(book_id, items)
+
     return serialize_highlight(highlight)
 
 
 def delete_highlight(book_id: str, highlight_id: str) -> None:
     load_book_or_404(book_id)
+    if progress_store_configured():
+        found = _delete_highlight_sql(book_id, highlight_id, current_user_id())
+        if not found:
+            raise HTTPException(status_code=404, detail="Highlight not found.")
+        invalidate_books_cache(current_user_id())
+        return
     items = read_highlights(book_id)
     remaining = [item for item in items if item["id"] != highlight_id]
     if len(remaining) == len(items):
@@ -4338,6 +4641,8 @@ def delete_highlight(book_id: str, highlight_id: str) -> None:
 
 def delete_book_files(book_id: str) -> None:
     load_book_or_404(book_id)
+    if progress_store_configured():
+        _delete_book_sql(book_id, current_user_id())  # CASCADE removes highlights + progress
     if book_storage_enabled():
         delete_storage_prefix(book_storage_base_prefix(book_id))
     shutil.rmtree(book_dir(book_id), ignore_errors=True)
@@ -5670,7 +5975,7 @@ def remove_book_highlight(book_id: str, highlight_id: str) -> dict[str, bool]:
 @app.post("/api/books")
 def upload_book(file: UploadFile = File(...), title: str | None = Form(default=None)) -> dict[str, Any]:
     result = save_uploaded_book(file, title_override=title)
-    invalidate_books_cache()
+    invalidate_books_cache(current_user_id())
     return result
 
 
@@ -5682,7 +5987,7 @@ def init_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str, A
 @app.post("/api/books/direct-upload/complete")
 def finalize_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dict[str, Any]:
     result = complete_direct_book_upload(request)
-    invalidate_books_cache()
+    invalidate_books_cache(current_user_id())
     return result
 
 
@@ -5694,7 +5999,7 @@ def book_source(book_id: str):
 @app.delete("/api/books/{book_id}")
 def delete_book(book_id: str) -> dict[str, bool]:
     delete_book_files(book_id)
-    invalidate_books_cache()
+    invalidate_books_cache(current_user_id())
     return {"ok": True}
 
 

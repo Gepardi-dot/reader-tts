@@ -1,0 +1,124 @@
+import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { supabase } from '@/lib/supabase'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+
+type Mode = 'signin' | 'signup'
+
+export function LoginRoute() {
+  const navigate = useNavigate()
+  const [mode, setMode] = useState<Mode>('signin')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [signupDone, setSignupDone] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    setLoading(true)
+    try {
+      if (mode === 'signin') {
+        const { error } = await supabase.auth.signInWithPassword({ email, password })
+        if (error) throw error
+        navigate('/library', { replace: true })
+      } else {
+        const { error } = await supabase.auth.signUp({ email, password })
+        if (error) throw error
+        setSignupDone(true)
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Something went wrong.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (signupDone) {
+    return (
+      <div className="flex min-h-svh items-center justify-center bg-background px-4">
+        <div className="w-full max-w-sm text-center space-y-4">
+          <h1 className="text-xl font-semibold">Check your email</h1>
+          <p className="text-sm text-muted-foreground">
+            We sent a confirmation link to <strong>{email}</strong>. Click it to activate your account, then sign in.
+          </p>
+          <Button variant="outline" onClick={() => { setSignupDone(false); setMode('signin') }}>
+            Back to sign in
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex min-h-svh items-center justify-center bg-background px-4">
+      <div className="w-full max-w-sm space-y-6">
+        <div className="text-center">
+          <span className="text-3xl">📚</span>
+          <h1 className="mt-2 text-xl font-semibold text-foreground">Storybook Reader</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {mode === 'signin' ? 'Sign in to your library' : 'Create an account'}
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="email">Email</Label>
+            <Input
+              id="email"
+              type="email"
+              autoComplete="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="password">Password</Label>
+            <Input
+              id="password"
+              type="password"
+              autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+              required
+              minLength={8}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+            />
+          </div>
+
+          {error && (
+            <p className="text-sm text-destructive">{error}</p>
+          )}
+
+          <Button type="submit" className="w-full" disabled={loading}>
+            {loading ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}
+          </Button>
+        </form>
+
+        <p className="text-center text-sm text-muted-foreground">
+          {mode === 'signin' ? (
+            <>No account?{' '}
+              <button type="button" onClick={() => { setMode('signup'); setError(null) }}
+                className="underline hover:text-foreground">
+                Sign up
+              </button>
+            </>
+          ) : (
+            <>Already have an account?{' '}
+              <button type="button" onClick={() => { setMode('signin'); setError(null) }}
+                className="underline hover:text-foreground">
+                Sign in
+              </button>
+            </>
+          )}
+        </p>
+      </div>
+    </div>
+  )
+}

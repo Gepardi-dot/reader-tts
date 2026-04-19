@@ -1,17 +1,14 @@
-const AUTH_KEY = 'storybook-auth-key'
-
 export class AuthError extends Error {}
 
+// Cached JWT, kept fresh by the Supabase auth state listener in main.tsx
+let _cachedToken = ''
+
+export function setCachedToken(token: string) {
+  _cachedToken = token
+}
+
 function getToken() {
-  return localStorage.getItem(AUTH_KEY) ?? ''
-}
-
-export function setToken(token: string) {
-  localStorage.setItem(AUTH_KEY, token)
-}
-
-export function clearToken() {
-  localStorage.removeItem(AUTH_KEY)
+  return _cachedToken
 }
 
 export async function request<T = unknown>(
