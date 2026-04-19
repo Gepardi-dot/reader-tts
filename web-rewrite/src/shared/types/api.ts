@@ -15,7 +15,7 @@ export type ProviderModelOption = {
 }
 
 export type ProviderCatalog = {
-  id: 'piper' | 'google' | 'openai' | 'polly' | 'qwen' | 'qwen_local'
+  id: 'piper' | 'google' | 'openai' | 'polly' | 'qwen' | 'qwen_local' | 'kokoro'
   name: string
   available: boolean
   recommended: boolean

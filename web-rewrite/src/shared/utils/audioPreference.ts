@@ -1,6 +1,6 @@
 import type { AudioPreference, ProviderCatalog } from '@/shared/types/api'
 
-const providerPriority: ProviderCatalog['id'][] = ['polly', 'google', 'qwen', 'openai', 'piper', 'qwen_local']
+const providerPriority: ProviderCatalog['id'][] = ['kokoro', 'polly', 'google', 'qwen', 'openai', 'piper', 'qwen_local']
 
 export function resolveAudioSelection(providers: ProviderCatalog[], preference: AudioPreference) {
   const availableProviders = providers.filter((provider) => provider.available)

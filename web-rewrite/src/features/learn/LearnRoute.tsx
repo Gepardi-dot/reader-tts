@@ -146,7 +146,7 @@ export function LearnRoute() {
         id: `${title}:${Date.now()}`,
         url: preview.audioUrl,
         title,
-        subtitle: selection.provider.name,
+        subtitle: selection.provider.voices.find((v) => v.id === selection.voiceId)?.label ?? selection.provider.name,
       },
       true,
     )
