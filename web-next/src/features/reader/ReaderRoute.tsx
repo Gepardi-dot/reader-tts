@@ -83,7 +83,7 @@ function pacingFor(provider: string): { lengthScale: number; sentenceSilence: nu
   return { lengthScale: 1.0, sentenceSilence: 0.20 }
 }
 
-function useChunking(provider: string): boolean {
+function isChunking(provider: string): boolean {
   return provider in CHUNK_CHARS
 }
 
@@ -128,6 +128,7 @@ function caretRangeAt(x: number, y: number): Range | null {
   if (typeof document.caretRangeFromPoint === 'function') {
     return document.caretRangeFromPoint(x, y)
   }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pos = (document as any).caretPositionFromPoint?.(x, y)
   if (pos) {
     const r = document.createRange()
@@ -848,9 +849,9 @@ function AskAIPanel({ text, onClose, colors }: {
         }>(`/api/vocabulary/cards/${cardId}/context`, {})
 
         if (!cancelled) { setResult(ctx); setStatus('done') }
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (!cancelled) {
-          setErrMsg(e?.message ?? 'AI context is not configured on this server.')
+          setErrMsg((e instanceof Error ? e.message : null) ?? 'AI context is not configured on this server.')
           setStatus('error')
         }
       }
@@ -1272,7 +1273,7 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
     const url0 = await fetchChunk(0, initial[0], ctrl.signal)
     if (ctrl.signal.aborted || !url0) { setPhase('idle'); return }
 
-    if (useChunking(provider) && initial.length > 1) {
+    if (isChunking(provider) && initial.length > 1) {
       fetchChunk(1, initial[1], ctrl.signal)
     }
 
@@ -1583,7 +1584,8 @@ export function ReaderRoute() {
   const justShowedMenu    = useRef(false)
   const wordAudioRef      = useRef<HTMLAudioElement | null>(null)
   const panelSnapshotRef  = useRef<SecondaryPanel | null>(null)
-  if (panel !== null) panelSnapshotRef.current = panel
+  // Keep snapshot in sync without causing render issues
+  useEffect(() => { if (panel !== null) panelSnapshotRef.current = panel }, [panel])
 
   // Fetch
   const { data: payload, isLoading } = useQuery({
@@ -1644,7 +1646,7 @@ export function ReaderRoute() {
   const prefetchRef   = useRef<AbortController | null>(null)
   const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (!useChunking(ttsProvider) || !bookId || !payload?.text) return
+    if (!isChunking(ttsProvider) || !bookId || !payload?.text) return
 
     // Debounce: cancel previous timer on every scroll update
     if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
@@ -1684,11 +1686,30 @@ export function ReaderRoute() {
     return () => {
       if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ttsProvider, ttsVoice, bookId, payload?.text, scrollPct])
 
   function patchAppearance(patch: Partial<Appearance>) {
     setAppearance(a => ({ ...a, ...patch }))
+  }
+
+  function saveProgress(pct: number) {
+    if (!payload?.text) return
+    const textLength = payload.text.length
+    const textStart  = Math.round(pct * textLength)
+    try {
+      const map = JSON.parse(localStorage.getItem(PROGRESS_KEY) ?? '{}')
+      map[bookId!] = { pageNumber: Math.round(pct * 100), totalPages: 100 }
+      localStorage.setItem(PROGRESS_KEY, JSON.stringify(map))
+    } catch { /* swallow */ }
+    const token = localStorage.getItem('storybook-auth-key') ?? ''
+    fetch(`/api/books/${bookId}/progress/reading`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({
+        pageNumber: Math.max(1, Math.round(pct * 100)), totalPages: 100,
+        textStart, textEnd: textStart + 2200, textLength,
+      }),
+    }).catch(() => {})
   }
 
   // Scroll tracking
@@ -1710,26 +1731,6 @@ export function ReaderRoute() {
     return () => window.removeEventListener('scroll', onScroll)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text])
-
-  function saveProgress(pct: number) {
-    if (!payload?.text) return
-    const textLength = payload.text.length
-    const textStart  = Math.round(pct * textLength)
-    try {
-      const map = JSON.parse(localStorage.getItem(PROGRESS_KEY) ?? '{}')
-      map[bookId!] = { pageNumber: Math.round(pct * 100), totalPages: 100 }
-      localStorage.setItem(PROGRESS_KEY, JSON.stringify(map))
-    } catch {}
-    const token = localStorage.getItem('storybook-auth-key') ?? ''
-    fetch(`/api/books/${bookId}/progress/reading`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({
-        pageNumber: Math.max(1, Math.round(pct * 100)), totalPages: 100,
-        textStart, textEnd: textStart + 2200, textLength,
-      }),
-    }).catch(() => {})
-  }
 
   // Toast helper
   function showToast(msg: string) {
@@ -1767,7 +1768,7 @@ export function ReaderRoute() {
       // Clear native selection immediately → suppresses browser's selection toolbar
       sel!.removeAllRanges()
       setSelection(state)
-    } catch {}
+    } catch { /* swallow */ }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text, scrollPct])
 
@@ -1806,7 +1807,7 @@ export function ReaderRoute() {
         // Clear native selection → suppresses iOS/Android selection handles & toolbar
         sel!.removeAllRanges()
         setSelection(state)
-      } catch {}
+      } catch { /* swallow */ }
     }, 80)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text, scrollPct])

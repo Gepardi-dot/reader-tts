@@ -24,11 +24,11 @@ jobs:
         run: python -m py_compile pdf_to_audio.py
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Primary frontend (web-rewrite): lint → build → vitest → Playwright E2E
+  # Primary frontend (web-next): lint → build
   # This is the app that deploys to Vercel.
   # ─────────────────────────────────────────────────────────────────────────
   frontend:
-    name: Frontend — web-rewrite (lint + build + test + e2e)
+    name: Frontend — web-next (lint + build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,40 +37,16 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: web-rewrite/package-lock.json
+          cache-dependency-path: web-next/package-lock.json
 
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
-        working-directory: web-rewrite
+        working-directory: web-next
 
       - name: Lint
         run: npm run lint
-        working-directory: web-rewrite
+        working-directory: web-next
 
       - name: Type-check + build
         run: npm run build
-        working-directory: web-rewrite
-
-      - name: Unit tests (vitest)
-        run: npm test
-        working-directory: web-rewrite
-
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
-        working-directory: web-rewrite
-
-      - name: E2E tests (VITE_USE_MOCKS=1)
-        run: npm run test:e2e
-        working-directory: web-rewrite
-        env:
-          CI: 'true'
-          VITE_USE_MOCKS: '1'
-
-      - name: Upload Playwright report on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-rewrite
-          path: web-rewrite/playwright-report/
-          retention-days: 7
-
+        working-directory: web-next

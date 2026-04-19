@@ -16,6 +16,7 @@ interface VoiceOption {
   gender?: string | null
   style?: string | null
   tags?: string[]
+  ready?: boolean
 }
 
 interface ProviderInfo {
@@ -65,8 +66,8 @@ function NeuTTSPanel({ provider }: { provider: ProviderInfo }) {
   const serverOnline = health?.status === 'ok'
   const loadedModel  = health?.model as string | null | undefined
 
-  const readyVoices  = provider.voices.filter(v => (v as any).ready !== false)
-  const pendingVoices = provider.voices.filter(v => (v as any).ready === false)
+  const readyVoices  = provider.voices.filter(v => v.ready !== false)
+  const pendingVoices = provider.voices.filter(v => v.ready === false)
 
   return (
     <div className="rounded-xl border border-border bg-card overflow-hidden">
@@ -137,7 +138,7 @@ function NeuTTSPanel({ provider }: { provider: ProviderInfo }) {
               </p>
               <div className="space-y-1.5">
                 {provider.voices.map(v => {
-                  const ready = (v as any).ready !== false
+                  const ready = v.ready !== false
                   return (
                     <div key={v.id} className="flex items-center justify-between gap-2 py-0.5">
                       <div className="flex items-center gap-2 min-w-0">

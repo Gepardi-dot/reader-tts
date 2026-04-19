@@ -7,14 +7,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-WEB_DIST = ROOT / "web-rewrite" / "dist"
+WEB_DIST = ROOT / "web-next" / "dist"
 PUBLIC_DIR = ROOT / "public"
 
 
 def main() -> None:
     shutil.rmtree(PUBLIC_DIR, ignore_errors=True)
     npm_command = "npm.cmd" if os.name == "nt" else "npm"
-    subprocess.run([npm_command, "--prefix", "web-rewrite", "run", "build"], cwd=ROOT, check=True)
+    subprocess.run([npm_command, "--prefix", "web-next", "run", "build"], cwd=ROOT, check=True)
     if not WEB_DIST.exists():
         raise FileNotFoundError(f"Expected built frontend at {WEB_DIST}")
 
