@@ -53,3 +53,6 @@ public/
 .claude/worktrees/
 .playwright-cli/
 .agents/
+skills-lock.json
+test-results/
+web-rewrite/test-results/
