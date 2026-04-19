@@ -582,6 +582,12 @@ job_lock = threading.Lock()
 job_state: dict[str, dict[str, Any]] = {}
 polly_catalog_cache: dict[str, Any] | None = None
 polly_catalog_cache_expires_at = 0.0
+_books_cache: list[dict[str, Any]] | None = None
+_books_cache_expires_at: float = 0.0
+_books_cache_lock = threading.Lock()
+BOOKS_CACHE_TTL = 60.0
+_book_storage_client: Any = None
+_book_storage_client_lock = threading.Lock()
 qwen_local_lock = threading.Lock()
 neutts_local_lock = threading.Lock()
 qwen_local_daemon_lock = threading.Lock()
@@ -2027,23 +2033,32 @@ def list_storage_meta_payloads() -> list[dict[str, Any]]:
     if not BOOK_STORAGE_BUCKET:
         return []
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     client = create_book_storage_client()
     prefix = f"{storage_key('books')}/"
     paginator = client.get_paginator("list_objects_v2")
-    results: list[dict[str, Any]] = []
+    meta_keys: list[str] = []
 
     try:
         for page in paginator.paginate(Bucket=BOOK_STORAGE_BUCKET, Prefix=prefix):
             for item in page.get("Contents", []):
                 key = str(item.get("Key", ""))
-                if not key.endswith("/meta.json"):
-                    continue
-                payload = read_storage_json(key)
-                if payload is not None:
-                    results.append(payload)
+                if key.endswith("/meta.json"):
+                    meta_keys.append(key)
     except Exception as exc:
         raise RuntimeError(f"Failed to list stored books: {exc}") from exc
 
+    if not meta_keys:
+        return []
+
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(16, len(meta_keys))) as executor:
+        futures = {executor.submit(read_storage_json, key): key for key in meta_keys}
+        for future in as_completed(futures):
+            payload = future.result()
+            if payload is not None:
+                results.append(payload)
     return results
 
 
@@ -2826,19 +2841,26 @@ def regional_book_storage_api_url() -> str:
 
 
 def create_book_storage_client():
-    session = create_aws_session(region_name=BOOK_STORAGE_REGION)
-    _, Config, _, _, _, _, _ = load_boto3()
-    client_config = Config(
-        connect_timeout=3,
-        read_timeout=10,
-        retries={"max_attempts": 1},
-        s3={"addressing_style": "virtual"},
-    )
-    return session.client(
-        "s3",
-        config=client_config,
-        endpoint_url=regional_book_storage_api_url(),
-    )
+    global _book_storage_client
+    if _book_storage_client is not None:
+        return _book_storage_client
+    with _book_storage_client_lock:
+        if _book_storage_client is not None:
+            return _book_storage_client
+        session = create_aws_session(region_name=BOOK_STORAGE_REGION)
+        _, Config, _, _, _, _, _ = load_boto3()
+        client_config = Config(
+            connect_timeout=3,
+            read_timeout=10,
+            retries={"max_attempts": 1},
+            s3={"addressing_style": "virtual"},
+        )
+        _book_storage_client = session.client(
+            "s3",
+            config=client_config,
+            endpoint_url=regional_book_storage_api_url(),
+        )
+    return _book_storage_client
 
 
 def generate_book_storage_download_url(key: str, *, expires_in: int = 3600) -> str:
@@ -3170,10 +3192,24 @@ def serialize_book(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def invalidate_books_cache() -> None:
+    global _books_cache
+    with _books_cache_lock:
+        _books_cache = None
+
+
 def list_books() -> list[dict[str, Any]]:
+    global _books_cache, _books_cache_expires_at
+    now = time.monotonic()
+    with _books_cache_lock:
+        if _books_cache is not None and now < _books_cache_expires_at:
+            return list(_books_cache)
     books = [serialize_book(meta) for meta in list_book_meta_payloads()]
     books.sort(key=lambda item: item["uploadedAt"], reverse=True)
-    return books
+    with _books_cache_lock:
+        _books_cache = books
+        _books_cache_expires_at = now + BOOKS_CACHE_TTL
+    return list(books)
 
 
 def parse_iso_timestamp(value: str | None) -> datetime | None:
@@ -5561,8 +5597,11 @@ def create_learning_event(request: LearningEventCreateRequest) -> dict[str, Any]
 
 
 @app.get("/api/books")
-def books() -> dict[str, Any]:
-    return {"items": list_books()}
+def books():
+    return JSONResponse(
+        content={"items": list_books()},
+        headers={"Cache-Control": "private, max-age=30, stale-while-revalidate=60"},
+    )
 
 
 @app.get("/api/books/{book_id}")
@@ -5630,7 +5669,9 @@ def remove_book_highlight(book_id: str, highlight_id: str) -> dict[str, bool]:
 
 @app.post("/api/books")
 def upload_book(file: UploadFile = File(...), title: str | None = Form(default=None)) -> dict[str, Any]:
-    return save_uploaded_book(file, title_override=title)
+    result = save_uploaded_book(file, title_override=title)
+    invalidate_books_cache()
+    return result
 
 
 @app.post("/api/books/direct-upload")
@@ -5640,7 +5681,9 @@ def init_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str, A
 
 @app.post("/api/books/direct-upload/complete")
 def finalize_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dict[str, Any]:
-    return complete_direct_book_upload(request)
+    result = complete_direct_book_upload(request)
+    invalidate_books_cache()
+    return result
 
 
 @app.get("/api/books/{book_id}/source", response_model=None)
@@ -5651,6 +5694,7 @@ def book_source(book_id: str):
 @app.delete("/api/books/{book_id}")
 def delete_book(book_id: str) -> dict[str, bool]:
     delete_book_files(book_id)
+    invalidate_books_cache()
     return {"ok": True}
 
 
