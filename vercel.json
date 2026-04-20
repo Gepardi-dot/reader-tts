@@ -3,11 +3,6 @@
   "installCommand": "python vercel_install.py",
   "buildCommand": "python vercel_build.py",
   "outputDirectory": "web-next/dist",
-  "functions": {
-    "app.py": {
-      "excludeFiles": "{web,web-rewrite,web-next}/node_modules/**"
-    }
-  },
   "headers": [
     {
       "source": "/(.*)",
