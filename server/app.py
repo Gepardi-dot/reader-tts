@@ -166,7 +166,6 @@ RUNTIME_ROOT = runtime_root()
 DATA_ROOT = RUNTIME_ROOT / "library"
 BOOKS_ROOT = DATA_ROOT / "books"
 JOBS_ROOT = DATA_ROOT / "jobs"
-DATA_ROOT.mkdir(parents=True, exist_ok=True)
 WEB_DIST = frontend_root()
 DEFAULT_AUDIO_DIR = RUNTIME_ROOT / "output"
 PREVIEW_ROOT = DATA_ROOT / "previews"
@@ -529,8 +528,10 @@ PROVIDER_TEST_SNIPPET = (
 PROVIDER_TEST_LOCAL_SNIPPET = "Quick local voice check. Keep it warm, clear, and steady."
 SUPABASE_DB_URL = env_value("SUPABASE_POOLER_URL") or env_value("SUPABASE_DB_URL") or env_value("DATABASE_URL")
 
-for directory in (DATA_ROOT, BOOKS_ROOT, JOBS_ROOT, DEFAULT_AUDIO_DIR, PREVIEW_ROOT, NEUTTS_VOICES_ROOT):
+for directory in (DATA_ROOT, BOOKS_ROOT, JOBS_ROOT, DEFAULT_AUDIO_DIR, PREVIEW_ROOT):
     directory.mkdir(parents=True, exist_ok=True)
+if not os.environ.get("VERCEL"):
+    NEUTTS_VOICES_ROOT.mkdir(parents=True, exist_ok=True)
 
 _SENTRY_DSN = env_value("SENTRY_DSN")
 if _SENTRY_DSN:
