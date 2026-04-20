@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowLeft, Settings2, Volume2, X,
@@ -245,6 +245,7 @@ function SelectionMenu({
 }: SelectionMenuProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [busyColor,  setBusyColor]  = useState<string | null>(null)
+  const queryClient = useQueryClient()
 
   const menuW = sel.mode === 'word' ? 300 : 210
   const cx = Math.min(
@@ -287,6 +288,8 @@ function SelectionMenu({
           await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
             noteType: 'basic', front: sel.text, back: null, topic: 'Reading',
           })
+          queryClient.invalidateQueries({ queryKey: ['decks'] })
+          queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
           onToast('Saved to Vocabulary ✓')
         } catch { onToast('Could not save') }
         setBusyAction(null)
@@ -333,6 +336,9 @@ function SelectionMenu({
         start: sel.startOffset, end: sel.endOffset,
         color: colorId, kind: 'highlight', text: sel.text, note: null,
       })
+      queryClient.invalidateQueries({ queryKey: ['highlights', bookId] })
+      queryClient.invalidateQueries({ queryKey: ['reader', bookId] })
+      queryClient.invalidateQueries({ queryKey: ['books'] })
       onToast('Highlighted ✓')
     } catch { onToast('Could not highlight') }
     setBusyColor(null)
@@ -733,6 +739,7 @@ function NotesPanel({ text, start, end, bookId, onClose, colors }: {
   const [color, setColor] = useState<'amber' | 'rose' | 'sky'>('amber')
   const [saving, setSaving] = useState(false)
   const [saved,  setSaved]  = useState(false)
+  const queryClient = useQueryClient()
 
   async function save() {
     setSaving(true)
@@ -742,6 +749,9 @@ function NotesPanel({ text, start, end, bookId, onClose, colors }: {
         text: text.slice(0, 800),
         note: note.trim() || null,
       })
+      queryClient.invalidateQueries({ queryKey: ['highlights', bookId] })
+      queryClient.invalidateQueries({ queryKey: ['reader', bookId] })
+      queryClient.invalidateQueries({ queryKey: ['books'] })
       setSaved(true)
       setTimeout(onClose, 700)
     } catch { setSaving(false) }
@@ -1578,10 +1588,11 @@ export function ReaderRoute() {
   const [audioTotal,    setAudioTotal]    = useState(0)
   const audioHandleRef  = useRef<AudioHandle | null>(null)
 
-  const lastScrollY       = useRef(0)
-  const scrollTimer       = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const saveTimer         = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const justShowedMenu    = useRef(false)
+  const lastScrollY           = useRef(0)
+  const scrollTimer           = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const saveTimer             = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const justShowedMenu        = useRef(false)
+  const scrolledToOffsetRef   = useRef(false)
   const wordAudioRef      = useRef<HTMLAudioElement | null>(null)
   const panelSnapshotRef  = useRef<SecondaryPanel | null>(null)
   // Keep snapshot in sync without causing render issues
@@ -1610,9 +1621,28 @@ export function ReaderRoute() {
     ?.voices.find(v => v.id === ttsVoice)
     ?.label ?? ttsVoice ?? ttsProvider
 
-  // Restore scroll position
+  // Restore scroll position — also handles ?offset= from notes navigation
   useEffect(() => {
-    if (!progressData?.reading || !payload?.text) return
+    if (!payload?.text) return
+
+    if (!scrolledToOffsetRef.current) {
+      const params = new URLSearchParams(window.location.search)
+      const offsetStr = params.get('offset')
+      if (offsetStr !== null) {
+        const offset = parseInt(offsetStr, 10)
+        if (!isNaN(offset) && offset >= 0) {
+          scrolledToOffsetRef.current = true
+          const pct = offset / payload.text.length
+          const maxScroll = document.documentElement.scrollHeight - window.innerHeight
+          window.scrollTo({ top: pct * maxScroll, behavior: 'instant' })
+          window.history.replaceState({}, '', window.location.pathname)
+          return
+        }
+      }
+    }
+
+    if (scrolledToOffsetRef.current) return
+    if (!progressData?.reading) return
     const { textStart, textLength } = progressData.reading
     if (!textLength) return
     const pct = textStart / textLength

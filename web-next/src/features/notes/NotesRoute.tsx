@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { useQuery, useQueries } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { FileText, BookOpen, ArrowRight } from 'lucide-react'
+import { FileText, BookOpen, ArrowRight, ExternalLink } from 'lucide-react'
 import { api } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
 
@@ -173,7 +173,11 @@ export function NotesRoute() {
               {/* Entries */}
               <div className="divide-y divide-border">
                 {entries.map((entry) => (
-                  <div key={entry.id} className="flex gap-0 min-h-[56px]">
+                  <Link
+                    key={entry.id}
+                    to={`/book/${book.id}?offset=${entry.start}`}
+                    className="flex gap-0 min-h-[56px] group hover:brightness-[0.97] transition-[filter] block"
+                  >
                     {/* Color strip */}
                     <div
                       className={cn('w-1 shrink-0 self-stretch rounded-l-none', COLOR_BAR[entry.color])}
@@ -192,12 +196,17 @@ export function NotesRoute() {
                           {entry.note}
                         </p>
                       )}
-                      {/* Date */}
-                      <p className="text-[11px] text-muted-foreground mt-2">
-                        {timeAgo(entry.createdAt)}
-                      </p>
+                      {/* Date + jump hint */}
+                      <div className="flex items-center justify-between mt-2">
+                        <p className="text-[11px] text-muted-foreground">
+                          {timeAgo(entry.createdAt)}
+                        </p>
+                        <span className="flex items-center gap-1 text-[11px] text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                          View in book <ExternalLink size={10} />
+                        </span>
+                      </div>
                     </div>
-                  </div>
+                  </Link>
                 ))}
               </div>
             </div>
