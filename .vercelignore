@@ -10,8 +10,8 @@ web-next/dist/
 public/
 
 # Local data / virtual envs
-library/
-output/
+/library/
+/output/
 .venv/
 .venv-qwen3-tts/
 
