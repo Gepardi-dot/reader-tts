@@ -2303,6 +2303,10 @@ def book_live_audio_storage_key(book_id: str, file_name: str) -> str:
     return f"{book_storage_base_prefix(book_id)}/live-audio/{file_name}"
 
 
+def book_highlights_storage_key(book_id: str) -> str:
+    return f"{book_storage_base_prefix(book_id)}/highlights.json"
+
+
 def preview_audio_storage_key(file_name: str) -> str:
     return storage_key("previews", file_name)
 
@@ -4450,6 +4454,7 @@ def import_book_source(
         "excerpt": cleaned_text[:260],
         "latestAudio": None,
         "audioHistory": [],
+        "_highlightCount": 0,
     }
     if source_storage:
         meta["sourceStorage"] = source_storage
