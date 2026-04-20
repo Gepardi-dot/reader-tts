@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { Upload, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { AuthError, uploadBook } from '@/shared/api/client'
+import { supabase } from '@/lib/supabase'
 
 export function UploadRoute() {
   const [file, setFile] = useState<File | null>(null)
@@ -17,19 +19,19 @@ export function UploadRoute() {
     setUploading(true)
     setError('')
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const token = localStorage.getItem('storybook-auth-key') ?? ''
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        body: fd,
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      })
-      if (!res.ok) throw new Error(await res.text())
-      const { book_id } = await res.json()
-      navigate(`/book/${book_id}`)
+      const book = await uploadBook(file)
+      navigate(`/book/${book.id}`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Upload failed')
+      if (e instanceof AuthError) {
+        await supabase.auth.signOut()
+        navigate('/login', { replace: true })
+        return
+      }
+      if (e instanceof TypeError && /fetch/i.test(e.message)) {
+        setError('API server is unreachable. Start the backend on http://127.0.0.1:8000 and try again.')
+      } else {
+        setError(e instanceof Error ? e.message : 'Upload failed')
+      }
     } finally {
       setUploading(false)
     }

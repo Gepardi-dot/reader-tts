@@ -166,6 +166,7 @@ RUNTIME_ROOT = runtime_root()
 DATA_ROOT = RUNTIME_ROOT / "library"
 BOOKS_ROOT = DATA_ROOT / "books"
 JOBS_ROOT = DATA_ROOT / "jobs"
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
 WEB_DIST = frontend_root()
 DEFAULT_AUDIO_DIR = RUNTIME_ROOT / "output"
 PREVIEW_ROOT = DATA_ROOT / "previews"
@@ -217,7 +218,9 @@ POLLY_LANGUAGE_CODE = env_value("AWS_POLLY_LANGUAGE_CODE") or env_value("POLLY_L
 POLLY_PCM_SAMPLE_RATE = "16000"
 POLLY_CACHE_TTL_SECONDS = 300
 APP_SECRET_KEY = env_value("APP_SECRET_KEY")
+SUPABASE_URL = (env_value("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_JWT_SECRET = env_value("SUPABASE_JWT_SECRET")
+SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json" if SUPABASE_URL else ""
 BOOK_STORAGE_ENDPOINT = env_value("BOOK_STORAGE_ENDPOINT")
 BOOK_STORAGE_ADDRESSING_STYLE = (env_value("BOOK_STORAGE_ADDRESSING_STYLE") or "virtual").lower()
 LOCAL_DEV_USER_ID = "00000000-0000-0000-0000-000000000001"
@@ -565,13 +568,50 @@ def _verify_supabase_jwt(token: str) -> str:
         import jwt as pyjwt
     except ImportError as exc:
         raise RuntimeError("PyJWT is required for Supabase auth. Run: pip install -r requirements.txt") from exc
+
     try:
-        payload = pyjwt.decode(
-            token,
-            SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
+        header = pyjwt.get_unverified_header(token)
+    except pyjwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token header: {exc}")
+
+    algorithm = str(header.get("alg") or "").upper()
+    decode_kwargs: dict[str, Any] = {
+        "algorithms": [algorithm] if algorithm else None,
+        "audience": "authenticated",
+    }
+
+    if algorithm.startswith("HS"):
+        if not SUPABASE_JWT_SECRET:
+            raise HTTPException(
+                status_code=401,
+                detail="Supabase JWT secret is not configured for symmetric token verification.",
+            )
+        key = SUPABASE_JWT_SECRET
+    else:
+        if not SUPABASE_JWKS_URL:
+            raise HTTPException(
+                status_code=401,
+                detail="SUPABASE_URL is required to verify Supabase JWTs signed with JWKS.",
+            )
+        decode_kwargs["issuer"] = f"{SUPABASE_URL}/auth/v1"
+        global _supabase_jwk_client
+        with _supabase_jwk_client_lock:
+            if _supabase_jwk_client is None:
+                _supabase_jwk_client = pyjwt.PyJWKClient(
+                    SUPABASE_JWKS_URL,
+                    cache_keys=True,
+                    cache_jwk_set=True,
+                    lifespan=300,
+                    timeout=10,
+                )
+        try:
+            key = _supabase_jwk_client.get_signing_key_from_jwt(token).key
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail=f"Unable to resolve signing key: {exc}")
+
+    decode_kwargs = {name: value for name, value in decode_kwargs.items() if value is not None}
+    try:
+        payload = pyjwt.decode(token, key, **decode_kwargs)
     except pyjwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Session expired. Please sign in again.")
     except pyjwt.InvalidTokenError as exc:
@@ -587,7 +627,7 @@ async def auth_middleware(request: Request, call_next):
     """Authenticate requests and set the per-request user identity.
 
     Priority:
-      1. SUPABASE_JWT_SECRET set → validate Supabase JWT, extract real user UUID.
+      1. SUPABASE_URL / SUPABASE_JWT_SECRET set → validate Supabase JWT, extract real user UUID.
       2. APP_SECRET_KEY set → shared-secret fallback (local dev), fixed user ID.
       3. Neither set → unauthenticated local dev, fixed user ID, no DB isolation.
     """
@@ -602,7 +642,7 @@ async def auth_middleware(request: Request, call_next):
     auth_header = request.headers.get("authorization", "")
     bearer = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
 
-    if SUPABASE_JWT_SECRET:
+    if SUPABASE_URL or SUPABASE_JWT_SECRET:
         if not bearer:
             return JSONResponse({"detail": "Authentication required."}, status_code=401)
         try:
@@ -641,6 +681,8 @@ _books_cache_lock = threading.Lock()
 BOOKS_CACHE_TTL = 60.0
 _book_storage_client: Any = None
 _book_storage_client_lock = threading.Lock()
+_supabase_jwk_client: Any = None
+_supabase_jwk_client_lock = threading.Lock()
 # Per-request user identity set by auth_middleware
 _current_user_id: ContextVar[str | None] = ContextVar("user_id", default=None)
 qwen_local_lock = threading.Lock()
@@ -1747,6 +1789,10 @@ _SCHEMA_MIGRATIONS: list[list[str]] = [
         "alter table audio_progress add column if not exists user_id uuid references auth.users(id) on delete cascade",
         "create index if not exists audio_progress_user_book on audio_progress(user_id, book_id)",
     ],
+    # Version 4 — preserve local source paths when SQL is the metadata store
+    [
+        "alter table books add column if not exists source_path text",
+    ],
 ]
 
 
@@ -1821,7 +1867,7 @@ def _book_row_to_meta(row: tuple[Any, ...]) -> dict[str, Any]:
     """Map a books table row (SELECT *) to the meta dict used throughout the app."""
     (
         id_, user_id, title, file_name, uploaded_at, page_count,
-        text_chars, excerpt, latest_audio, audio_history, source_storage,
+        text_chars, excerpt, latest_audio, audio_history, source_storage, source_path,
         created_at, highlight_count,
     ) = row
     return {
@@ -1836,6 +1882,7 @@ def _book_row_to_meta(row: tuple[Any, ...]) -> dict[str, Any]:
         "latestAudio": latest_audio,
         "audioHistory": audio_history or [],
         "sourceStorage": source_storage,
+        "sourcePath": source_path,
         "_highlightCount": highlight_count or 0,
     }
 
@@ -1846,7 +1893,7 @@ def _list_books_sql(user_id: str) -> list[dict[str, Any]]:
             """
             SELECT b.id, b.user_id, b.title, b.file_name, b.uploaded_at,
                    b.page_count, b.text_chars, b.excerpt,
-                   b.latest_audio, b.audio_history, b.source_storage, b.created_at,
+                   b.latest_audio, b.audio_history, b.source_storage, b.source_path, b.created_at,
                    COUNT(h.id) AS highlight_count
             FROM books b
             LEFT JOIN highlights h ON h.book_id = b.id AND h.user_id = b.user_id
@@ -1865,7 +1912,7 @@ def _get_book_sql(book_id: str, user_id: str) -> dict[str, Any] | None:
             """
             SELECT b.id, b.user_id, b.title, b.file_name, b.uploaded_at,
                    b.page_count, b.text_chars, b.excerpt,
-                   b.latest_audio, b.audio_history, b.source_storage, b.created_at,
+                   b.latest_audio, b.audio_history, b.source_storage, b.source_path, b.created_at,
                    COUNT(h.id) AS highlight_count
             FROM books b
             LEFT JOIN highlights h ON h.book_id = b.id AND h.user_id = b.user_id
@@ -1886,8 +1933,8 @@ def _upsert_book_sql(meta: dict[str, Any], user_id: str) -> None:
             """
             INSERT INTO books (id, user_id, title, file_name, uploaded_at,
                                page_count, text_chars, excerpt,
-                               latest_audio, audio_history, source_storage)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                               latest_audio, audio_history, source_storage, source_path)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 title          = EXCLUDED.title,
                 file_name      = EXCLUDED.file_name,
@@ -1896,7 +1943,8 @@ def _upsert_book_sql(meta: dict[str, Any], user_id: str) -> None:
                 excerpt        = EXCLUDED.excerpt,
                 latest_audio   = EXCLUDED.latest_audio,
                 audio_history  = EXCLUDED.audio_history,
-                source_storage = EXCLUDED.source_storage
+                source_storage = EXCLUDED.source_storage,
+                source_path    = EXCLUDED.source_path
             """,
             (
                 meta["id"],
@@ -1910,6 +1958,7 @@ def _upsert_book_sql(meta: dict[str, Any], user_id: str) -> None:
                 _json.dumps(meta["latestAudio"]) if meta.get("latestAudio") else None,
                 _json.dumps(meta.get("audioHistory") or []),
                 _json.dumps(meta["sourceStorage"]) if meta.get("sourceStorage") else None,
+                meta.get("sourcePath"),
             ),
         )
 
@@ -2407,7 +2456,16 @@ def write_book_text(book_id: str, text: str) -> None:
 def source_url_for_book(meta: dict[str, Any]) -> str:
     if meta.get("sourceStorage"):
         return f"/api/books/{meta['id']}/source"
-    return relative_url(Path(meta["sourcePath"]))
+    return relative_url(resolve_local_source_path(meta))
+
+
+def resolve_local_source_path(meta: dict[str, Any]) -> Path:
+    source_path = meta.get("sourcePath")
+    if isinstance(source_path, str) and source_path:
+        return Path(source_path)
+
+    suffix = Path(str(meta.get("fileName") or "book.pdf")).suffix.lower() or ".pdf"
+    return book_dir(str(meta["id"])) / f"source{suffix}"
 
 
 def list_book_meta_payloads() -> list[dict[str, Any]]:
@@ -4553,7 +4611,7 @@ def source_file_response(book_id: str):
             headers=headers,
         )
 
-    source_path = Path(meta["sourcePath"])
+    source_path = resolve_local_source_path(meta)
     if not source_path.exists():
         raise HTTPException(status_code=404, detail="Source PDF not found.")
     return FileResponse(source_path, media_type="application/pdf", filename=meta.get("fileName") or source_path.name)
