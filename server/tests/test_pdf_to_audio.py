@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pdf_to_audio
+from pypdf import PdfWriter
 
 
 class PdfToAudioGemmaCleanupTestCase(unittest.TestCase):
@@ -97,6 +98,23 @@ class PdfToAudioGemmaCleanupTestCase(unittest.TestCase):
         self.assertEqual(extracted.format, "docx")
         self.assertEqual(extracted.text, "Chapter One\n\nThe first paragraph.")
         self.assertEqual(extracted.page_count, 1)
+
+    def test_extract_pdf_text_raises_clear_error_for_invalid_pdf(self) -> None:
+        path = self.tempdir / "broken.pdf"
+        path.write_bytes(b"not a pdf")
+
+        with self.assertRaisesRegex(ValueError, "Invalid or unsupported PDF"):
+            pdf_to_audio.extract_pdf_text(path)
+
+    def test_extract_pdf_text_tolerates_empty_password_encryption(self) -> None:
+        path = self.tempdir / "encrypted.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.encrypt("")
+        with path.open("wb") as handle:
+            writer.write(handle)
+
+        self.assertEqual(pdf_to_audio.extract_pdf_text(path), "")
 
     def test_build_cleanup_prompt_preserves_cleanup_constraints(self) -> None:
         payload = pdf_to_audio._build_cleanup_prompt("CHAPTER 1\n\n12\n\nThe sto-\nry begins here.")

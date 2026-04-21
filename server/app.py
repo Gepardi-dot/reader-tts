@@ -2657,11 +2657,16 @@ def delete_storage_prefix(prefix: str) -> None:
 
 
 def download_storage_object(key: str, destination: Path) -> None:
-    payload = read_storage_bytes(key)
-    if payload is None:
-        raise FileNotFoundError(key)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(payload)
+    client = create_book_storage_client()
+    _, _, _, ClientError, _, _, _ = load_boto3()
+    try:
+        client.download_file(BOOK_STORAGE_BUCKET, key, str(destination))
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            raise FileNotFoundError(key) from exc
+        raise RuntimeError(f"Failed to download book storage object {key}: {exc}") from exc
 
 
 def read_book_meta(book_id: str) -> dict[str, Any] | None:
@@ -2719,32 +2724,133 @@ def read_book_text(book_id: str) -> str:
     uid: str | None = None
     if progress_store_configured():
         uid = current_user_id()
-        cached_text = read_book_text_cache_sql(book_id, uid)
+        try:
+            cached_text = read_book_text_cache_sql(book_id, uid)
+        except RuntimeError as exc:
+            logger.warning("Skipping book text cache lookup for %s: %s", book_id, exc)
+            cached_text = None
         if cached_text is not None:
             return cached_text
 
-    if book_storage_enabled():
-        payload = read_storage_bytes(book_text_storage_key(book_id))
-        if payload is None:
-            raise FileNotFoundError(book_id)
-        text = payload.decode("utf-8")
-    else:
-        text = book_text_path(book_id).read_text(encoding="utf-8")
+    try:
+        if book_storage_enabled():
+            payload = read_storage_bytes(book_text_storage_key(book_id))
+            if payload is None:
+                raise FileNotFoundError(book_id)
+            text = payload.decode("utf-8")
+        else:
+            text = book_text_path(book_id).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        meta = read_book_meta(book_id)
+        if meta is None:
+            raise
+        text = recover_book_text_from_source(book_id, meta, user_id=uid)
 
     if progress_store_configured() and uid is not None:
-        write_book_text_cache_sql(book_id, uid, text)
+        try:
+            write_book_text_cache_sql(book_id, uid, text)
+        except RuntimeError as exc:
+            logger.warning("Skipping book text cache write for %s: %s", book_id, exc)
     return text
 
 
 def write_book_text(book_id: str, text: str) -> None:
     if progress_store_configured():
-        write_book_text_cache_sql(book_id, current_user_id(), text)
+        try:
+            write_book_text_cache_sql(book_id, current_user_id(), text)
+        except RuntimeError as exc:
+            logger.warning("Skipping book text cache write for %s: %s", book_id, exc)
 
     if book_storage_enabled():
         write_storage_bytes(book_text_storage_key(book_id), text.encode("utf-8"), content_type="text/plain; charset=utf-8")
         return
 
-    book_text_path(book_id).write_text(text, encoding="utf-8")
+    path = book_text_path(book_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def recover_book_text_from_source(book_id: str, meta: dict[str, Any], *, user_id: str | None = None) -> str:
+    file_name = str(meta.get("fileName") or f"book.{meta.get('sourceFormat') or 'pdf'}")
+    suffix = normalize_book_suffix(file_name)
+    source_sha256 = meta.get("sourceSha256")
+    if isinstance(source_sha256, str):
+        cached_import = read_book_import_cache_safely(source_sha256, user_id)
+        if cached_import is not None:
+            text = str(cached_import["cleanedText"])
+            write_book_text(book_id, text)
+            return text
+    else:
+        source_sha256 = None
+
+    source_storage = meta.get("sourceStorage")
+    temp_root = RUNTIME_ROOT / "direct-imports"
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    def finish_recovery(path: Path) -> str:
+        computed_sha = source_sha256 or sha256_file(path)
+        extracted = extract_cleaned_book_source(
+            file_name,
+            path,
+            source_sha256=computed_sha,
+            user_id=user_id,
+        )
+        text = str(extracted["text"])
+        meta["pageCount"] = int(extracted["pageCount"])
+        meta["textCharacters"] = len(text)
+        meta["excerpt"] = text[:260]
+        meta["sourceSha256"] = computed_sha
+        meta["sourceFormat"] = str(extracted["sourceFormat"])
+        try:
+            write_book_meta(book_id, meta)
+        except Exception as exc:
+            logger.warning("Failed to refresh recovered book metadata for %s: %s", book_id, exc)
+        write_book_text(book_id, text)
+        return text
+
+    if isinstance(source_storage, dict):
+        key = source_storage.get("key")
+        if isinstance(key, str) and key:
+            with tempfile.TemporaryDirectory(prefix="storybook_recover_", dir=str(temp_root)) as temp_dir:
+                temp_source = Path(temp_dir) / f"source{suffix}"
+                download_storage_object(key, temp_source)
+                return finish_recovery(temp_source)
+
+    source_path = resolve_local_source_path(meta)
+    if source_path.exists():
+        return finish_recovery(source_path)
+
+    raise FileNotFoundError(book_id)
+
+
+def ensure_existing_book_text_from_upload(
+    existing: dict[str, Any],
+    uploaded_source_path: Path,
+    file_name: str,
+    source_sha256: str,
+) -> None:
+    book_id = str(existing["id"])
+    try:
+        read_book_text(book_id)
+        return
+    except FileNotFoundError:
+        pass
+
+    uid = current_user_id() if progress_store_configured() else None
+    extracted = extract_cleaned_book_source(
+        file_name,
+        uploaded_source_path,
+        source_sha256=source_sha256,
+        user_id=uid,
+    )
+    text = str(extracted["text"])
+    existing["pageCount"] = int(extracted["pageCount"])
+    existing["textCharacters"] = len(text)
+    existing["excerpt"] = text[:260]
+    existing["sourceSha256"] = source_sha256
+    existing["sourceFormat"] = str(extracted["sourceFormat"])
+    write_book_meta(book_id, existing)
+    write_book_text(book_id, text)
 
 
 def source_url_for_book(meta: dict[str, Any]) -> str:
@@ -3482,7 +3588,7 @@ def create_book_storage_client():
         _, Config, _, _, _, _, _ = load_boto3()
         client_config = Config(
             connect_timeout=3,
-            read_timeout=10,
+            read_timeout=60,
             retries={"max_attempts": 1},
             s3={"addressing_style": BOOK_STORAGE_ADDRESSING_STYLE},
         )
@@ -4725,6 +4831,113 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def book_format_label_for_suffix(suffix: str) -> str:
+    normalized = suffix.lower().lstrip(".")
+    return {
+        "pdf": "PDF",
+        "epub": "EPUB",
+        "txt": "text",
+        "md": "Markdown",
+        "markdown": "Markdown",
+        "html": "HTML",
+        "htm": "HTML",
+        "xhtml": "XHTML",
+        "docx": "DOCX",
+    }.get(normalized, normalized.upper() or "book")
+
+
+def read_book_import_cache_safely(source_sha256: str | None, user_id: str | None) -> dict[str, Any] | None:
+    if not source_sha256 or not user_id:
+        return None
+    try:
+        return _get_book_import_cache_sql(source_sha256, user_id)
+    except RuntimeError as exc:
+        logger.warning("Skipping book import cache lookup for %s: %s", source_sha256[:12], exc)
+        return None
+
+
+def write_book_import_cache_safely(
+    *,
+    source_sha256: str | None,
+    user_id: str | None,
+    source_format: str,
+    cleaned_text: str,
+    page_count: int,
+) -> None:
+    if not source_sha256 or not user_id:
+        return
+    try:
+        _write_book_import_cache_sql(
+            source_sha256=source_sha256,
+            user_id=user_id,
+            source_format=source_format,
+            cleaned_text=cleaned_text,
+            page_count=page_count,
+        )
+    except RuntimeError as exc:
+        logger.warning("Skipping book import cache write for %s: %s", source_sha256[:12], exc)
+
+
+def extract_cleaned_book_source(
+    file_name: str,
+    source_path: Path,
+    *,
+    source_sha256: str | None = None,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    suffix = normalize_book_suffix(file_name)
+    source_format = suffix.lstrip(".")
+    cached_import = read_book_import_cache_safely(source_sha256, user_id)
+    if cached_import is not None:
+        cleaned_text = str(cached_import["cleanedText"])
+        page_count = int(cached_import["pageCount"])
+        return {
+            "text": cleaned_text,
+            "pageCount": page_count,
+            "sourceFormat": str(cached_import.get("sourceFormat") or source_format),
+            "cached": True,
+        }
+
+    try:
+        extracted = pdf_to_audio.extract_book_text(source_path)
+    except Exception as exc:
+        label = book_format_label_for_suffix(suffix)
+        logger.exception("Failed to extract text from uploaded %s file %s", label, file_name)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Could not extract readable text from this {label} file. "
+                "Check that the file is not corrupt, password-protected, DRM-protected, or image-only."
+            ),
+        ) from exc
+
+    cleaned_text = pdf_to_audio.clean_text(extracted.text)
+    if not cleaned_text:
+        raise HTTPException(
+            status_code=422,
+            detail="No extractable text was found in this file. Scanned PDFs need OCR first, and DRM-protected ebooks must be converted before upload.",
+        )
+
+    page_count = extracted.page_count or pdf_to_audio.estimate_page_count(cleaned_text)
+    if page_count <= 0:
+        page_count = pdf_to_audio.estimate_page_count(cleaned_text)
+    source_format = extracted.format or source_format
+
+    write_book_import_cache_safely(
+        source_sha256=source_sha256,
+        user_id=user_id,
+        source_format=source_format,
+        cleaned_text=cleaned_text,
+        page_count=page_count,
+    )
+    return {
+        "text": cleaned_text,
+        "pageCount": page_count,
+        "sourceFormat": source_format,
+        "cached": False,
+    }
+
+
 def load_book_or_404(book_id: str) -> dict[str, Any]:
     payload = read_book_meta(book_id)
     if payload is None:
@@ -4743,46 +4956,20 @@ def import_book_source(
 ) -> dict[str, Any]:
     suffix = normalize_book_suffix(file_name)
     uid = current_user_id() if progress_store_configured() else None
-    source_format = suffix.lstrip(".")
-    cached_import = (
-        _get_book_import_cache_sql(source_sha256, uid)
-        if uid is not None and source_sha256
-        else None
-    )
     try:
-        if cached_import is not None:
-            cleaned_text = str(cached_import["cleanedText"])
-            page_count = int(cached_import["pageCount"])
-            source_format = str(cached_import.get("sourceFormat") or source_format)
-        else:
-            extracted = pdf_to_audio.extract_book_text(source_path)
-            cleaned_text = pdf_to_audio.clean_text(extracted.text)
-            page_count = extracted.page_count or pdf_to_audio.estimate_page_count(cleaned_text)
-            source_format = extracted.format or source_format
-    except Exception:
+        extracted = extract_cleaned_book_source(
+            file_name,
+            source_path,
+            source_sha256=source_sha256,
+            user_id=uid,
+        )
+        cleaned_text = str(extracted["text"])
+        page_count = int(extracted["pageCount"])
+        source_format = str(extracted["sourceFormat"])
+    except HTTPException:
         if not book_storage_enabled():
             shutil.rmtree(book_dir(book_id), ignore_errors=True)
         raise
-
-    if not cleaned_text:
-        if not book_storage_enabled():
-            shutil.rmtree(book_dir(book_id), ignore_errors=True)
-        raise HTTPException(
-            status_code=422,
-            detail="No extractable text was found in this file. Scanned PDFs need OCR first, and DRM-protected ebooks must be converted before upload.",
-        )
-
-    if page_count <= 0:
-        page_count = pdf_to_audio.estimate_page_count(cleaned_text)
-
-    if uid is not None and source_sha256 and cached_import is None:
-        _write_book_import_cache_sql(
-            source_sha256=source_sha256,
-            user_id=uid,
-            source_format=source_format,
-            cleaned_text=cleaned_text,
-            page_count=page_count,
-        )
 
     title = resolve_book_title(title_override, file_name)
     meta = {
@@ -4837,6 +5024,7 @@ def save_uploaded_book(upload: UploadFile, title_override: str | None = None) ->
         if progress_store_configured():
             existing = _get_book_by_source_hash_sql(source_sha256, current_user_id())
             if existing is not None:
+                ensure_existing_book_text_from_upload(existing, source_path, upload.filename, source_sha256)
                 shutil.rmtree(target_dir, ignore_errors=True)
                 return serialize_book(existing)
 
@@ -4903,7 +5091,7 @@ def create_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str,
     return {
         "bookId": book_id,
         "upload": {
-            "url": regional_book_storage_upload_url(),
+            "url": upload.get("url") or regional_book_storage_upload_url(),
             "fields": upload["fields"],
         },
     }
@@ -4930,6 +5118,7 @@ def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dic
             if progress_store_configured():
                 existing = _get_book_by_source_hash_sql(source_sha256, current_user_id())
                 if existing is not None:
+                    ensure_existing_book_text_from_upload(existing, temp_source, request.fileName, source_sha256)
                     delete_storage_prefix(book_storage_base_prefix(request.bookId))
                     return serialize_book(existing)
             return import_book_source(
@@ -4945,14 +5134,14 @@ def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dic
                 title_override=request.title,
             )
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="Uploaded PDF was not found in storage.") from exc
+            raise HTTPException(status_code=404, detail="Uploaded book file was not found in storage.") from exc
         except HTTPException:
             delete_storage_prefix(book_storage_base_prefix(request.bookId))
             raise
         except Exception as exc:
-            logger.error("Failed to import uploaded PDF for book %s: %s", request.bookId, exc)
+            logger.exception("Failed to import uploaded book for book %s", request.bookId)
             delete_storage_prefix(book_storage_base_prefix(request.bookId))
-            raise HTTPException(status_code=500, detail="Failed to import the uploaded PDF. Check the file is a valid PDF and try again.") from exc
+            raise HTTPException(status_code=500, detail="Failed to import the uploaded book. Check storage and database configuration, then try again.") from exc
 
 
 def source_file_response(book_id: str):
