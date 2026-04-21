@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -52,6 +53,50 @@ class PdfToAudioGemmaCleanupTestCase(unittest.TestCase):
     def test_clean_text_preserves_paragraph_breaks(self) -> None:
         cleaned = pdf_to_audio.clean_text("CHAPTER 1\n\n12\n\nThe sto-\nry begins here.")
         self.assertEqual(cleaned, "CHAPTER 1\n\nThe story begins here.")
+
+    def test_extract_html_text_keeps_reading_blocks(self) -> None:
+        path = self.tempdir / "chapter.html"
+        path.write_text(
+            "<html><body><h1>Chapter One</h1><p>The first paragraph.</p>"
+            "<script>ignored()</script><p>The second paragraph.</p></body></html>",
+            encoding="utf-8",
+        )
+
+        extracted = pdf_to_audio.extract_book_text(path)
+
+        self.assertEqual(extracted.format, "html")
+        self.assertIn("Chapter One", extracted.text)
+        self.assertIn("The first paragraph.", extracted.text)
+        self.assertNotIn("ignored", extracted.text)
+        self.assertGreaterEqual(extracted.page_count, 1)
+
+    def test_extract_markdown_text_removes_common_markup(self) -> None:
+        path = self.tempdir / "story.md"
+        path.write_text("# Title\n\nA [reader](https://example.com) sees **bold** text.", encoding="utf-8")
+
+        extracted = pdf_to_audio.extract_text(path)
+
+        self.assertIn("Title", extracted)
+        self.assertIn("A reader sees bold text.", extracted)
+        self.assertNotIn("https://example.com", extracted)
+
+    def test_extract_docx_text_reads_document_paragraphs(self) -> None:
+        path = self.tempdir / "story.docx"
+        document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Chapter One</w:t></w:r></w:p>
+    <w:p><w:r><w:t>The first paragraph.</w:t></w:r></w:p>
+  </w:body>
+</w:document>"""
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("word/document.xml", document_xml)
+
+        extracted = pdf_to_audio.extract_book_text(path)
+
+        self.assertEqual(extracted.format, "docx")
+        self.assertEqual(extracted.text, "Chapter One\n\nThe first paragraph.")
+        self.assertEqual(extracted.page_count, 1)
 
     def test_build_cleanup_prompt_preserves_cleanup_constraints(self) -> None:
         payload = pdf_to_audio._build_cleanup_prompt("CHAPTER 1\n\n12\n\nThe sto-\nry begins here.")

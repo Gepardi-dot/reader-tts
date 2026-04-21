@@ -28,11 +28,11 @@ interface Book {
   sourceUrl: string
   excerpt: string
   highlightCount: number
+  readingProgress: ReadingProgress | null
 }
 
-// Reading progress is stored in localStorage (same as web-rewrite)
 const PROGRESS_KEY = 'storybook-reader-progress'
-interface ReadingProgress { pageNumber: number; totalPages: number }
+interface ReadingProgress { pageNumber: number; totalPages: number; updatedAt?: string }
 
 function loadProgress(): Record<string, ReadingProgress> {
   try {
@@ -121,7 +121,7 @@ export function LibraryRoute() {
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const { data: books = [], isLoading, error } = useBooks()
   const queryClient = useQueryClient()
-  const progressMap = loadProgress()
+  const fallbackProgressMap = loadProgress()
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/api/books/${id}`),
@@ -178,7 +178,7 @@ export function LibraryRoute() {
             <BookCard
               key={book.id}
               book={book}
-              progress={progressMap[book.id]}
+              progress={book.readingProgress ?? fallbackProgressMap[book.id]}
               onDelete={setDeleteId}
             />
           ))}

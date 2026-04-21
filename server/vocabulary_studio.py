@@ -66,6 +66,7 @@ class NoteCreateRequest(BaseModel):
     audioUrl: str | None = Field(default=None, max_length=4000)
     tags: list[str] = Field(default_factory=list)
     topic: str | None = Field(default=None, max_length=240)
+    sourceRef: str | None = Field(default=None, max_length=500)
     metadata: dict[str, Any] | None = None
 
 
@@ -606,6 +607,7 @@ class VocabularyStudioService:
         *,
         migrations_dir: Path | None = None,
         user_id: str = DEFAULT_USER_ID,
+        user_id_provider: Callable[[], str] | None = None,
         dictionary_lookup: Callable[[str], dict[str, Any]] | None = None,
         context_generator: ContextGenerator | None = None,
         context_generators: list[ContextGenerator] | None = None,
@@ -618,6 +620,7 @@ class VocabularyStudioService:
         self._db_path = self._data_root / "vocabulary-studio.sqlite3"
         self._migrations_dir = migrations_dir or Path(__file__).with_name("migrations")
         self._user_id = user_id
+        self._user_id_provider = user_id_provider
         self._dictionary_lookup = dictionary_lookup
         self._context_generators = list(context_generators or [])
         if context_generator is not None:
@@ -628,6 +631,12 @@ class VocabularyStudioService:
         self._allow_openai_fallback = allow_openai_fallback
         self._migration_lock = threading.Lock()
         self._ready = False
+
+    @property
+    def user_id(self) -> str:
+        if self._user_id_provider is not None:
+            return self._user_id_provider()
+        return self._user_id
 
     def ensure_ready(self) -> None:
         if self._ready:
@@ -680,7 +689,7 @@ class VocabularyStudioService:
             from decks
             where id = ? and user_id = ?
             """,
-            (deck_id, self._user_id),
+            (deck_id, self.user_id),
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Deck not found.")
@@ -710,7 +719,7 @@ class VocabularyStudioService:
             join decks d on d.id = c.deck_id
             where c.id = ? and c.user_id = ?
             """,
-            (card_id, self._user_id),
+            (card_id, self.user_id),
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Card not found.")
@@ -1021,7 +1030,7 @@ class VocabularyStudioService:
                 where user_id = ?
                   and mode = 'lesson'
                 """,
-                (self._user_id,),
+                (self.user_id,),
             ).fetchall()
         }
         due_now_ids = {
@@ -1138,7 +1147,7 @@ class VocabularyStudioService:
     def _production_status(self, conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         count = conn.execute(
             "select count(*) from production_logs where card_id = ? and user_id = ?",
-            (row["id"], self._user_id),
+            (row["id"], self.user_id),
         ).fetchone()[0]
         target = _context_term(row)
         return {
@@ -1361,7 +1370,7 @@ class VocabularyStudioService:
                 where user_id = ?
                 order by updated_at desc, title collate nocase asc
                 """,
-                (self._user_id,),
+                (self.user_id,),
             ).fetchall()
             return [self._deck_summary(conn, row, now) for row in rows]
 
@@ -1373,7 +1382,7 @@ class VocabularyStudioService:
             where user_id = ?
             order by updated_at desc, title collate nocase asc
             """,
-            (self._user_id,),
+            (self.user_id,),
         ).fetchall()
         if not rows:
             return None
@@ -1399,7 +1408,7 @@ class VocabularyStudioService:
             order by reviewed_at desc
             limit 365
             """,
-            (self._user_id,),
+            (self.user_id,),
         ).fetchall()
         event_rows = conn.execute(
             """
@@ -1409,7 +1418,7 @@ class VocabularyStudioService:
             order by created_at desc
             limit 365
             """,
-            (self._user_id,),
+            (self.user_id,),
         ).fetchall()
 
         active_days = {
@@ -1448,7 +1457,7 @@ class VocabularyStudioService:
             order by rl.reviewed_at desc
             limit ?
             """,
-            (self._user_id, limit),
+            (self.user_id, limit),
         ).fetchall()
         event_rows = conn.execute(
             """
@@ -1458,7 +1467,7 @@ class VocabularyStudioService:
             order by created_at desc
             limit ?
             """,
-            (self._user_id, limit),
+            (self.user_id, limit),
         ).fetchall()
 
         events: list[dict[str, Any]] = []
@@ -1509,7 +1518,7 @@ class VocabularyStudioService:
                   and created_at >= ?
                   and created_at < ?
                 """,
-                (self._user_id, _serialize_timestamp(day_start), _serialize_timestamp(day_end)),
+                (self.user_id, _serialize_timestamp(day_start), _serialize_timestamp(day_end)),
             ).fetchone()[0]
             lessons_today = conn.execute(
                 """
@@ -1520,7 +1529,7 @@ class VocabularyStudioService:
                   and created_at >= ?
                   and created_at < ?
                 """,
-                (self._user_id, _serialize_timestamp(day_start), _serialize_timestamp(day_end)),
+                (self.user_id, _serialize_timestamp(day_start), _serialize_timestamp(day_end)),
             ).fetchone()[0]
             reviews_today = conn.execute(
                 """
@@ -1530,7 +1539,7 @@ class VocabularyStudioService:
                   and reviewed_at >= ?
                   and reviewed_at < ?
                 """,
-                (self._user_id, _serialize_timestamp(day_start), _serialize_timestamp(day_end)),
+                (self.user_id, _serialize_timestamp(day_start), _serialize_timestamp(day_end)),
             ).fetchone()[0]
             lesson_queue = None
             if default_deck is not None:
@@ -1614,7 +1623,7 @@ class VocabularyStudioService:
                 """,
                 (
                     record["id"],
-                    self._user_id,
+                    self.user_id,
                     record["type"],
                     record["xpDelta"],
                     record["bookId"],
@@ -1644,7 +1653,7 @@ class VocabularyStudioService:
                 where user_id = ?
                   and lower(title) = lower(?)
                 """,
-                (self._user_id, title),
+                (self.user_id, title),
             ).fetchone()
             if duplicate is not None:
                 raise HTTPException(status_code=409, detail="A deck with this title already exists.")
@@ -1664,7 +1673,7 @@ class VocabularyStudioService:
                 """,
                 (
                     deck_id,
-                    self._user_id,
+                    self.user_id,
                     title,
                     description,
                     json.dumps(config),
@@ -1760,6 +1769,43 @@ class VocabularyStudioService:
             topic = _normalize_compact_text(request.topic)
             tags = _normalize_tags(request.tags)
             metadata = request.metadata if isinstance(request.metadata, dict) else {}
+            raw_source_ref = _normalize_compact_text(request.sourceRef)
+            source_ref = f"user:{self.user_id}:{raw_source_ref}" if raw_source_ref else None
+            if source_ref:
+                duplicate = conn.execute(
+                    "select id from notes where source_ref = ? and deck_id = ? and user_id = ?",
+                    (source_ref, deck_id, self.user_id),
+                ).fetchone()
+                if duplicate is not None:
+                    note_row = conn.execute("select * from notes where id = ?", (duplicate["id"],)).fetchone()
+                    card_rows = conn.execute(
+                        "select * from cards where note_id = ? order by position asc",
+                        (duplicate["id"],),
+                    ).fetchall()
+                    return {
+                        "note": self._serialize_note(note_row, list(card_rows)),
+                        "deck": self._deck_summary(conn, deck_row, now),
+                    }
+
+            if back is None and request.noteType in {"basic", "basic_reverse"} and front and self._dictionary_lookup is not None:
+                try:
+                    dictionary_payload = self._dictionary_lookup(front)
+                except Exception:
+                    dictionary_payload = {}
+                entries = dictionary_payload.get("entries") if isinstance(dictionary_payload, dict) else None
+                if isinstance(entries, list) and entries:
+                    first_definition = entries[0].get("definition") if isinstance(entries[0], dict) else None
+                    back = _normalize_line(first_definition)
+                    if back is not None:
+                        metadata = {
+                            **metadata,
+                            "dictionarySource": dictionary_payload.get("source"),
+                        }
+                        pronunciation = dictionary_payload.get("pronunciation")
+                        if pronunciation:
+                            metadata["pronunciation"] = pronunciation
+            if back is None and request.noteType in {"basic", "basic_reverse"}:
+                back = "Saved from reading"
             specs = _generate_card_specs(request.noteType, front or "", back)
             note_id = _make_id()
             timestamp = _serialize_timestamp(now)
@@ -1789,7 +1835,7 @@ class VocabularyStudioService:
                 (
                     note_id,
                     deck_id,
-                    self._user_id,
+                    self.user_id,
                     request.noteType,
                     front,
                     back,
@@ -1801,7 +1847,7 @@ class VocabularyStudioService:
                     _normalize_line(request.audioUrl),
                     json.dumps(tags),
                     topic,
-                    None,
+                    source_ref,
                     json.dumps(metadata),
                     timestamp,
                     timestamp,
@@ -1839,7 +1885,7 @@ class VocabularyStudioService:
                         _make_id(),
                         deck_id,
                         note_id,
-                        self._user_id,
+                        self.user_id,
                         spec["card_type"],
                         timestamp,
                         spec["position"],
@@ -1931,7 +1977,7 @@ class VocabularyStudioService:
                     (
                         note_id,
                         deck_id,
-                        self._user_id,
+                        self.user_id,
                         "basic",
                         front,
                         back,
@@ -1981,7 +2027,7 @@ class VocabularyStudioService:
                             _make_id(),
                             deck_id,
                             note_id,
-                            self._user_id,
+                            self.user_id,
                             spec["card_type"],
                             timestamp,
                             spec["position"],
@@ -2277,7 +2323,7 @@ class VocabularyStudioService:
             (
                 _make_id(),
                 card_id,
-                self._user_id,
+                self.user_id,
                 mode,
                 step,
                 turn_index,
@@ -2350,7 +2396,7 @@ class VocabularyStudioService:
             from card_context_cache
             where card_id = ? and cache_key = ? and user_id = ?
             """,
-            (card_id, cache_key, self._user_id),
+            (card_id, cache_key, self.user_id),
         ).fetchone()
         if row is None:
             return None
@@ -2395,7 +2441,7 @@ class VocabularyStudioService:
             (
                 _make_id(),
                 card_id,
-                self._user_id,
+                self.user_id,
                 cache_key,
                 payload_json,
                 str(payload.get("source") or "ai"),
@@ -2932,7 +2978,7 @@ class VocabularyStudioService:
                     (
                         _make_id(),
                         card_id,
-                        self._user_id,
+                        self.user_id,
                         _serialize_timestamp(now),
                         json.dumps(sentences),
                     ),
@@ -3031,7 +3077,7 @@ class VocabularyStudioService:
                 (
                     log_id,
                     card_id,
-                    self._user_id,
+                    self.user_id,
                     _serialize_timestamp(reviewed_at),
                     request.rating,
                     state_before,

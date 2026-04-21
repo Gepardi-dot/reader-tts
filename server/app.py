@@ -33,7 +33,6 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from pypdf import PdfReader
 
 import pdf_to_audio
 from server.gemma_provider import (
@@ -232,6 +231,21 @@ BOOK_STORAGE_PREFIX = (env_value("BOOK_STORAGE_PREFIX") or "storybook-reader").s
 BOOK_STORAGE_REGION = env_value("BOOK_STORAGE_REGION") or env_value("AWS_REGION") or env_value("AWS_DEFAULT_REGION")
 BOOK_STORAGE_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 BOOK_TITLE_MAX_LENGTH = 180
+BOOK_EXTRACTION_CACHE_VERSION = 2
+SUPPORTED_BOOK_EXTENSIONS = {
+    ".pdf": "application/pdf",
+    ".epub": "application/epub+zip",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".xhtml": "application/xhtml+xml",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+SUPPORTED_BOOK_FORMAT_LABEL = ", ".join(
+    extension.upper().lstrip(".") for extension in SUPPORTED_BOOK_EXTENSIONS
+)
 OFFLINE_DICTIONARY_DB = Path(
     env_value("OFFLINE_DICTIONARY_DB") or str(RUNTIME_DICTIONARY_ROOT / "offline" / "dictionary.sqlite3")
 )
@@ -1794,6 +1808,77 @@ _SCHEMA_MIGRATIONS: list[list[str]] = [
     [
         "alter table books add column if not exists source_path text",
     ],
+    # Version 5 — per-user progress rows + durable extracted text cache
+    [
+        """
+        create table if not exists book_text_cache (
+            book_id text not null references books(id) on delete cascade,
+            user_id uuid not null references auth.users(id) on delete cascade,
+            text_content text not null,
+            content_sha256 text not null,
+            created_at timestamptz not null default now(),
+            updated_at timestamptz not null default now(),
+            primary key (book_id, user_id)
+        )
+        """,
+        "create index if not exists book_text_cache_user_updated on book_text_cache(user_id, updated_at desc)",
+        """
+        do $$
+        begin
+            if exists (
+                select 1
+                from pg_constraint
+                where conrelid = 'reader_progress'::regclass
+                  and conname = 'reader_progress_pkey'
+            ) then
+                alter table reader_progress drop constraint reader_progress_pkey;
+            end if;
+        exception
+            when undefined_table then null;
+        end
+        $$;
+        """,
+        """
+        do $$
+        begin
+            if exists (
+                select 1
+                from pg_constraint
+                where conrelid = 'audio_progress'::regclass
+                  and conname = 'audio_progress_pkey'
+            ) then
+                alter table audio_progress drop constraint audio_progress_pkey;
+            end if;
+        exception
+            when undefined_table then null;
+        end
+        $$;
+        """,
+        "create unique index if not exists reader_progress_user_book_unique on reader_progress(book_id, user_id)",
+        "create unique index if not exists audio_progress_user_book_unique on audio_progress(book_id, user_id)",
+    ],
+    # Version 6 — multi-format import metadata + source-hash extraction cache
+    [
+        "alter table books add column if not exists source_sha256 text",
+        "alter table books add column if not exists source_format text",
+        "create index if not exists books_user_source_sha256 on books(user_id, source_sha256)",
+        """
+        create table if not exists book_import_cache (
+            user_id uuid not null references auth.users(id) on delete cascade,
+            source_sha256 text not null,
+            extraction_version integer not null,
+            source_format text not null,
+            cleaned_text text not null,
+            page_count integer not null,
+            text_chars integer not null,
+            excerpt text not null default '',
+            created_at timestamptz not null default now(),
+            updated_at timestamptz not null default now(),
+            primary key (user_id, source_sha256, extraction_version)
+        )
+        """,
+        "create index if not exists book_import_cache_user_updated on book_import_cache(user_id, updated_at desc)",
+    ],
 ]
 
 
@@ -1869,8 +1954,28 @@ def _book_row_to_meta(row: tuple[Any, ...]) -> dict[str, Any]:
     (
         id_, user_id, title, file_name, uploaded_at, page_count,
         text_chars, excerpt, latest_audio, audio_history, source_storage, source_path,
-        created_at, highlight_count,
+        source_sha256, source_format, created_at, highlight_count,
+        reading_page_number, reading_total_pages, reading_text_start, reading_text_end,
+        reading_text_length, reading_updated_at,
+        audio_url, audio_current_time, audio_was_playing, audio_updated_at,
     ) = row
+    reading_progress = serialize_reading_progress_row(
+        (
+            reading_page_number,
+            reading_total_pages,
+            reading_text_start,
+            reading_text_end,
+            reading_text_length,
+            reading_updated_at,
+        )
+        if reading_page_number is not None
+        else None
+    )
+    audio_progress = serialize_audio_progress_row(
+        (audio_url, audio_current_time, audio_was_playing, audio_updated_at)
+        if audio_url is not None
+        else None
+    )
     return {
         "id": id_,
         "user_id": str(user_id),
@@ -1884,7 +1989,11 @@ def _book_row_to_meta(row: tuple[Any, ...]) -> dict[str, Any]:
         "audioHistory": audio_history or [],
         "sourceStorage": source_storage,
         "sourcePath": source_path,
+        "sourceSha256": source_sha256,
+        "sourceFormat": source_format,
         "_highlightCount": highlight_count or 0,
+        "_readingProgress": reading_progress,
+        "_audioProgress": audio_progress,
     }
 
 
@@ -1894,12 +2003,32 @@ def _list_books_sql(user_id: str) -> list[dict[str, Any]]:
             """
             SELECT b.id, b.user_id, b.title, b.file_name, b.uploaded_at,
                    b.page_count, b.text_chars, b.excerpt,
-                   b.latest_audio, b.audio_history, b.source_storage, b.source_path, b.created_at,
-                   COUNT(h.id) AS highlight_count
+                   b.latest_audio, b.audio_history, b.source_storage, b.source_path,
+                   b.source_sha256, b.source_format, b.created_at,
+                   (
+                       SELECT COUNT(*)
+                       FROM highlights h
+                       WHERE h.book_id = b.id AND h.user_id = b.user_id
+                   ) AS highlight_count,
+                   rp.page_number, rp.total_pages, rp.text_start, rp.text_end,
+                   rp.text_length, rp.updated_at,
+                   ap.audio_url, ap.playback_time, ap.was_playing, ap.updated_at
             FROM books b
-            LEFT JOIN highlights h ON h.book_id = b.id AND h.user_id = b.user_id
+            LEFT JOIN LATERAL (
+                SELECT page_number, total_pages, text_start, text_end, text_length, updated_at
+                FROM reader_progress
+                WHERE book_id = b.id AND (user_id = b.user_id OR user_id IS NULL)
+                ORDER BY (user_id = b.user_id) DESC, updated_at DESC
+                LIMIT 1
+            ) rp ON true
+            LEFT JOIN LATERAL (
+                SELECT audio_url, playback_time, was_playing, updated_at
+                FROM audio_progress
+                WHERE book_id = b.id AND (user_id = b.user_id OR user_id IS NULL)
+                ORDER BY (user_id = b.user_id) DESC, updated_at DESC
+                LIMIT 1
+            ) ap ON true
             WHERE b.user_id = %s
-            GROUP BY b.id
             ORDER BY b.uploaded_at DESC
             """,
             (user_id,),
@@ -1913,12 +2042,32 @@ def _get_book_sql(book_id: str, user_id: str) -> dict[str, Any] | None:
             """
             SELECT b.id, b.user_id, b.title, b.file_name, b.uploaded_at,
                    b.page_count, b.text_chars, b.excerpt,
-                   b.latest_audio, b.audio_history, b.source_storage, b.source_path, b.created_at,
-                   COUNT(h.id) AS highlight_count
+                   b.latest_audio, b.audio_history, b.source_storage, b.source_path,
+                   b.source_sha256, b.source_format, b.created_at,
+                   (
+                       SELECT COUNT(*)
+                       FROM highlights h
+                       WHERE h.book_id = b.id AND h.user_id = b.user_id
+                   ) AS highlight_count,
+                   rp.page_number, rp.total_pages, rp.text_start, rp.text_end,
+                   rp.text_length, rp.updated_at,
+                   ap.audio_url, ap.playback_time, ap.was_playing, ap.updated_at
             FROM books b
-            LEFT JOIN highlights h ON h.book_id = b.id AND h.user_id = b.user_id
+            LEFT JOIN LATERAL (
+                SELECT page_number, total_pages, text_start, text_end, text_length, updated_at
+                FROM reader_progress
+                WHERE book_id = b.id AND (user_id = b.user_id OR user_id IS NULL)
+                ORDER BY (user_id = b.user_id) DESC, updated_at DESC
+                LIMIT 1
+            ) rp ON true
+            LEFT JOIN LATERAL (
+                SELECT audio_url, playback_time, was_playing, updated_at
+                FROM audio_progress
+                WHERE book_id = b.id AND (user_id = b.user_id OR user_id IS NULL)
+                ORDER BY (user_id = b.user_id) DESC, updated_at DESC
+                LIMIT 1
+            ) ap ON true
             WHERE b.id = %s AND b.user_id = %s
-            GROUP BY b.id
             """,
             (book_id, user_id),
         )
@@ -1934,8 +2083,9 @@ def _upsert_book_sql(meta: dict[str, Any], user_id: str) -> None:
             """
             INSERT INTO books (id, user_id, title, file_name, uploaded_at,
                                page_count, text_chars, excerpt,
-                               latest_audio, audio_history, source_storage, source_path)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                               latest_audio, audio_history, source_storage, source_path,
+                               source_sha256, source_format)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 title          = EXCLUDED.title,
                 file_name      = EXCLUDED.file_name,
@@ -1945,7 +2095,9 @@ def _upsert_book_sql(meta: dict[str, Any], user_id: str) -> None:
                 latest_audio   = EXCLUDED.latest_audio,
                 audio_history  = EXCLUDED.audio_history,
                 source_storage = EXCLUDED.source_storage,
-                source_path    = EXCLUDED.source_path
+                source_path    = EXCLUDED.source_path,
+                source_sha256  = EXCLUDED.source_sha256,
+                source_format  = EXCLUDED.source_format
             """,
             (
                 meta["id"],
@@ -1960,6 +2112,8 @@ def _upsert_book_sql(meta: dict[str, Any], user_id: str) -> None:
                 _json.dumps(meta.get("audioHistory") or []),
                 _json.dumps(meta["sourceStorage"]) if meta.get("sourceStorage") else None,
                 meta.get("sourcePath"),
+                meta.get("sourceSha256"),
+                meta.get("sourceFormat"),
             ),
         )
 
@@ -1967,6 +2121,93 @@ def _upsert_book_sql(meta: dict[str, Any], user_id: str) -> None:
 def _delete_book_sql(book_id: str, user_id: str) -> None:
     with progress_store_cursor() as cur:
         cur.execute("DELETE FROM books WHERE id = %s AND user_id = %s", (book_id, user_id))
+
+
+def _get_book_by_source_hash_sql(source_sha256: str, user_id: str) -> dict[str, Any] | None:
+    if not source_sha256:
+        return None
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            SELECT id
+            FROM books
+            WHERE user_id = %s AND source_sha256 = %s
+            ORDER BY uploaded_at DESC
+            LIMIT 1
+            """,
+            (user_id, source_sha256),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return _get_book_sql(row[0], user_id)
+
+
+def _get_book_import_cache_sql(source_sha256: str, user_id: str) -> dict[str, Any] | None:
+    if not source_sha256:
+        return None
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            SELECT source_format, cleaned_text, page_count, text_chars, excerpt, updated_at
+            FROM book_import_cache
+            WHERE user_id = %s
+              AND source_sha256 = %s
+              AND extraction_version = %s
+            """,
+            (user_id, source_sha256, BOOK_EXTRACTION_CACHE_VERSION),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    source_format, cleaned_text, page_count, text_chars, excerpt, updated_at = row
+    return {
+        "sourceFormat": source_format,
+        "cleanedText": cleaned_text,
+        "pageCount": page_count,
+        "textCharacters": text_chars,
+        "excerpt": excerpt,
+        "updatedAt": serialize_timestamp(updated_at),
+    }
+
+
+def _write_book_import_cache_sql(
+    *,
+    source_sha256: str,
+    user_id: str,
+    source_format: str,
+    cleaned_text: str,
+    page_count: int,
+) -> None:
+    if not source_sha256 or not cleaned_text:
+        return
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO book_import_cache (
+                user_id, source_sha256, extraction_version, source_format,
+                cleaned_text, page_count, text_chars, excerpt, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (user_id, source_sha256, extraction_version) DO UPDATE SET
+                source_format = EXCLUDED.source_format,
+                cleaned_text = EXCLUDED.cleaned_text,
+                page_count = EXCLUDED.page_count,
+                text_chars = EXCLUDED.text_chars,
+                excerpt = EXCLUDED.excerpt,
+                updated_at = now()
+            """,
+            (
+                user_id,
+                source_sha256,
+                BOOK_EXTRACTION_CACHE_VERSION,
+                source_format,
+                cleaned_text,
+                page_count,
+                len(cleaned_text),
+                cleaned_text[:260],
+            ),
+        )
 
 
 # ── Highlights DB CRUD ────────────────────────────────────────────────────────
@@ -2137,9 +2378,8 @@ def write_book_reading_progress(book_id: str, request: ReadingProgressRequest) -
                     text_start, text_end, text_length, updated_at
                 )
                 values (%s, %s, %s, %s, %s, %s, %s, %s)
-                on conflict (book_id) do update
+                on conflict (book_id, user_id) do update
                 set
-                    user_id     = excluded.user_id,
                     page_number = excluded.page_number,
                     total_pages = excluded.total_pages,
                     text_start  = excluded.text_start,
@@ -2154,6 +2394,7 @@ def write_book_reading_progress(book_id: str, request: ReadingProgressRequest) -
                     updated_at,
                 ),
             )
+        invalidate_books_cache(uid)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -2184,9 +2425,8 @@ def write_book_audio_progress(book_id: str, request: AudioProgressRequest) -> di
                     audio_url, playback_time, was_playing, updated_at
                 )
                 values (%s, %s, %s, %s, %s, %s)
-                on conflict (book_id) do update
+                on conflict (book_id, user_id) do update
                 set
-                    user_id       = excluded.user_id,
                     audio_url     = excluded.audio_url,
                     playback_time = excluded.playback_time,
                     was_playing   = excluded.was_playing,
@@ -2198,6 +2438,7 @@ def write_book_audio_progress(book_id: str, request: AudioProgressRequest) -> di
                     updated_at,
                 ),
             )
+        invalidate_books_cache(uid)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -2217,6 +2458,7 @@ def delete_book_audio_progress(book_id: str) -> dict[str, bool]:
                 "delete from audio_progress where book_id = %s and (user_id = %s or user_id is null)",
                 (book_id, uid),
             )
+        invalidate_books_cache(uid)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -2287,8 +2529,11 @@ def book_storage_base_prefix(book_id: str) -> str:
     return storage_key("books", uid, book_id)
 
 
-def book_source_storage_key(book_id: str) -> str:
-    return f"{book_storage_base_prefix(book_id)}/source.pdf"
+def book_source_storage_key(book_id: str, suffix: str = ".pdf") -> str:
+    clean_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    if clean_suffix.lower() not in SUPPORTED_BOOK_EXTENSIONS:
+        clean_suffix = ".book"
+    return f"{book_storage_base_prefix(book_id)}/source{clean_suffix.lower()}"
 
 
 def book_meta_storage_key(book_id: str) -> str:
@@ -2440,17 +2685,61 @@ def write_book_meta(book_id: str, payload: dict[str, Any]) -> None:
     write_json(book_meta_path(book_id), payload)
 
 
+def read_book_text_cache_sql(book_id: str, user_id: str) -> str | None:
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            SELECT text_content
+            FROM book_text_cache
+            WHERE book_id = %s AND user_id = %s
+            """,
+            (book_id, user_id),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def write_book_text_cache_sql(book_id: str, user_id: str, text: str) -> None:
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO book_text_cache (book_id, user_id, text_content, content_sha256, updated_at)
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (book_id, user_id) DO UPDATE SET
+                text_content = EXCLUDED.text_content,
+                content_sha256 = EXCLUDED.content_sha256,
+                updated_at = now()
+            """,
+            (book_id, user_id, text, digest),
+        )
+
+
 def read_book_text(book_id: str) -> str:
+    uid: str | None = None
+    if progress_store_configured():
+        uid = current_user_id()
+        cached_text = read_book_text_cache_sql(book_id, uid)
+        if cached_text is not None:
+            return cached_text
+
     if book_storage_enabled():
         payload = read_storage_bytes(book_text_storage_key(book_id))
         if payload is None:
             raise FileNotFoundError(book_id)
-        return payload.decode("utf-8")
+        text = payload.decode("utf-8")
+    else:
+        text = book_text_path(book_id).read_text(encoding="utf-8")
 
-    return book_text_path(book_id).read_text(encoding="utf-8")
+    if progress_store_configured() and uid is not None:
+        write_book_text_cache_sql(book_id, uid, text)
+    return text
 
 
 def write_book_text(book_id: str, text: str) -> None:
+    if progress_store_configured():
+        write_book_text_cache_sql(book_id, current_user_id(), text)
+
     if book_storage_enabled():
         write_storage_bytes(book_text_storage_key(book_id), text.encode("utf-8"), content_type="text/plain; charset=utf-8")
         return
@@ -3540,6 +3829,9 @@ def serialize_book(meta: dict[str, Any]) -> dict[str, Any]:
         "excerpt": meta["excerpt"],
         "highlightCount": highlight_count,
         "latestAudio": latest_audio,
+        "readingProgress": meta.get("_readingProgress"),
+        "audioProgress": meta.get("_audioProgress"),
+        "sourceFormat": meta.get("sourceFormat"),
     }
 
 
@@ -4409,6 +4701,30 @@ def cleanup_preview_files(limit: int = 20) -> None:
         stale_file.unlink(missing_ok=True)
 
 
+def normalize_book_suffix(file_name: str) -> str:
+    suffix = Path(file_name).suffix.lower()
+    if suffix not in SUPPORTED_BOOK_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported book format. Upload one of: {SUPPORTED_BOOK_FORMAT_LABEL}.",
+        )
+    return suffix
+
+
+def book_content_type_for_suffix(suffix: str, fallback: str | None = None) -> str:
+    if fallback and fallback.strip() and fallback != "application/octet-stream":
+        return fallback.strip()
+    return SUPPORTED_BOOK_EXTENSIONS.get(suffix.lower(), "application/octet-stream")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def load_book_or_404(book_id: str) -> dict[str, Any]:
     payload = read_book_meta(book_id)
     if payload is None:
@@ -4422,12 +4738,27 @@ def import_book_source(
     source_path: Path,
     *,
     source_storage: dict[str, str] | None = None,
+    source_sha256: str | None = None,
     title_override: str | None = None,
 ) -> dict[str, Any]:
+    suffix = normalize_book_suffix(file_name)
+    uid = current_user_id() if progress_store_configured() else None
+    source_format = suffix.lstrip(".")
+    cached_import = (
+        _get_book_import_cache_sql(source_sha256, uid)
+        if uid is not None and source_sha256
+        else None
+    )
     try:
-        raw_text = pdf_to_audio.extract_text(source_path)
-        cleaned_text = pdf_to_audio.clean_text(raw_text)
-        page_count = len(PdfReader(str(source_path)).pages)
+        if cached_import is not None:
+            cleaned_text = str(cached_import["cleanedText"])
+            page_count = int(cached_import["pageCount"])
+            source_format = str(cached_import.get("sourceFormat") or source_format)
+        else:
+            extracted = pdf_to_audio.extract_book_text(source_path)
+            cleaned_text = pdf_to_audio.clean_text(extracted.text)
+            page_count = extracted.page_count or pdf_to_audio.estimate_page_count(cleaned_text)
+            source_format = extracted.format or source_format
     except Exception:
         if not book_storage_enabled():
             shutil.rmtree(book_dir(book_id), ignore_errors=True)
@@ -4438,10 +4769,20 @@ def import_book_source(
             shutil.rmtree(book_dir(book_id), ignore_errors=True)
         raise HTTPException(
             status_code=422,
-            detail="No extractable text was found in this PDF. Scanned PDFs need OCR first.",
+            detail="No extractable text was found in this file. Scanned PDFs need OCR first, and DRM-protected ebooks must be converted before upload.",
         )
 
-    write_book_text(book_id, cleaned_text)
+    if page_count <= 0:
+        page_count = pdf_to_audio.estimate_page_count(cleaned_text)
+
+    if uid is not None and source_sha256 and cached_import is None:
+        _write_book_import_cache_sql(
+            source_sha256=source_sha256,
+            user_id=uid,
+            source_format=source_format,
+            cleaned_text=cleaned_text,
+            page_count=page_count,
+        )
 
     title = resolve_book_title(title_override, file_name)
     meta = {
@@ -4454,6 +4795,8 @@ def import_book_source(
         "excerpt": cleaned_text[:260],
         "latestAudio": None,
         "audioHistory": [],
+        "sourceSha256": source_sha256,
+        "sourceFormat": source_format,
         "_highlightCount": 0,
     }
     if source_storage:
@@ -4461,7 +4804,16 @@ def import_book_source(
     else:
         meta["sourcePath"] = str(source_path.resolve())
 
-    write_book_meta(book_id, meta)
+    try:
+        write_book_meta(book_id, meta)
+        write_book_text(book_id, cleaned_text)
+    except Exception:
+        if progress_store_configured():
+            try:
+                _delete_book_sql(book_id, current_user_id())
+            except Exception:
+                logger.exception("Failed to roll back book metadata for %s after import error", book_id)
+        raise
     return serialize_book(meta)
 
 
@@ -4469,9 +4821,7 @@ def save_uploaded_book(upload: UploadFile, title_override: str | None = None) ->
     if not upload.filename:
         raise HTTPException(status_code=400, detail="Missing filename.")
 
-    suffix = Path(upload.filename).suffix.lower()
-    if suffix != ".pdf":
-        raise HTTPException(status_code=400, detail="Only PDF uploads are supported in the web app.")
+    suffix = normalize_book_suffix(upload.filename)
 
     book_id = uuid.uuid4().hex[:12]
     target_dir = book_dir(book_id)
@@ -4481,11 +4831,22 @@ def save_uploaded_book(upload: UploadFile, title_override: str | None = None) ->
     with source_path.open("wb") as handle:
         shutil.copyfileobj(upload.file, handle)
 
+    source_sha256 = sha256_file(source_path)
     source_storage: dict[str, str] | None = None
     try:
+        if progress_store_configured():
+            existing = _get_book_by_source_hash_sql(source_sha256, current_user_id())
+            if existing is not None:
+                shutil.rmtree(target_dir, ignore_errors=True)
+                return serialize_book(existing)
+
         if book_storage_enabled():
-            object_key = book_source_storage_key(book_id)
-            write_storage_bytes(object_key, source_path.read_bytes(), content_type="application/pdf")
+            object_key = book_source_storage_key(book_id, suffix)
+            write_storage_bytes(
+                object_key,
+                source_path.read_bytes(),
+                content_type=book_content_type_for_suffix(suffix, upload.content_type),
+            )
             source_storage = {
                 "bucket": BOOK_STORAGE_BUCKET,
                 "key": object_key,
@@ -4496,6 +4857,7 @@ def save_uploaded_book(upload: UploadFile, title_override: str | None = None) ->
             upload.filename,
             source_path,
             source_storage=source_storage,
+            source_sha256=source_sha256,
             title_override=title_override,
         )
     except Exception:
@@ -4514,12 +4876,11 @@ def create_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str,
             detail="Direct book uploads are not configured. Set BOOK_STORAGE_BUCKET and AWS credentials for durable hosted uploads.",
         )
 
-    suffix = Path(request.fileName).suffix.lower()
-    if suffix != ".pdf":
-        raise HTTPException(status_code=400, detail="Only PDF uploads are supported in the web app.")
+    suffix = normalize_book_suffix(request.fileName)
+    content_type = book_content_type_for_suffix(suffix, request.contentType)
 
     book_id = uuid.uuid4().hex[:12]
-    object_key = book_source_storage_key(book_id)
+    object_key = book_source_storage_key(book_id, suffix)
     client = create_book_storage_client()
 
     try:
@@ -4527,10 +4888,10 @@ def create_direct_book_upload(request: DirectBookUploadInitRequest) -> dict[str,
             Bucket=BOOK_STORAGE_BUCKET,
             Key=object_key,
             Fields={
-                "Content-Type": "application/pdf",
+                "Content-Type": content_type,
             },
             Conditions=[
-                {"Content-Type": "application/pdf"},
+                {"Content-Type": content_type},
                 ["content-length-range", 1, BOOK_STORAGE_MAX_UPLOAD_BYTES],
             ],
             ExpiresIn=3600,
@@ -4555,11 +4916,9 @@ def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dic
             detail="Direct book uploads are not configured. Set BOOK_STORAGE_BUCKET and AWS credentials for durable hosted uploads.",
         )
 
-    suffix = Path(request.fileName).suffix.lower()
-    if suffix != ".pdf":
-        raise HTTPException(status_code=400, detail="Only PDF uploads are supported in the web app.")
+    suffix = normalize_book_suffix(request.fileName)
 
-    object_key = book_source_storage_key(request.bookId)
+    object_key = book_source_storage_key(request.bookId, suffix)
     temp_root = RUNTIME_ROOT / "direct-imports"
     temp_root.mkdir(parents=True, exist_ok=True)
 
@@ -4567,6 +4926,12 @@ def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dic
         temp_source = Path(temp_dir) / f"source{suffix}"
         try:
             download_storage_object(object_key, temp_source)
+            source_sha256 = sha256_file(temp_source)
+            if progress_store_configured():
+                existing = _get_book_by_source_hash_sql(source_sha256, current_user_id())
+                if existing is not None:
+                    delete_storage_prefix(book_storage_base_prefix(request.bookId))
+                    return serialize_book(existing)
             return import_book_source(
                 request.bookId,
                 request.fileName,
@@ -4574,7 +4939,9 @@ def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dic
                 source_storage={
                     "bucket": BOOK_STORAGE_BUCKET,
                     "key": object_key,
+                    "contentType": book_content_type_for_suffix(suffix),
                 },
+                source_sha256=source_sha256,
                 title_override=request.title,
             )
         except FileNotFoundError as exc:
@@ -4613,14 +4980,20 @@ def source_file_response(book_id: str):
         }
         return StreamingResponse(
             response["Body"].iter_chunks(),
-            media_type=response.get("ContentType") or "application/pdf",
+            media_type=response.get("ContentType")
+            or source_storage.get("contentType")
+            or book_content_type_for_suffix(Path(str(meta.get("fileName") or "")).suffix.lower()),
             headers=headers,
         )
 
     source_path = resolve_local_source_path(meta)
     if not source_path.exists():
         raise HTTPException(status_code=404, detail="Source PDF not found.")
-    return FileResponse(source_path, media_type="application/pdf", filename=meta.get("fileName") or source_path.name)
+    return FileResponse(
+        source_path,
+        media_type=book_content_type_for_suffix(source_path.suffix),
+        filename=meta.get("fileName") or source_path.name,
+    )
 
 
 def append_audio_version(book_id: str, version: dict[str, Any]) -> dict[str, Any]:
@@ -5593,6 +5966,7 @@ def run_generation_job(job_id: str, book_id: str, request: GenerateAudioRequest)
 
 def dispatch_generation_job(book_id: str, request: GenerateAudioRequest) -> dict[str, Any]:
     job_id = uuid.uuid4().hex
+    uid = current_user_id()
     payload = {
         "id": job_id,
         "bookId": book_id,
@@ -5611,6 +5985,7 @@ def dispatch_generation_job(book_id: str, request: GenerateAudioRequest) -> dict
     persist_job(payload)
 
     def runner() -> None:
+        tok = _current_user_id.set(uid)
         try:
             run_generation_job(job_id, book_id, request)
         except JobCancelledError:
@@ -5630,6 +6005,8 @@ def dispatch_generation_job(book_id: str, request: GenerateAudioRequest) -> dict
                 message="Audio generation failed.",
                 finishedAt=utc_now(),
             )
+        finally:
+            _current_user_id.reset(tok)
 
     threading.Thread(
         target=runner,
@@ -5931,6 +6308,7 @@ def build_vocabulary_context_runtime() -> tuple[list[Any], list[Any], list[Any],
 ) = build_vocabulary_context_runtime()
 vocabulary_service = VocabularyStudioService(
     DATA_ROOT,
+    user_id_provider=current_user_id,
     dictionary_lookup=lookup_offline_dictionary,
     context_generators=vocabulary_context_generators,
     lesson_generators=vocabulary_lesson_generators,

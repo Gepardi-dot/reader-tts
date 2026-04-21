@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { api } from '@/shared/api/client'
+import { api, request } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -23,6 +23,25 @@ interface ReaderPayload {
     color: 'amber' | 'rose' | 'sky'; text: string; note: string | null
     kind: 'highlight' | 'note' | 'vocabulary'
   }>
+}
+
+interface ReadingProgress {
+  pageNumber: number
+  totalPages: number
+  textStart: number
+  textEnd: number
+  textLength: number
+  updatedAt: string
+}
+
+interface ProgressPayload {
+  reading: ReadingProgress | null
+  audio?: {
+    url: string
+    currentTime: number
+    wasPlaying: boolean
+    updatedAt: string
+  } | null
 }
 
 interface Appearance {
@@ -240,7 +259,7 @@ interface SelectionMenuProps {
 }
 
 function SelectionMenu({
-  sel, bookId,
+  sel, bookId, fullText,
   onClose, onOpenPanel, onToast, onPlayWord,
 }: SelectionMenuProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null)
@@ -285,8 +304,22 @@ function SelectionMenu({
         try {
           const deckId = await getOrCreateDeck()
           if (!deckId) { onToast('No vocabulary deck'); break }
+          const contextStart = Math.max(0, sel.startOffset - 140)
+          const contextEnd = Math.min(fullText.length, sel.endOffset + 140)
           await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
-            noteType: 'basic', front: sel.text, back: null, topic: 'Reading',
+            noteType: 'basic',
+            front: sel.text,
+            back: null,
+            topic: 'Reading',
+            tags: ['reader'],
+            sourceRef: `reader-vocab:${sel.text.trim().toLocaleLowerCase()}`,
+            metadata: {
+              source: 'reader-selection',
+              bookId,
+              start: sel.startOffset,
+              end: sel.endOffset,
+              context: fullText.slice(contextStart, contextEnd),
+            },
           })
           queryClient.invalidateQueries({ queryKey: ['decks'] })
           queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
@@ -1182,19 +1215,15 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
 
   async function fetchChunk(idx: number, chunk: AudioChunk, signal: AbortSignal): Promise<string | null> {
     updateChunk(idx, { status: 'fetching' })
-    const token = localStorage.getItem('storybook-auth-key') ?? ''
     try {
-      const res = await fetch(`/api/books/${bookId}/live-audio`, {
+      const { url } = await request<{ url: string }>(`/api/books/${bookId}/live-audio`, {
         method: 'POST', signal,
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({
           provider, voice, model: null, output_format: 'mp3',
           narration_style: '', ...pacingFor(provider),
           pageNumber: 1, start: chunk.start, end: chunk.end, text: chunk.text,
         }),
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const { url } = await res.json()
       updateChunk(idx, { status: 'ready', url })
       return url
     } catch (e) {
@@ -1572,6 +1601,7 @@ function Toast({ msg }: { msg: string }) {
 
 export function ReaderRoute() {
   const { bookId } = useParams<{ bookId: string }>()
+  const queryClient = useQueryClient()
 
   const [appearance,    setAppearance]    = useState<Appearance>(loadAppearance)
   const [sheet,         setSheet]         = useState<'none' | 'appearance' | 'audio'>('none')
@@ -1589,6 +1619,7 @@ export function ReaderRoute() {
   const audioHandleRef  = useRef<AudioHandle | null>(null)
 
   const lastScrollY           = useRef(0)
+  const latestScrollPct       = useRef(0)
   const scrollTimer           = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveTimer             = useRef<ReturnType<typeof setTimeout> | null>(null)
   const justShowedMenu        = useRef(false)
@@ -1607,7 +1638,7 @@ export function ReaderRoute() {
 
   const { data: progressData } = useQuery({
     queryKey: ['progress', bookId],
-    queryFn:  () => api.get<{ reading: { textStart: number; textLength: number } | null }>(`/api/books/${bookId}/progress`),
+    queryFn:  () => api.get<ProgressPayload>(`/api/books/${bookId}/progress`),
     enabled:  Boolean(bookId),
   })
 
@@ -1648,6 +1679,7 @@ export function ReaderRoute() {
     const pct = textStart / textLength
     const maxScroll = document.documentElement.scrollHeight - window.innerHeight
     window.scrollTo({ top: pct * maxScroll, behavior: 'instant' })
+    scrolledToOffsetRef.current = true
   }, [progressData, payload?.text])
 
   // Persist appearance
@@ -1685,7 +1717,6 @@ export function ReaderRoute() {
       const ctrl = new AbortController()
       prefetchRef.current = ctrl
 
-      const token = localStorage.getItem('storybook-auth-key') ?? ''
       const { lengthScale, sentenceSilence } = pacingFor(ttsProvider)
       const start = Math.max(0, Math.round(scrollPct * payload.text.length) - 200)
       const fullSlice = payload.text.slice(start, start + 2200)
@@ -1699,9 +1730,8 @@ export function ReaderRoute() {
         for (const chunk of chunkDefs) {
           if (ctrl.signal.aborted) return
           try {
-            await fetch(`/api/books/${bookId}/live-audio`, {
+            await request(`/api/books/${bookId}/live-audio`, {
               method: 'POST', signal: ctrl.signal,
-              headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
               body: JSON.stringify({
                 provider: ttsProvider, voice: ttsVoice, model: null, output_format: 'mp3',
                 narration_style: '', length_scale: lengthScale, sentence_silence: sentenceSilence,
@@ -1723,23 +1753,42 @@ export function ReaderRoute() {
   }
 
   function saveProgress(pct: number) {
-    if (!payload?.text) return
+    if (!payload?.text || !bookId) return
     const textLength = payload.text.length
     const textStart  = Math.round(pct * textLength)
+    const reading: ReadingProgress = {
+      pageNumber: Math.max(1, Math.round(pct * 100)),
+      totalPages: 100,
+      textStart,
+      textEnd: Math.min(textLength, textStart + 2200),
+      textLength,
+      updatedAt: new Date().toISOString(),
+    }
     try {
       const map = JSON.parse(localStorage.getItem(PROGRESS_KEY) ?? '{}')
-      map[bookId!] = { pageNumber: Math.round(pct * 100), totalPages: 100 }
+      map[bookId] = { pageNumber: reading.pageNumber, totalPages: reading.totalPages, updatedAt: reading.updatedAt }
       localStorage.setItem(PROGRESS_KEY, JSON.stringify(map))
     } catch { /* swallow */ }
-    const token = localStorage.getItem('storybook-auth-key') ?? ''
-    fetch(`/api/books/${bookId}/progress/reading`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({
-        pageNumber: Math.max(1, Math.round(pct * 100)), totalPages: 100,
-        textStart, textEnd: textStart + 2200, textLength,
-      }),
-    }).catch(() => {})
+
+    queryClient.setQueryData<ProgressPayload>(['progress', bookId], (current) => ({
+      ...(current ?? {}),
+      reading,
+    }))
+    queryClient.setQueryData<Array<{ id: string; readingProgress?: ReadingProgress | null }>>(
+      ['books'],
+      (current) => current?.map((book) => (
+        book.id === bookId ? { ...book, readingProgress: reading } : book
+      )),
+    )
+
+    api.put<ReadingProgress>(`/api/books/${bookId}/progress/reading`, reading)
+      .then((saved) => {
+        queryClient.setQueryData<ProgressPayload>(['progress', bookId], (current) => ({
+          ...(current ?? {}),
+          reading: saved,
+        }))
+      })
+      .catch(() => {})
   }
 
   // Scroll tracking
@@ -1748,6 +1797,7 @@ export function ReaderRoute() {
       const y   = window.scrollY
       const max = document.documentElement.scrollHeight - window.innerHeight
       const pct = max > 0 ? Math.min(1, y / max) : 0
+      latestScrollPct.current = pct
       setScrollPct(pct)
       const goingDown = y > lastScrollY.current && y > 60
       setBarVisible(!goingDown)
@@ -1761,6 +1811,21 @@ export function ReaderRoute() {
     return () => window.removeEventListener('scroll', onScroll)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text])
+
+  useEffect(() => {
+    function flushProgress() {
+      saveProgress(latestScrollPct.current)
+    }
+    function onVisibilityChange() {
+      if (document.visibilityState === 'hidden') flushProgress()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      flushProgress()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payload?.text, bookId])
 
   // Toast helper
   function showToast(msg: string) {
@@ -1848,19 +1913,15 @@ export function ReaderRoute() {
     wordAudioRef.current?.pause()
     setWordAudio({ word, status: 'loading' })
     const snippet = (payload?.text ?? '').slice(startOffset, startOffset + 2200)
-    const token   = localStorage.getItem('storybook-auth-key') ?? ''
     try {
-      const res = await fetch(`/api/books/${bookId}/live-audio`, {
+      const { url } = await request<{ url: string }>(`/api/books/${bookId}/live-audio`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({
           provider: ttsProvider, voice: ttsVoice, model: null, output_format: 'mp3',
           narration_style: '', ...pacingFor(ttsProvider),
           pageNumber: 1, start: 0, end: snippet.length, text: snippet,
         }),
       })
-      if (!res.ok) throw new Error('failed')
-      const { url } = await res.json()
       const audio = new Audio(url)
       wordAudioRef.current = audio
       audio.play()

@@ -84,6 +84,51 @@ class VocabularyStudioTestCase(unittest.TestCase):
         self.assertEqual(payload["notes"][0]["cards"][0]["cardType"], "basic")
         self.assertEqual(payload["notes"][0]["cards"][1]["cardType"], "reverse")
 
+    def test_reader_saved_word_without_back_uses_dictionary_definition(self) -> None:
+        deck = self.service.create_deck(DeckCreateRequest(title="Reader deck"))
+        note = self.service.create_note(
+            deck["id"],
+            NoteCreateRequest(
+                noteType="basic",
+                front="luminous",
+                back=None,
+                sourceRef="reader-vocab:luminous",
+                metadata={"source": "reader-selection"},
+            ),
+        )
+
+        self.assertEqual(note["note"]["front"], "luminous")
+        self.assertEqual(note["note"]["back"], "luminous definition")
+        self.assertEqual(note["note"]["metadata"]["dictionarySource"], "stub-dictionary")
+
+        duplicate = self.service.create_note(
+            deck["id"],
+            NoteCreateRequest(
+                noteType="basic",
+                front="luminous",
+                back=None,
+                sourceRef="reader-vocab:luminous",
+            ),
+        )
+        self.assertEqual(duplicate["note"]["id"], note["note"]["id"])
+        dashboard = self.service.get_deck_dashboard(deck["id"])
+        self.assertEqual(dashboard["deck"]["noteCount"], 1)
+
+    def test_dynamic_user_provider_isolates_vocabulary_data(self) -> None:
+        active_user = {"id": "user-a"}
+        service = VocabularyStudioService(
+            self.tempdir,
+            user_id_provider=lambda: active_user["id"],
+        )
+
+        service.create_deck(DeckCreateRequest(title="A deck"))
+        active_user["id"] = "user-b"
+        service.create_deck(DeckCreateRequest(title="B deck"))
+
+        self.assertEqual([deck["title"] for deck in service.list_decks()], ["B deck"])
+        active_user["id"] = "user-a"
+        self.assertEqual([deck["title"] for deck in service.list_decks()], ["A deck"])
+
     def test_due_cards_are_served_before_new_cards(self) -> None:
         deck = self.service.create_deck(DeckCreateRequest(title="Priority deck"))
         self.service.create_note(deck["id"], NoteCreateRequest(noteType="basic", front="cue one", back="answer one"))
