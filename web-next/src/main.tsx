@@ -26,13 +26,23 @@ const persister = createSyncStoragePersister({
   throttleTime: 1000,
 })
 
+let activeUserId = ''
+
 // Keep the cached JWT in sync with Supabase session (covers login, logout, token refresh)
 supabase.auth.onAuthStateChange((_event, session) => {
   const token = session?.access_token ?? ''
+  const nextUserId = session?.user.id ?? ''
+  if (activeUserId && nextUserId && nextUserId !== activeUserId) {
+    queryClient.clear()
+    window.localStorage.removeItem('storybook-qcache-v1')
+  }
+  activeUserId = nextUserId
   setCachedToken(token)
   if (!token) {
     // On sign-out, wipe the query cache so no stale data leaks between users
     queryClient.clear()
+    window.localStorage.removeItem('storybook-qcache-v1')
+    window.localStorage.removeItem('storybook-reader-progress')
   } else {
     // Prefetch books immediately after sign-in so the library is instant
     queryClient.prefetchQuery({
@@ -49,6 +59,7 @@ supabase.auth.onAuthStateChange((_event, session) => {
 // Restore token from existing session on app start (before any render)
 supabase.auth.getSession().then(({ data }) => {
   if (data.session?.access_token) {
+    activeUserId = data.session.user.id
     setCachedToken(data.session.access_token)
   }
 })

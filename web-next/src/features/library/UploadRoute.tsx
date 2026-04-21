@@ -1,9 +1,10 @@
 import { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { Upload, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { AuthError, uploadBook } from '@/shared/api/client'
+import { AuthError, BOOK_ACCEPT, isSupportedBookFile, uploadBook } from '@/shared/api/client'
 import { supabase } from '@/lib/supabase'
 
 export function UploadRoute() {
@@ -13,6 +14,7 @@ export function UploadRoute() {
   const [drag, setDrag] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
   async function handleUpload() {
     if (!file) return
@@ -20,6 +22,15 @@ export function UploadRoute() {
     setError('')
     try {
       const book = await uploadBook(file)
+      queryClient.setQueryData<unknown[]>(['books'], (current) => {
+        const items = Array.isArray(current) ? current : []
+        return [book, ...items.filter((item) => {
+          return typeof item === 'object' && item !== null && 'id' in item
+            ? item.id !== book.id
+            : true
+        })]
+      })
+      queryClient.invalidateQueries({ queryKey: ['books'] })
       navigate(`/book/${book.id}`)
     } catch (e) {
       if (e instanceof AuthError) {
@@ -41,7 +52,13 @@ export function UploadRoute() {
     e.preventDefault()
     setDrag(false)
     const dropped = e.dataTransfer.files[0]
-    if (dropped?.type === 'application/pdf') setFile(dropped)
+    if (!dropped) return
+    if (isSupportedBookFile(dropped)) {
+      setFile(dropped)
+      setError('')
+    } else {
+      setError('Unsupported format. Upload PDF, EPUB, TXT, Markdown, HTML, or DOCX.')
+    }
   }
 
   return (
@@ -75,8 +92,8 @@ export function UploadRoute() {
           <>
             <Upload size={40} className="text-muted-foreground/60" />
             <div className="text-center">
-              <p className="font-medium text-foreground">Drop a PDF here</p>
-              <p className="text-sm text-muted-foreground mt-1">or click to browse files</p>
+              <p className="font-medium text-foreground">Drop a book here</p>
+              <p className="text-sm text-muted-foreground mt-1">PDF, EPUB, TXT, Markdown, HTML, or DOCX</p>
             </div>
           </>
         )}
@@ -85,9 +102,22 @@ export function UploadRoute() {
       <input
         ref={inputRef}
         type="file"
-        accept="application/pdf"
+        accept={BOOK_ACCEPT}
         className="sr-only"
-        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+        onChange={(e) => {
+          const selected = e.target.files?.[0] ?? null
+          if (!selected) {
+            setFile(null)
+            return
+          }
+          if (isSupportedBookFile(selected)) {
+            setFile(selected)
+            setError('')
+          } else {
+            setFile(null)
+            setError('Unsupported format. Upload PDF, EPUB, TXT, Markdown, HTML, or DOCX.')
+          }
+        }}
       />
 
       {error && <p className="text-sm text-destructive mt-3">{error}</p>}

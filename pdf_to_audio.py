@@ -10,7 +10,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 import wave
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -36,7 +39,17 @@ DEFAULT_FFMPEG_GLOB = (
     / "bin"
     / "ffmpeg.exe"
 )
-SUPPORTED_EXTENSIONS = {".pdf", ".epub", ".txt"}
+SUPPORTED_EXTENSIONS = {
+    ".pdf",
+    ".epub",
+    ".txt",
+    ".md",
+    ".markdown",
+    ".html",
+    ".htm",
+    ".xhtml",
+    ".docx",
+}
 DEFAULT_GEMMA_CLEANUP_BASE_URL = (
     os.getenv("GEMMA_CLEANUP_BASE_URL") or os.getenv("GEMMA_BASE_URL") or "http://127.0.0.1:11434"
 )
@@ -59,6 +72,13 @@ GEMMA_CLEANUP_SYSTEM_PROMPT = (
     "Do not summarize, do not paraphrase, do not add new sentences, and do not censor the text. "
     "Return valid JSON only."
 )
+
+
+@dataclass(frozen=True)
+class ExtractedBookText:
+    text: str
+    page_count: int
+    format: str
 
 
 def find_binary(explicit: str | None, env_name: str, fallback: Path, glob_pattern: Path | None = None) -> Path:
@@ -148,19 +168,131 @@ def extract_pdf_text(path: Path) -> str:
     return "\n\n".join(pages)
 
 
+def _html_to_reading_text(markup: bytes | str) -> str:
+    soup = BeautifulSoup(markup, "lxml")
+    for tag in soup(["script", "style", "noscript", "svg", "canvas"]):
+        tag.decompose()
+
+    root = soup.body or soup
+    block_selectors = [
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "p", "blockquote", "li", "pre", "td", "th",
+    ]
+    parts: list[str] = []
+    for node in root.find_all(block_selectors):
+        text = node.get_text(" ", strip=True)
+        if text:
+            parts.append(text)
+
+    if not parts:
+        fallback = root.get_text("\n\n", strip=True)
+        return fallback
+    return "\n\n".join(parts)
+
+
 def extract_epub_text(path: Path) -> str:
     book = epub.read_epub(str(path))
+    item_by_id = {item.get_id(): item for item in book.get_items_of_type(ITEM_DOCUMENT)}
     parts: list[str] = []
-    for item in book.get_items_of_type(ITEM_DOCUMENT):
-        soup = BeautifulSoup(item.get_body_content(), "lxml")
-        text = soup.get_text(" ", strip=True)
+
+    ordered_items = []
+    for spine_item in book.spine:
+        item_id = spine_item[0] if isinstance(spine_item, tuple) else spine_item
+        item = item_by_id.get(str(item_id))
+        if item is not None:
+            ordered_items.append(item)
+    if not ordered_items:
+        ordered_items = list(book.get_items_of_type(ITEM_DOCUMENT))
+
+    seen: set[str] = set()
+    for item in ordered_items:
+        item_id = item.get_id()
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        text = _html_to_reading_text(item.get_body_content())
         if text:
             parts.append(text)
     return "\n\n".join(parts)
 
 
 def extract_txt_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="ignore")
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp1252", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def extract_markdown_text(path: Path) -> str:
+    text = extract_txt_text(path)
+    text = re.sub(r"(?s)\A---\s*\n.*?\n---\s*\n", "", text, count=1)
+    text = re.sub(r"(?s)```.*?```", "", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+    text = re.sub(r"(?m)^\s{0,3}>\s?", "", text)
+    text = re.sub(r"(?m)^\s*[-*+]\s+", "", text)
+    text = re.sub(r"(?m)^\s*\d+[.)]\s+", "", text)
+    text = re.sub(r"[*_`]{1,3}", "", text)
+    return text
+
+
+def extract_html_text(path: Path) -> str:
+    return _html_to_reading_text(path.read_bytes())
+
+
+def extract_docx_text(path: Path) -> str:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            xml_bytes = archive.read("word/document.xml")
+    except (KeyError, zipfile.BadZipFile) as exc:
+        raise ValueError(f"Invalid DOCX file: {path.name}") from exc
+
+    root = ET.fromstring(xml_bytes)
+    paragraphs: list[str] = []
+    for paragraph in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
+        pieces: list[str] = []
+        for node in paragraph.iter():
+            tag = node.tag.rsplit("}", 1)[-1]
+            if tag == "t" and node.text:
+                pieces.append(node.text)
+            elif tag == "tab":
+                pieces.append("\t")
+            elif tag in {"br", "cr"}:
+                pieces.append("\n")
+        text = "".join(pieces).strip()
+        if text:
+            paragraphs.append(text)
+    return "\n\n".join(paragraphs)
+
+
+def estimate_page_count(text: str, *, chars_per_page: int = 1800) -> int:
+    stripped = text.strip()
+    if not stripped:
+        return 0
+    return max(1, (len(stripped) + chars_per_page - 1) // chars_per_page)
+
+
+def extract_book_text(path: Path) -> ExtractedBookText:
+    suffix = path.suffix.lower()
+    text = extract_text(path)
+    if suffix == ".pdf":
+        try:
+            page_count = len(PdfReader(str(path)).pages)
+        except Exception:
+            page_count = estimate_page_count(text)
+    elif suffix == ".epub":
+        try:
+            book = epub.read_epub(str(path))
+            page_count = len(book.spine) or estimate_page_count(text)
+        except Exception:
+            page_count = estimate_page_count(text)
+    else:
+        page_count = estimate_page_count(text)
+    return ExtractedBookText(text=text, page_count=page_count, format=suffix.lstrip("."))
 
 
 def extract_text(path: Path) -> str:
@@ -171,6 +303,12 @@ def extract_text(path: Path) -> str:
         return extract_epub_text(path)
     if suffix == ".txt":
         return extract_txt_text(path)
+    if suffix in {".md", ".markdown"}:
+        return extract_markdown_text(path)
+    if suffix in {".html", ".htm", ".xhtml"}:
+        return extract_html_text(path)
+    if suffix == ".docx":
+        return extract_docx_text(path)
     raise ValueError(f"Unsupported file type: {path.suffix}")
 
 
