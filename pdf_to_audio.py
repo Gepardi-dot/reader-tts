@@ -161,10 +161,28 @@ def collect_inputs(input_paths: list[str]) -> list[Path]:
 
 
 def extract_pdf_text(path: Path) -> str:
-    reader = PdfReader(str(path))
+    try:
+        reader = PdfReader(str(path), strict=False)
+    except Exception as exc:
+        raise ValueError(f"Invalid or unsupported PDF file: {path.name}") from exc
+
+    if reader.is_encrypted:
+        try:
+            reader.decrypt("")
+        except Exception:
+            pass
+
     pages: list[str] = []
-    for page in reader.pages:
-        pages.append(page.extract_text() or "")
+    try:
+        page_iterable = reader.pages
+    except Exception as exc:
+        raise ValueError(f"Invalid or unsupported PDF file: {path.name}") from exc
+
+    for page in page_iterable:
+        try:
+            pages.append(page.extract_text() or "")
+        except Exception:
+            pages.append("")
     return "\n\n".join(pages)
 
 
@@ -251,7 +269,10 @@ def extract_docx_text(path: Path) -> str:
     except (KeyError, zipfile.BadZipFile) as exc:
         raise ValueError(f"Invalid DOCX file: {path.name}") from exc
 
-    root = ET.fromstring(xml_bytes)
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        raise ValueError(f"Invalid DOCX document XML: {path.name}") from exc
     paragraphs: list[str] = []
     for paragraph in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
         pieces: list[str] = []
