@@ -52,11 +52,27 @@ interface Appearance {
   theme: 'paper' | 'white' | 'dark'
 }
 
+interface SelectionRect {
+  left: number; top: number; width: number; height: number
+}
+
 interface SelectionState {
   viewportX: number; viewportY: number; selHeight: number
   selLeft: number; selWidth: number   // for custom highlight overlay
+  rects: SelectionRect[]
   text: string; mode: 'word' | 'sentence'
   startOffset: number; endOffset: number
+}
+
+interface LocatedSelection {
+  text: string
+  startOffset: number
+  endOffset: number
+}
+
+interface ReaderParagraph {
+  text: string
+  startOffset: number
 }
 
 type SecondaryPanel =
@@ -141,6 +157,97 @@ function findTextOffset(needle: string, haystack: string, approxPct: number): nu
   let idx = haystack.indexOf(needle, searchFrom)
   if (idx < 0) idx = haystack.indexOf(needle)
   return Math.max(0, idx)
+}
+
+function buildReaderParagraphs(text: string): ReaderParagraph[] {
+  if (!text) return []
+
+  const paragraphs: ReaderParagraph[] = []
+  const separator = /\r?\n(?:[ \t]*\r?\n)+/g
+  let startOffset = 0
+  let match: RegExpExecArray | null
+
+  while ((match = separator.exec(text)) !== null) {
+    const paragraph = text.slice(startOffset, match.index)
+    if (paragraph.length > 0) {
+      paragraphs.push({ text: paragraph, startOffset })
+    }
+    startOffset = match.index + match[0].length
+  }
+
+  const paragraph = text.slice(startOffset)
+  if (paragraph.length > 0) {
+    paragraphs.push({ text: paragraph, startOffset })
+  }
+
+  return paragraphs
+}
+
+function toSelectionRect(rect: DOMRect): SelectionRect {
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+}
+
+function selectionRectsFromRange(range: Range, fallbackRect: DOMRect): SelectionRect[] {
+  const rects = Array.from(range.getClientRects())
+    .filter(rect => rect.width > 0 && rect.height > 0)
+    .map(toSelectionRect)
+
+  return rects.length > 0 ? rects : [toSelectionRect(fallbackRect)]
+}
+
+function paragraphForNode(node: Node, root: HTMLElement): HTMLElement | null {
+  const element = node.nodeType === Node.ELEMENT_NODE
+    ? node as Element
+    : node.parentElement
+  const paragraph = element?.closest<HTMLElement>('[data-reader-paragraph-start]')
+  return paragraph && root.contains(paragraph) ? paragraph : null
+}
+
+function offsetWithinParagraph(paragraph: HTMLElement, container: Node, offset: number): number | null {
+  if (container !== paragraph && !paragraph.contains(container)) return null
+
+  const range = document.createRange()
+  try {
+    range.selectNodeContents(paragraph)
+    range.setEnd(container, offset)
+    return range.toString().length
+  } catch {
+    return null
+  }
+}
+
+function sourceOffsetForDomPoint(container: Node, offset: number, root: HTMLElement): number | null {
+  const paragraph = paragraphForNode(container, root)
+  if (!paragraph) return null
+
+  const startAttr = paragraph.dataset.readerParagraphStart
+  if (!startAttr) return null
+
+  const paragraphStart = Number(startAttr)
+  if (!Number.isFinite(paragraphStart)) return null
+
+  const localOffset = offsetWithinParagraph(paragraph, container, offset)
+  return localOffset === null ? null : paragraphStart + localOffset
+}
+
+function trimLocatedSelection(startOffset: number, endOffset: number, fullText: string): LocatedSelection | null {
+  let start = Math.max(0, Math.min(startOffset, fullText.length))
+  let end = Math.max(0, Math.min(endOffset, fullText.length))
+  if (end < start) [start, end] = [end, start]
+
+  while (start < end && /\s/.test(fullText[start])) start += 1
+  while (end > start && /\s/.test(fullText[end - 1])) end -= 1
+
+  const text = fullText.slice(start, end)
+  return text ? { text, startOffset: start, endOffset: end } : null
+}
+
+function locateSelectionRange(range: Range, root: HTMLElement, fullText: string): LocatedSelection | null {
+  const startOffset = sourceOffsetForDomPoint(range.startContainer, range.startOffset, root)
+  const endOffset = sourceOffsetForDomPoint(range.endContainer, range.endOffset, root)
+  if (startOffset === null || endOffset === null) return null
+
+  return trimLocatedSelection(startOffset, endOffset, fullText)
 }
 
 function caretRangeAt(x: number, y: number): Range | null {
@@ -1650,6 +1757,7 @@ export function ReaderRoute() {
   const justShowedMenu        = useRef(false)
   const scrolledToOffsetRef   = useRef(false)
   const wordAudioRef      = useRef<HTMLAudioElement | null>(null)
+  const readerTextRef     = useRef<HTMLDivElement | null>(null)
   const panelSnapshotRef  = useRef<SecondaryPanel | null>(null)
   // Keep snapshot in sync without causing render issues
   useEffect(() => { if (panel !== null) panelSnapshotRef.current = panel }, [panel])
@@ -1858,35 +1966,60 @@ export function ReaderRoute() {
     setTimeout(() => setToast(t => (t === msg ? null : t)), 2200)
   }
 
-  // Build SelectionState from rect + text
-  function buildState(text: string, rect: DOMRect, mode: 'word' | 'sentence'): SelectionState {
-    const startOffset = findTextOffset(text, payload?.text ?? '', scrollPct)
+  // Build SelectionState from the actual DOM range when available; text search is only a fallback.
+  function buildState(
+    text: string,
+    rect: DOMRect,
+    mode: 'word' | 'sentence',
+    located?: LocatedSelection | null,
+    rects: SelectionRect[] = [toSelectionRect(rect)],
+  ): SelectionState {
+    const selectedText = located?.text ?? text
+    const startOffset = located?.startOffset ?? findTextOffset(selectedText, payload?.text ?? '', scrollPct)
+    const endOffset = located?.endOffset ?? startOffset + selectedText.length
     return {
       viewportX: rect.left + rect.width / 2,
       viewportY: rect.top,
       selHeight: rect.height,
       selLeft: rect.left,
       selWidth: rect.width,
-      text, mode, startOffset,
-      endOffset: startOffset + text.length,
+      rects,
+      text: selectedText, mode, startOffset,
+      endOffset,
     }
+  }
+
+  function buildStateFromRange(
+    range: Range,
+    mode: 'word' | 'sentence',
+    fallbackText?: string,
+  ): SelectionState | null {
+    const rect = range.getBoundingClientRect()
+    if (rect.width === 0 && rect.height === 0) return null
+
+    const located = readerTextRef.current && payload?.text
+      ? locateSelectionRange(range, readerTextRef.current, payload.text)
+      : null
+    const text = located?.text ?? (fallbackText ?? range.toString()).trim()
+    if (!text) return null
+
+    return buildState(text, rect, mode, located, selectionRectsFromRange(range, rect))
   }
 
   // ── Event handlers ──────────────────────────────────────────────────────────
 
   const handleMouseUp = useCallback((_ev: React.MouseEvent<HTMLDivElement>) => {
-    const sel  = window.getSelection()
-    const text = sel?.toString().trim() ?? ''
-    const wc   = text.split(/\s+/).filter(Boolean).length
-    if (wc < 2) return // single click handled by onClick
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return
     try {
-      const range = sel!.getRangeAt(0)
-      const rect  = range.getBoundingClientRect()
-      if (rect.width === 0 && rect.height === 0) return
+      const range = sel.getRangeAt(0)
+      const state = buildStateFromRange(range, 'sentence')
+      if (!state) return
+      const wc = state.text.split(/\s+/).filter(Boolean).length
+      if (wc < 2) return // single click handled by onClick
       justShowedMenu.current = true
-      const state = buildState(text, rect, 'sentence')
       // Clear native selection immediately → suppresses browser's selection toolbar
-      sel!.removeAllRanges()
+      sel.removeAllRanges()
       setSelection(state)
     } catch { /* swallow */ }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1909,23 +2042,27 @@ export function ReaderRoute() {
     // We show our own highlight overlay instead
     window.getSelection()?.removeAllRanges()
 
-    setSelection(buildState(word.text, word.rect, 'word'))
+    const state = buildStateFromRange(word.range, 'word', word.text)
+    if (!state) return
+
+    setSelection(state)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selection, payload?.text, scrollPct])
 
   const handleTouchEnd = useCallback((_ev: React.TouchEvent<HTMLDivElement>) => {
     setTimeout(() => {
-      const sel  = window.getSelection()
-      const text = sel?.toString().trim() ?? ''
-      const wc   = text.split(/\s+/).filter(Boolean).length
-      if (wc < 1) return
+      const sel = window.getSelection()
+      if (!sel || sel.rangeCount === 0) return
       try {
-        const range = sel!.getRangeAt(0)
-        const rect  = range.getBoundingClientRect()
+        const range = sel.getRangeAt(0)
+        const previewState = buildStateFromRange(range, 'sentence')
+        if (!previewState) return
+        const wc = previewState.text.split(/\s+/).filter(Boolean).length
+        if (wc < 1) return
         justShowedMenu.current = true
-        const state = buildState(text, rect, wc >= 2 ? 'sentence' : 'word')
+        const state = wc >= 2 ? previewState : { ...previewState, mode: 'word' as const }
         // Clear native selection → suppresses iOS/Android selection handles & toolbar
-        sel!.removeAllRanges()
+        sel.removeAllRanges()
         setSelection(state)
       } catch { /* swallow */ }
     }, 80)
@@ -1975,7 +2112,7 @@ export function ReaderRoute() {
     ? 'Lora, Georgia, serif'
     : '"Inter Variable", Inter, system-ui, sans-serif'
   const paragraphs = useMemo(
-    () => (payload?.text ?? '').split(/\n\n+/).filter(Boolean),
+    () => buildReaderParagraphs(payload?.text ?? ''),
     [payload?.text],
   )
   const readPct = Math.round(scrollPct * 100)
@@ -2027,18 +2164,20 @@ export function ReaderRoute() {
       </header>
 
       {/* ── Custom word highlight overlay (replaces browser selection highlight) ── */}
-      {selection && (
+      {selection?.rects.map((rect, index) => (
         <div
+          key={`${Math.round(rect.top)}-${Math.round(rect.left)}-${index}`}
+          data-reader-selection-preview="true"
           className="fixed pointer-events-none z-[55] rounded-[3px]"
           style={{
-            left: selection.selLeft,
-            top: selection.viewportY,
-            width: selection.selWidth,
-            height: selection.selHeight,
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
             backgroundColor: 'rgba(251, 191, 36, 0.38)',
           }}
         />
-      )}
+      ))}
 
       {/* ── Scrollable text ───────────────────────────────────────────── */}
       <div
@@ -2060,9 +2199,15 @@ export function ReaderRoute() {
             ))}
           </div>
         ) : (
-          <div style={{ fontFamily, fontSize: `${appearance.fontSize}px`, lineHeight: appearance.lineHeight, textAlign: appearance.align, color: colors.text }}>
+          <div ref={readerTextRef} style={{ fontFamily, fontSize: `${appearance.fontSize}px`, lineHeight: appearance.lineHeight, textAlign: appearance.align, color: colors.text }}>
             {paragraphs.map((p, i) => (
-              <p key={i} className="mb-[1.4em]">{p}</p>
+              <p
+                key={`${p.startOffset}-${i}`}
+                className="mb-[1.4em]"
+                data-reader-paragraph-start={p.startOffset}
+              >
+                {p.text}
+              </p>
             ))}
           </div>
         )}
