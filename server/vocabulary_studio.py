@@ -83,6 +83,10 @@ class CardUpdateRequest(BaseModel):
     isSuspended: bool
 
 
+class NoteMnemonicUpdateRequest(BaseModel):
+    mnemonic: str | None = Field(default=None, max_length=2000)
+
+
 class CardContextRequest(BaseModel):
     refreshHint: str | None = Field(default=None, max_length=200)
 
@@ -218,6 +222,18 @@ def _json_load_dict(raw: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _metadata_mnemonic(row: sqlite3.Row) -> str | None:
+    metadata_json = row["metadata_json"] if "metadata_json" in row.keys() else None
+    metadata = _json_load_dict(metadata_json)
+    mnemonic = _normalize_line(metadata.get("mnemonic"))
+    if mnemonic:
+        return mnemonic
+    studio = metadata.get("studio")
+    if isinstance(studio, dict):
+        return _normalize_line(studio.get("mnemonic"))
+    return None
 
 
 def _json_load_list(raw: str | None) -> list[Any]:
@@ -1175,6 +1191,7 @@ class VocabularyStudioService:
             "imageUrl": row["image_url"],
             "audioUrl": row["audio_url"],
             "pronunciation": _extract_pronunciation(row),
+            "mnemonic": _metadata_mnemonic(row),
             "tags": _json_load_list(row["tags_json"]),
             "topic": row["topic"],
             "sourceBookId": source_book_id,
@@ -1199,6 +1216,7 @@ class VocabularyStudioService:
             "exampleSentence": note_row["example_sentence"],
             "imageUrl": note_row["image_url"],
             "audioUrl": note_row["audio_url"],
+            "mnemonic": _metadata_mnemonic(note_row),
             "tags": _json_load_list(note_row["tags_json"]),
             "topic": note_row["topic"],
             "sourceBookId": source_book_id,
@@ -1902,6 +1920,51 @@ class VocabularyStudioService:
             card_rows = conn.execute("select * from cards where note_id = ? order by position asc", (note_id,)).fetchall()
             return {
                 "note": self._serialize_note(note_row, list(card_rows)),
+                "deck": self._deck_summary(conn, deck_row, now),
+            }
+
+    def update_note_mnemonic(self, note_id: str, request: NoteMnemonicUpdateRequest) -> dict[str, Any]:
+        now = _utc_now()
+        mnemonic = _normalize_line(request.mnemonic)
+        with self.connection() as conn:
+            note_row = conn.execute(
+                "select * from notes where id = ? and user_id = ?",
+                (note_id, self.user_id),
+            ).fetchone()
+            if note_row is None:
+                raise HTTPException(status_code=404, detail="Note not found.")
+
+            metadata = _json_load_dict(note_row["metadata_json"])
+            if mnemonic:
+                metadata["mnemonic"] = mnemonic
+            else:
+                metadata.pop("mnemonic", None)
+                studio = metadata.get("studio")
+                if isinstance(studio, dict):
+                    studio.pop("mnemonic", None)
+                    if not studio:
+                        metadata.pop("studio", None)
+                    else:
+                        metadata["studio"] = studio
+
+            timestamp = _serialize_timestamp(now)
+            conn.execute(
+                """
+                update notes
+                set metadata_json = ?, updated_at = ?
+                where id = ? and user_id = ?
+                """,
+                (json.dumps(metadata), timestamp, note_id, self.user_id),
+            )
+            conn.execute(
+                "update decks set updated_at = ? where id = ?",
+                (timestamp, note_row["deck_id"]),
+            )
+            refreshed = conn.execute("select * from notes where id = ?", (note_id,)).fetchone()
+            card_rows = conn.execute("select * from cards where note_id = ? order by position asc", (note_id,)).fetchall()
+            deck_row = self._require_deck(conn, note_row["deck_id"])
+            return {
+                "note": self._serialize_note(refreshed, list(card_rows)),
                 "deck": self._deck_summary(conn, deck_row, now),
             }
 
@@ -3174,6 +3237,10 @@ def create_vocabulary_router(service: VocabularyStudioService) -> APIRouter:
     @router.post("/decks/{deck_id}/notes")
     def create_note(deck_id: str, request: NoteCreateRequest) -> dict[str, Any]:
         return service.create_note(deck_id, request)
+
+    @router.patch("/notes/{note_id}/mnemonic")
+    def update_note_mnemonic(note_id: str, request: NoteMnemonicUpdateRequest) -> dict[str, Any]:
+        return service.update_note_mnemonic(note_id, request)
 
     @router.post("/decks/{deck_id}/imports/archive")
     def import_archive(deck_id: str, request: ArchiveImportRequest) -> dict[str, Any]:

@@ -22,6 +22,7 @@ from server.vocabulary_studio import (
     CardReviewRequest,
     DeckCreateRequest,
     NoteCreateRequest,
+    NoteMnemonicUpdateRequest,
     PracticeSessionRequest,
     VocabularyStudioService,
     create_vocabulary_router,
@@ -114,6 +115,28 @@ class VocabularyStudioTestCase(unittest.TestCase):
         self.assertEqual(duplicate["note"]["id"], note["note"]["id"])
         dashboard = self.service.get_deck_dashboard(deck["id"])
         self.assertEqual(dashboard["deck"]["noteCount"], 1)
+
+    def test_note_mnemonic_is_persisted_and_returned_in_sessions(self) -> None:
+        deck = self.service.create_deck(DeckCreateRequest(title="Mnemonic deck"))
+        note = self.service.create_note(
+            deck["id"],
+            NoteCreateRequest(noteType="basic", front="laconic", back="using few words"),
+        )
+        note_id = note["note"]["id"]
+
+        updated = self.service.update_note_mnemonic(
+            note_id,
+            NoteMnemonicUpdateRequest(mnemonic="Laconic sounds like lacking talk."),
+        )
+        self.assertEqual(updated["note"]["mnemonic"], "Laconic sounds like lacking talk.")
+        self.assertEqual(updated["note"]["metadata"]["mnemonic"], "Laconic sounds like lacking talk.")
+
+        session = self.service.get_session(deck["id"])
+        self.assertEqual(session["currentCard"]["mnemonic"], "Laconic sounds like lacking talk.")
+
+        cleared = self.client.patch(f"/api/vocabulary/notes/{note_id}/mnemonic", json={"mnemonic": None})
+        self.assertEqual(cleared.status_code, 200)
+        self.assertIsNone(cleared.json()["note"]["mnemonic"])
 
     def test_dynamic_user_provider_isolates_vocabulary_data(self) -> None:
         active_user = {"id": "user-a"}
