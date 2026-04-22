@@ -160,6 +160,18 @@ function caretRangeAt(x: number, y: number): Range | null {
 
 const PUNCT = /[.,!?;:"'()[\]{}<>»«\u2019\u2018\u201C\u201D\u2026\-–—]/
 
+interface VocabularyDeckRef {
+  id: string
+}
+
+interface VocabularyDeckCreateResponse extends Partial<VocabularyDeckRef> {
+  deck?: Partial<VocabularyDeckRef>
+}
+
+function deckIdFromCreateResponse(payload: VocabularyDeckCreateResponse): string | null {
+  return payload.id ?? payload.deck?.id ?? null
+}
+
 function getWordAtPoint(clientX: number, clientY: number): { text: string; rect: DOMRect; range: Range } | null {
   const cr = caretRangeAt(clientX, clientY)
   if (!cr) return null
@@ -188,15 +200,28 @@ function getWordAtPoint(clientX: number, clientY: number): { text: string; rect:
   return { text, rect: range.getBoundingClientRect(), range }
 }
 
+async function firstVocabularyDeckId(): Promise<string | null> {
+  const res = await api.get<{ items: VocabularyDeckRef[] }>('/api/vocabulary/decks')
+  return res.items[0]?.id ?? null
+}
+
 async function getOrCreateDeck(): Promise<string | null> {
+  const existingDeckId = await firstVocabularyDeckId()
+  if (existingDeckId) return existingDeckId
+
   try {
-    const res = await api.get<{ items: Array<{ id: string }> }>('/api/vocabulary/decks')
-    if (res.items.length > 0) return res.items[0].id
-    const created = await api.post<{ deck: { id: string } }>('/api/vocabulary/decks', {
+    const created = await api.post<VocabularyDeckCreateResponse>('/api/vocabulary/decks', {
       title: 'My Vocabulary', description: 'Words saved while reading',
     })
-    return created.deck?.id ?? null
-  } catch { return null }
+    const createdDeckId = deckIdFromCreateResponse(created)
+    if (createdDeckId) return createdDeckId
+  } catch {
+    const recoveredDeckId = await firstVocabularyDeckId().catch(() => null)
+    if (recoveredDeckId) return recoveredDeckId
+    throw new Error('Could not create a vocabulary deck.')
+  }
+
+  return firstVocabularyDeckId().catch(() => null)
 }
 
 // ── BottomSheet ───────────────────────────────────────────────────────────────

@@ -63,6 +63,7 @@ class VocabularyStudioTestCase(unittest.TestCase):
         )
         self.assertEqual(deck.status_code, 200)
         deck_id = deck.json()["id"]
+        self.assertEqual(deck.json()["deck"]["id"], deck_id)
 
         note = self.client.post(
             f"/api/vocabulary/decks/{deck_id}/notes",

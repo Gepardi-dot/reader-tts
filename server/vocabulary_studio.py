@@ -3164,7 +3164,8 @@ def create_vocabulary_router(service: VocabularyStudioService) -> APIRouter:
 
     @router.post("/decks")
     def create_deck(request: DeckCreateRequest) -> dict[str, Any]:
-        return service.create_deck(request)
+        deck = service.create_deck(request)
+        return {**deck, "deck": deck}
 
     @router.get("/decks/{deck_id}")
     def get_deck(deck_id: str) -> dict[str, Any]:
