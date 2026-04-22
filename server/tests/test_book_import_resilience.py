@@ -80,6 +80,57 @@ class BookImportResilienceTestCase(unittest.TestCase):
         write_meta.assert_called_once()
         write_text.assert_called_once_with("book-3", "Recovered duplicate text")
 
+    def test_stale_local_source_path_serializes_to_api_source_url(self) -> None:
+        meta = {
+            "id": "book-4",
+            "title": "Migrated book",
+            "fileName": "story.pdf",
+            "uploadedAt": "2026-04-22T00:00:00+00:00",
+            "pageCount": 1,
+            "textCharacters": 12,
+            "excerpt": "hello",
+            "latestAudio": None,
+            "sourcePath": r"C:\Users\miroa\storybook-reader\library\books\book-4\source.pdf",
+            "_highlightCount": 0,
+        }
+
+        with patch.object(server_app, "DATA_ROOT", Path("/tmp/storybook-reader/library")):
+            serialized = server_app.serialize_book(meta)
+
+        self.assertEqual(serialized["sourceUrl"], "/api/books/book-4/source")
+
+    def test_duplicate_upload_updates_existing_source_storage_without_reextracting(self) -> None:
+        uploaded_source = self.tempdir / "source.pdf"
+        uploaded_source.write_bytes(b"%PDF-1.4\n")
+        existing = {
+            "id": "book-5",
+            "fileName": "story.pdf",
+            "sourcePath": r"C:\Users\miroa\storybook-reader\library\books\book-5\source.pdf",
+        }
+        source_storage = {
+            "bucket": "books",
+            "key": "storybook-reader/books/user/book-5/source.pdf",
+            "contentType": "application/pdf",
+        }
+
+        with (
+            patch.object(server_app, "read_book_text", return_value="Already cached"),
+            patch.object(server_app, "write_book_meta") as write_meta,
+            patch.object(server_app, "extract_cleaned_book_source") as extract_source,
+        ):
+            server_app.ensure_existing_book_text_from_upload(
+                existing,
+                uploaded_source,
+                "story.pdf",
+                "abc123",
+                source_storage=source_storage,
+            )
+
+        self.assertEqual(existing["sourceStorage"], source_storage)
+        self.assertNotIn("sourcePath", existing)
+        extract_source.assert_not_called()
+        write_meta.assert_called_once_with("book-5", existing)
+
 
 if __name__ == "__main__":
     unittest.main()

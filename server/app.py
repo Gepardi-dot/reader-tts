@@ -2489,6 +2489,13 @@ def relative_url(path: Path) -> str:
     return f"/library/{path.relative_to(DATA_ROOT).as_posix()}"
 
 
+def relative_url_or_none(path: Path) -> str | None:
+    try:
+        return relative_url(path)
+    except ValueError:
+        return None
+
+
 def book_dir(book_id: str) -> Path:
     return BOOKS_ROOT / book_id
 
@@ -2669,6 +2676,24 @@ def download_storage_object(key: str, destination: Path) -> None:
         raise RuntimeError(f"Failed to download book storage object {key}: {exc}") from exc
 
 
+def copy_storage_object(source_key: str, destination_key: str) -> None:
+    if not BOOK_STORAGE_BUCKET:
+        raise RuntimeError("BOOK_STORAGE_BUCKET is not configured.")
+    if source_key == destination_key:
+        return
+
+    client = create_book_storage_client()
+    _, _, _, ClientError, _, _, _ = load_boto3()
+    try:
+        client.copy_object(
+            Bucket=BOOK_STORAGE_BUCKET,
+            CopySource={"Bucket": BOOK_STORAGE_BUCKET, "Key": source_key},
+            Key=destination_key,
+        )
+    except ClientError as exc:
+        raise RuntimeError(f"Failed to copy book storage object {source_key} to {destination_key}: {exc}") from exc
+
+
 def read_book_meta(book_id: str) -> dict[str, Any] | None:
     if progress_store_configured():
         return _get_book_sql(book_id, current_user_id())
@@ -2828,10 +2853,19 @@ def ensure_existing_book_text_from_upload(
     uploaded_source_path: Path,
     file_name: str,
     source_sha256: str,
+    source_storage: dict[str, str] | None = None,
 ) -> None:
     book_id = str(existing["id"])
+    if source_storage is not None:
+        existing["sourceStorage"] = source_storage
+        existing.pop("sourcePath", None)
+        existing["sourceSha256"] = source_sha256
+        existing["sourceFormat"] = normalize_book_suffix(file_name).lstrip(".")
+
     try:
         read_book_text(book_id)
+        if source_storage is not None:
+            write_book_meta(book_id, existing)
         return
     except FileNotFoundError:
         pass
@@ -2853,10 +2887,29 @@ def ensure_existing_book_text_from_upload(
     write_book_text(book_id, text)
 
 
+def has_servable_book_source(meta: dict[str, Any]) -> bool:
+    source_storage = meta.get("sourceStorage")
+    if isinstance(source_storage, dict) and isinstance(source_storage.get("key"), str) and source_storage.get("key"):
+        return True
+
+    source_path = resolve_local_source_path(meta)
+    if relative_url_or_none(source_path) is None:
+        return False
+    return source_path.exists()
+
+
 def source_url_for_book(meta: dict[str, Any]) -> str:
-    if meta.get("sourceStorage"):
+    source_storage = meta.get("sourceStorage")
+    if isinstance(source_storage, dict) and isinstance(source_storage.get("key"), str) and source_storage.get("key"):
         return f"/api/books/{meta['id']}/source"
-    return relative_url(resolve_local_source_path(meta))
+
+    source_path = resolve_local_source_path(meta)
+    local_url = relative_url_or_none(source_path)
+    if local_url is not None:
+        return local_url
+
+    logger.warning("Book %s has a non-runtime local source path: %s", meta.get("id"), source_path)
+    return f"/api/books/{meta['id']}/source"
 
 
 def resolve_local_source_path(meta: dict[str, Any]) -> Path:
@@ -3911,10 +3964,12 @@ def serialize_book(meta: dict[str, Any]) -> dict[str, Any]:
     if latest_audio:
         path_val = latest_audio.get("path")
         timing_val = latest_audio.get("timingPath")
+        audio_url = relative_url_or_none(Path(path_val)) if path_val else None
+        timing_url = relative_url_or_none(Path(timing_val)) if timing_val else None
         latest_audio = {
             **latest_audio,
-            "url": relative_url(Path(path_val)) if path_val else latest_audio.get("url", ""),
-            "timingUrl": relative_url(Path(timing_val)) if timing_val else None,
+            "url": audio_url or latest_audio.get("url", ""),
+            "timingUrl": timing_url,
         }
 
     # _highlightCount is pre-computed by SQL JOIN in _book_row_to_meta;
@@ -5115,21 +5170,37 @@ def complete_direct_book_upload(request: DirectBookUploadCompleteRequest) -> dic
         try:
             download_storage_object(object_key, temp_source)
             source_sha256 = sha256_file(temp_source)
+            source_storage = {
+                "bucket": BOOK_STORAGE_BUCKET,
+                "key": object_key,
+                "contentType": book_content_type_for_suffix(suffix),
+            }
             if progress_store_configured():
                 existing = _get_book_by_source_hash_sql(source_sha256, current_user_id())
                 if existing is not None:
-                    ensure_existing_book_text_from_upload(existing, temp_source, request.fileName, source_sha256)
+                    existing_source_storage: dict[str, str] | None = None
+                    if not has_servable_book_source(existing):
+                        existing_key = book_source_storage_key(str(existing["id"]), suffix)
+                        copy_storage_object(object_key, existing_key)
+                        existing_source_storage = {
+                            "bucket": BOOK_STORAGE_BUCKET,
+                            "key": existing_key,
+                            "contentType": book_content_type_for_suffix(suffix),
+                        }
+                    ensure_existing_book_text_from_upload(
+                        existing,
+                        temp_source,
+                        request.fileName,
+                        source_sha256,
+                        source_storage=existing_source_storage,
+                    )
                     delete_storage_prefix(book_storage_base_prefix(request.bookId))
                     return serialize_book(existing)
             return import_book_source(
                 request.bookId,
                 request.fileName,
                 temp_source,
-                source_storage={
-                    "bucket": BOOK_STORAGE_BUCKET,
-                    "key": object_key,
-                    "contentType": book_content_type_for_suffix(suffix),
-                },
+                source_storage=source_storage,
                 source_sha256=source_sha256,
                 title_override=request.title,
             )
