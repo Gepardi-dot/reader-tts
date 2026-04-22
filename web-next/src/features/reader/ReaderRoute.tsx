@@ -44,6 +44,25 @@ interface ProgressPayload {
   } | null
 }
 
+interface TtsVoiceOption {
+  id: string
+  label: string
+}
+
+interface TtsProviderInfo {
+  id: string
+  name: string
+  available: boolean
+  recommended?: boolean
+  voices: TtsVoiceOption[]
+  defaultVoice?: string | null
+}
+
+interface ProvidersResponse {
+  defaultNarrationStyle: string
+  providers: TtsProviderInfo[]
+}
+
 interface Appearance {
   fontSize: number; lineHeight: number
   font: 'serif' | 'sans'
@@ -139,6 +158,61 @@ function loadAudioPrefs(): AudioPrefs {
     const raw = localStorage.getItem(AUDIO_PREFS_KEY)
     return raw ? { provider: 'google', voice: null, ...JSON.parse(raw) } : { provider: 'google', voice: null }
   } catch { return { provider: 'google', voice: null } }
+}
+
+function providerOptionsFromCatalog(providers?: TtsProviderInfo[]) {
+  if (providers?.length) {
+    return providers.map((provider) => ({
+      id: provider.id,
+      label: provider.name,
+      available: provider.available,
+      recommended: Boolean(provider.recommended),
+      voices: provider.voices,
+      defaultVoice: provider.defaultVoice ?? null,
+    }))
+  }
+
+  return TTS_PROVIDERS.map((provider) => ({
+    ...provider,
+    available: true,
+    recommended: false,
+    voices: [] as TtsVoiceOption[],
+    defaultVoice: null,
+  }))
+}
+
+function defaultVoiceForProvider(provider: { voices: TtsVoiceOption[]; defaultVoice?: string | null } | undefined) {
+  return provider?.defaultVoice ?? provider?.voices[0]?.id ?? null
+}
+
+function pickFallbackProvider(providers: TtsProviderInfo[]) {
+  const available = providers.filter((provider) => provider.available)
+  return (
+    available.find((provider) => provider.recommended) ??
+    available.find((provider) => provider.id === 'kokoro') ??
+    available[0] ??
+    null
+  )
+}
+
+function audioErrorMessage(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error)
+  const detail = raw.match(/"detail"\s*:\s*"([^"]+)"/)?.[1]
+  const message = detail ?? raw
+
+  if (/Authentication required|Unauthorized|Session expired/i.test(message)) {
+    return 'Your session expired. Sign in again, then try audio playback.'
+  }
+  if (/not configured|configured yet/i.test(message)) {
+    return message
+  }
+  if (/text does not match|range/i.test(message)) {
+    return 'Could not match this passage to the book text. Move slightly and try again.'
+  }
+  if (/Failed to fetch|NetworkError|fetch/i.test(message)) {
+    return 'Could not reach the audio service. Check the connection and try again.'
+  }
+  return 'Could not start audio. Check the selected voice provider and try again.'
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1289,7 +1363,7 @@ export interface AudioHandle {
   stop:   () => void
 }
 
-function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderChange, voice, onVoiceChange, onPhaseChange, onHandleReady }: {
+function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderChange, voice, onVoiceChange, onPhaseChange, onHandleReady, onError }: {
   onClose: () => void; bookId: string
   getSlice: () => { text: string; start: number }
   colors: typeof THEMES['paper']
@@ -1297,11 +1371,13 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
   voice: string | null; onVoiceChange: (v: string | null) => void
   onPhaseChange?: (phase: AudioPhase, cur: number, total: number) => void
   onHandleReady?: (h: AudioHandle) => void
+  onError?: (message: string) => void
 }) {
   const [phase,   setPhase]   = useState<'idle' | 'buffering' | 'playing' | 'paused'>('idle')
   const [chunks,  setChunks]  = useState<AudioChunk[]>([])
   const [curIdx,  setCurIdx]  = useState(0)
   const [rate,    setRate]    = useState(1.0)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
   const audioRef    = useRef<HTMLAudioElement | null>(null)
   const rateRef     = useRef(rate)
@@ -1330,36 +1406,44 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
   // Fetch voice list
   const { data: providersRes } = useQuery({
     queryKey: ['providers'],
-    queryFn:  () => api.get<{ providers: Array<{ id: string; voices: Array<{ id: string; label: string }> }> }>('/api/providers'),
+    queryFn:  () => api.get<ProvidersResponse>('/api/providers'),
     staleTime: 5 * 60_000,
   })
-  const providerVoices = providersRes?.providers?.find(p => p.id === provider)?.voices ?? []
+  const providerOptions = providerOptionsFromCatalog(providersRes?.providers)
+  const activeProvider = providerOptions.find(p => p.id === provider)
+  const providerVoices = activeProvider?.voices ?? []
+  const selectedProviderUnavailable = Boolean(providersRes?.providers?.length && (!activeProvider || !activeProvider.available))
 
   // ── Fetch a single chunk and store its URL ──────────────────────────────────
 
   function updateChunk(idx: number, patch: Partial<AudioChunk>) {
-    setChunks(prev => {
-      const next = [...prev]
-      if (next[idx]) next[idx] = { ...next[idx], ...patch }
-      return next
-    })
+    const next = [...chunksRef.current]
+    if (next[idx]) next[idx] = { ...next[idx], ...patch }
+    chunksRef.current = next
+    setChunks(next)
   }
 
   async function fetchChunk(idx: number, chunk: AudioChunk, signal: AbortSignal): Promise<string | null> {
     updateChunk(idx, { status: 'fetching' })
     try {
+      const { lengthScale, sentenceSilence } = pacingFor(provider)
       const { url } = await request<{ url: string }>(`/api/books/${bookId}/live-audio`, {
         method: 'POST', signal,
         body: JSON.stringify({
           provider, voice, model: null, output_format: 'mp3',
-          narration_style: '', ...pacingFor(provider),
+          narration_style: '', length_scale: lengthScale, sentence_silence: sentenceSilence,
           pageNumber: 1, start: chunk.start, end: chunk.end, text: chunk.text,
         }),
       })
       updateChunk(idx, { status: 'ready', url })
       return url
     } catch (e) {
-      if ((e as Error).name !== 'AbortError') updateChunk(idx, { status: 'error' })
+      if ((e as Error).name !== 'AbortError') {
+        const message = audioErrorMessage(e)
+        setErrorMsg(message)
+        onError?.(message)
+        updateChunk(idx, { status: 'error' })
+      }
       return null
     }
   }
@@ -1376,7 +1460,12 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
     audioRef.current  = audio
     setPhase('playing')
     setCurIdx(idx)
-    audio.play().catch(() => {})
+    setErrorMsg(null)
+    audio.play().catch(() => {
+      if (ctrl.signal.aborted) return
+      setPhase('paused')
+      setErrorMsg('Audio is ready. Tap play again to start playback.')
+    })
 
     // Prefetch next chunk immediately (so it's ready before this one ends)
     const nextIdx = idx + 1
@@ -1419,7 +1508,11 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
         }, 200)
       }
     }
-    audio.onerror = () => { if (!ctrl.signal.aborted) setPhase('idle') }
+    audio.onerror = () => {
+      if (ctrl.signal.aborted) return
+      setErrorMsg('Audio playback failed. Try starting it again.')
+      setPhase('idle')
+    }
   }
 
   // ── Start / stop ────────────────────────────────────────────────────────────
@@ -1428,9 +1521,20 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
     abortRef.current?.abort()
     const ctrl = new AbortController()
     abortRef.current = ctrl
+    setErrorMsg(null)
+
+    if (selectedProviderUnavailable) {
+      const message = `${activeProvider?.label ?? provider} is not configured yet. Choose an available provider.`
+      setErrorMsg(message)
+      onError?.(message)
+      return
+    }
 
     const { text, start } = getSlice()
-    if (!text.trim()) return
+    if (!text.trim()) {
+      setErrorMsg('There is no readable text at this position.')
+      return
+    }
 
     const chunkSize = CHUNK_CHARS[provider] ?? text.length  // cloud = one request
     const raw = buildAudioChunks(text, start, chunkSize)
@@ -1463,8 +1567,13 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
       audioRef.current?.pause()
       setPhase('paused')
     } else if (phase === 'paused') {
-      audioRef.current?.play().catch(() => {})
-      setPhase('playing')
+      setErrorMsg(null)
+      audioRef.current?.play()
+        .then(() => setPhase('playing'))
+        .catch(() => {
+          setErrorMsg('Playback was blocked by the browser. Tap play again.')
+          setPhase('paused')
+        })
     } else if (phase === 'idle') {
       startPlayback()
     }
@@ -1512,13 +1621,17 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
         <Select value={provider} onValueChange={(v) => {
           if (v == null) return
           stopPlayback()
+          setErrorMsg(null)
+          const nextProvider = providerOptions.find(p => p.id === v)
           onProviderChange(v)
-          onVoiceChange(null)
+          onVoiceChange(defaultVoiceForProvider(nextProvider))
         }}>
           <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
-            {TTS_PROVIDERS.map((p) => (
-              <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
+            {providerOptions.map((p) => (
+              <SelectItem key={p.id} value={p.id} disabled={!p.available}>
+                {p.label}{p.available ? '' : ' (not configured)'}
+              </SelectItem>
             ))}
           </SelectContent>
         </Select>
@@ -1530,7 +1643,7 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
           <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 mb-2">Voice</p>
           <Select
             value={voice ?? (providerVoices[0]?.id ?? '')}
-            onValueChange={(v) => { if (v != null) { stopPlayback(); onVoiceChange(v) } }}
+            onValueChange={(v) => { if (v != null) { stopPlayback(); setErrorMsg(null); onVoiceChange(v) } }}
           >
             <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -1583,6 +1696,13 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
         <p className="text-xs text-center opacity-40">{bufferLabel}</p>
       )}
 
+      {errorMsg && (
+        <p className="rounded-xl border px-3 py-2 text-xs leading-relaxed"
+          style={{ borderColor: `${colors.text}18`, background: `${colors.text}08`, color: colors.text }}>
+          {errorMsg}
+        </p>
+      )}
+
       {/* Controls */}
       <div className="flex items-center justify-center gap-8 py-2 pb-4">
         <button className="p-2 opacity-30 hover:opacity-60 transition-opacity"><SkipBack size={22} /></button>
@@ -1606,8 +1726,8 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
 
 // ── Word Audio Banner ─────────────────────────────────────────────────────────
 
-function WordAudioBanner({ word, status, onStop }: {
-  word: string; status: 'loading' | 'playing'; onStop: () => void
+function WordAudioBanner({ word, status, onStop, onPlay }: {
+  word: string; status: 'loading' | 'ready' | 'playing'; onStop: () => void; onPlay: () => void
 }) {
   return (
     <motion.div
@@ -1621,8 +1741,14 @@ function WordAudioBanner({ word, status, onStop }: {
     >
       {status === 'loading'
         ? <div className="w-4 h-4 border-2 border-white/50 border-t-transparent rounded-full animate-spin" />
-        : <Mic size={15} className="opacity-55" />}
-      <span className="text-sm max-w-[160px] truncate">{word}</span>
+        : status === 'ready'
+          ? <button onClick={onPlay} className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center hover:bg-white/15">
+              <Play size={12} fill="currentColor" />
+            </button>
+          : <Mic size={15} className="opacity-55" />}
+      <span className="text-sm max-w-[180px] truncate">
+        {status === 'ready' ? `${word} · tap play` : word}
+      </span>
       <button onClick={onStop} className="p-0.5 ml-1 opacity-45 hover:opacity-80 transition-opacity">
         <X size={13} />
       </button>
@@ -1742,7 +1868,7 @@ export function ReaderRoute() {
   const [selection,     setSelection]     = useState<SelectionState | null>(null)
   const [panel,         setPanel]         = useState<SecondaryPanel | null>(null)
   const [toast,         setToast]         = useState<string | null>(null)
-  const [wordAudio,     setWordAudio]     = useState<{ word: string; status: 'loading' | 'playing' } | null>(null)
+  const [wordAudio,     setWordAudio]     = useState<{ word: string; status: 'loading' | 'ready' | 'playing' } | null>(null)
   const [ttsProvider,   setTtsProvider]   = useState(() => loadAudioPrefs().provider)
   const [ttsVoice,      setTtsVoice]      = useState<string | null>(() => loadAudioPrefs().voice)
   const [audioPhase,    setAudioPhase]    = useState<AudioPhase>('idle')
@@ -1764,6 +1890,10 @@ export function ReaderRoute() {
     setPanel(nextPanel)
   }, [])
   const closePanel = useCallback(() => setPanel(null), [])
+  const showToast = useCallback((msg: string) => {
+    setToast(msg)
+    setTimeout(() => setToast(t => (t === msg ? null : t)), 2200)
+  }, [])
 
   // Fetch
   const { data: payload, isLoading } = useQuery({
@@ -1780,13 +1910,20 @@ export function ReaderRoute() {
 
   const { data: providersData } = useQuery({
     queryKey: ['providers'],
-    queryFn:  () => api.get<{ providers: Array<{ id: string; voices: Array<{ id: string; label: string }> }> }>('/api/providers'),
+    queryFn:  () => api.get<ProvidersResponse>('/api/providers'),
     staleTime: 5 * 60_000,
   })
-  const playBarVoiceLabel = providersData?.providers
-    ?.find(p => p.id === ttsProvider)
-    ?.voices.find(v => v.id === ttsVoice)
-    ?.label ?? ttsVoice ?? ttsProvider
+  const activeProviderInfo = providersData?.providers?.find(p => p.id === ttsProvider)
+  const fallbackProviderInfo = providersData?.providers?.length
+    ? pickFallbackProvider(providersData.providers)
+    : null
+  const useProviderFallback = Boolean(providersData?.providers?.length && fallbackProviderInfo && (!activeProviderInfo || !activeProviderInfo.available))
+  const effectiveTtsProvider = useProviderFallback && fallbackProviderInfo ? fallbackProviderInfo.id : ttsProvider
+  const effectiveTtsVoice = useProviderFallback && fallbackProviderInfo ? defaultVoiceForProvider(fallbackProviderInfo) : ttsVoice
+  const effectiveProviderInfo = providersData?.providers?.find(p => p.id === effectiveTtsProvider)
+  const playBarVoiceLabel = effectiveProviderInfo
+    ?.voices.find(v => v.id === effectiveTtsVoice)
+    ?.label ?? effectiveTtsVoice ?? effectiveProviderInfo?.name ?? effectiveTtsProvider
 
   // Restore scroll position — also handles ?offset= from notes navigation
   useEffect(() => {
@@ -1825,18 +1962,18 @@ export function ReaderRoute() {
 
   // Persist audio prefs
   useEffect(() => {
-    localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify({ provider: ttsProvider, voice: ttsVoice }))
-  }, [ttsProvider, ttsVoice])
+    localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify({ provider: effectiveTtsProvider, voice: effectiveTtsVoice }))
+  }, [effectiveTtsProvider, effectiveTtsVoice])
 
   // Background warmup — fire as soon as a local provider is selected so the model is
   // loaded by the time the user opens the audio sheet. Fire-and-forget, no UI blocking.
   useEffect(() => {
-    if (!['neutts_local', 'qwen_local'].includes(ttsProvider)) return
+    if (!['neutts_local', 'qwen_local'].includes(effectiveTtsProvider)) return
     if (!payload?.text) return   // wait until book is loaded
-    api.post('/api/providers/warmup', { provider: ttsProvider, voice: ttsVoice ?? null, model: null })
+    api.post('/api/providers/warmup', { provider: effectiveTtsProvider, voice: effectiveTtsVoice ?? null, model: null })
       .catch(() => { /* silent — warmup is best-effort */ })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ttsProvider, ttsVoice, Boolean(payload?.text)])
+  }, [effectiveTtsProvider, effectiveTtsVoice, Boolean(payload?.text)])
 
   // Read-ahead prefetch — fires chunk-aligned live-audio requests after the user stops
   // scrolling (2 s debounce). Cache keys match exactly what the player will request,
@@ -1844,7 +1981,7 @@ export function ReaderRoute() {
   const prefetchRef   = useRef<AbortController | null>(null)
   const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (!isChunking(ttsProvider) || !bookId || !payload?.text) return
+    if (!isChunking(effectiveTtsProvider) || !bookId || !payload?.text) return
 
     // Debounce: cancel previous timer on every scroll update
     if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
@@ -1853,12 +1990,12 @@ export function ReaderRoute() {
       const ctrl = new AbortController()
       prefetchRef.current = ctrl
 
-      const { lengthScale, sentenceSilence } = pacingFor(ttsProvider)
+      const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
       const start = Math.max(0, Math.round(scrollPct * payload.text.length) - 200)
       const fullSlice = payload.text.slice(start, start + 2200)
       if (!fullSlice.trim()) return
 
-      const chunkDefs = buildAudioChunks(fullSlice, start, CHUNK_CHARS[ttsProvider] ?? 900)
+      const chunkDefs = buildAudioChunks(fullSlice, start, CHUNK_CHARS[effectiveTtsProvider] ?? 900)
       if (chunkDefs.length === 0) return
 
       // Prefetch all chunks sequentially — by the time the user hits play most are cached
@@ -1869,7 +2006,7 @@ export function ReaderRoute() {
             await request(`/api/books/${bookId}/live-audio`, {
               method: 'POST', signal: ctrl.signal,
               body: JSON.stringify({
-                provider: ttsProvider, voice: ttsVoice, model: null, output_format: 'mp3',
+                provider: effectiveTtsProvider, voice: effectiveTtsVoice, model: null, output_format: 'mp3',
                 narration_style: '', length_scale: lengthScale, sentence_silence: sentenceSilence,
                 pageNumber: 1, start: chunk.start, end: chunk.end, text: chunk.text,
               }),
@@ -1882,7 +2019,7 @@ export function ReaderRoute() {
     return () => {
       if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
     }
-  }, [ttsProvider, ttsVoice, bookId, payload?.text, scrollPct])
+  }, [effectiveTtsProvider, effectiveTtsVoice, bookId, payload?.text, scrollPct])
 
   function patchAppearance(patch: Partial<Appearance>) {
     setAppearance(a => ({ ...a, ...patch }))
@@ -1962,12 +2099,6 @@ export function ReaderRoute() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text, bookId])
-
-  // Toast helper
-  function showToast(msg: string) {
-    setToast(msg)
-    setTimeout(() => setToast(t => (t === msg ? null : t)), 2200)
-  }
 
   // Build SelectionState from the actual DOM range when available; text search is only a fallback.
   function buildState(
@@ -2077,23 +2208,49 @@ export function ReaderRoute() {
   async function playWord(word: string, startOffset: number) {
     wordAudioRef.current?.pause()
     setWordAudio({ word, status: 'loading' })
-    const snippet = (payload?.text ?? '').slice(startOffset, startOffset + 2200)
+    const fullText = payload?.text ?? ''
+    const start = Math.max(0, Math.min(startOffset, fullText.length))
+    const end = Math.min(fullText.length, start + 2200)
+    const snippet = fullText.slice(start, end)
+    if (!snippet.trim()) {
+      setWordAudio(null)
+      showToast('There is no readable text at this position.')
+      return
+    }
+
     try {
+      const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
       const { url } = await request<{ url: string }>(`/api/books/${bookId}/live-audio`, {
         method: 'POST',
         body: JSON.stringify({
-          provider: ttsProvider, voice: ttsVoice, model: null, output_format: 'mp3',
-          narration_style: '', ...pacingFor(ttsProvider),
-          pageNumber: 1, start: 0, end: snippet.length, text: snippet,
+          provider: effectiveTtsProvider, voice: effectiveTtsVoice, model: null, output_format: 'mp3',
+          narration_style: '', length_scale: lengthScale, sentence_silence: sentenceSilence,
+          pageNumber: 1, start, end, text: snippet,
         }),
       })
       const audio = new Audio(url)
       wordAudioRef.current = audio
-      audio.play()
-      setWordAudio({ word, status: 'playing' })
       audio.onended = () => setWordAudio(null)
       audio.onerror = () => setWordAudio(null)
-    } catch { setWordAudio(null) }
+      try {
+        await audio.play()
+        setWordAudio({ word, status: 'playing' })
+      } catch {
+        setWordAudio({ word, status: 'ready' })
+        showToast('Audio is ready. Tap the banner play button.')
+      }
+    } catch (error) {
+      setWordAudio(null)
+      showToast(audioErrorMessage(error))
+    }
+  }
+
+  function resumeWordAudio() {
+    const audio = wordAudioRef.current
+    if (!audio || !wordAudio) return
+    audio.play()
+      .then(() => setWordAudio({ word: wordAudio.word, status: 'playing' }))
+      .catch(() => showToast('Playback was blocked by the browser. Tap play again.'))
   }
 
   function stopWordAudio() {
@@ -2271,9 +2428,9 @@ export function ReaderRoute() {
           bookId={bookId!}
           getSlice={getAudioText}
           colors={colors}
-          provider={ttsProvider}
+          provider={effectiveTtsProvider}
           onProviderChange={setTtsProvider}
-          voice={ttsVoice}
+          voice={effectiveTtsVoice}
           onVoiceChange={setTtsVoice}
           onPhaseChange={(ph, cur, total) => {
             setAudioPhase(ph)
@@ -2281,6 +2438,7 @@ export function ReaderRoute() {
             setAudioTotal(total)
           }}
           onHandleReady={(h) => { audioHandleRef.current = h }}
+          onError={showToast}
         />
       </BottomSheet>
 
@@ -2306,6 +2464,7 @@ export function ReaderRoute() {
             word={wordAudio.word}
             status={wordAudio.status}
             onStop={stopWordAudio}
+            onPlay={resumeWordAudio}
           />
         )}
       </AnimatePresence>

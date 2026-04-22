@@ -224,6 +224,7 @@ BOOK_STORAGE_ADDRESSING_STYLE = (env_value("BOOK_STORAGE_ADDRESSING_STYLE") or "
 LOCAL_DEV_USER_ID = "00000000-0000-0000-0000-000000000001"
 LIVE_AUDIO_CACHE_VERSION = 3
 PROVIDER_TEST_CACHE_VERSION = 2
+TTSProviderId = Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local", "kokoro"]
 GEMINI_MAX_RETRY_ATTEMPTS = 3
 GEMINI_MAX_RETRY_DELAY_SECONDS = 75.0
 BOOK_STORAGE_BUCKET = env_value("BOOK_STORAGE_BUCKET")
@@ -713,7 +714,7 @@ class JobCancelledError(RuntimeError):
 
 
 class GenerateAudioRequest(BaseModel):
-    provider: Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local"] = "piper"
+    provider: TTSProviderId = "piper"
     voice: str | None = None
     model: str | None = None
     output_format: Literal["mp3", "m4b", "wav"] = "mp3"
@@ -724,7 +725,7 @@ class GenerateAudioRequest(BaseModel):
 
 
 class ProviderTestRequest(BaseModel):
-    provider: Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local"] = "piper"
+    provider: TTSProviderId = "piper"
     voice: str | None = None
     model: str | None = None
     narration_style: str = Field(default=DEFAULT_NARRATION_STYLE, max_length=1500)
@@ -733,7 +734,7 @@ class ProviderTestRequest(BaseModel):
 
 
 class LiveAudioRequest(BaseModel):
-    provider: Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local"] = "openai"
+    provider: TTSProviderId = "openai"
     voice: str | None = None
     model: str | None = None
     output_format: Literal["mp3", "wav"] = "mp3"
@@ -5912,7 +5913,7 @@ def synthesize_polly(
 
 def synthesize_provider_audio(
     *,
-    provider_id: Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local", "kokoro"],
+    provider_id: TTSProviderId,
     chunks: list[str],
     output_path: Path,
     chunk_dir: Path | None,
@@ -6489,6 +6490,7 @@ def health() -> dict[str, Any]:
         "qwen": bool(env_value("DASHSCOPE_API_KEY")),
         "qwen_local": qwen_local_runtime_configured(),
         "neutts_local": neutts_runtime_configured(),
+        "kokoro": kokoro_configured(),
         "polly": bool(POLLY_REGION and (env_value("AWS_ACCESS_KEY_ID") or env_value("AWS_PROFILE"))),
         "openai": bool(env_value("OPENAI_API_KEY")),
         "piper": bool(env_value("PIPER_EXE")),
