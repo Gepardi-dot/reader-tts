@@ -1759,8 +1759,11 @@ export function ReaderRoute() {
   const wordAudioRef      = useRef<HTMLAudioElement | null>(null)
   const readerTextRef     = useRef<HTMLDivElement | null>(null)
   const panelSnapshotRef  = useRef<SecondaryPanel | null>(null)
-  // Keep snapshot in sync without causing render issues
-  useEffect(() => { if (panel !== null) panelSnapshotRef.current = panel }, [panel])
+  const openPanel = useCallback((nextPanel: SecondaryPanel) => {
+    panelSnapshotRef.current = nextPanel
+    setPanel(nextPanel)
+  }, [])
+  const closePanel = useCallback(() => setPanel(null), [])
 
   // Fetch
   const { data: payload, isLoading } = useQuery({
@@ -2222,7 +2225,7 @@ export function ReaderRoute() {
             fullText={payload?.text ?? ''}
             ttsProvider={ttsProvider}
             onClose={() => { setSelection(null); window.getSelection()?.removeAllRanges() }}
-            onOpenPanel={setPanel}
+            onOpenPanel={openPanel}
             onToast={showToast}
             onPlayWord={playWord}
           />
@@ -2232,21 +2235,21 @@ export function ReaderRoute() {
       {/* ── Secondary panel (Dictionary / Notes / Ask AI) ─────────────── */}
       <BottomSheet
         open={panel !== null}
-        onClose={() => setPanel(null)}
+        onClose={closePanel}
         bg={colors.bg}
       >
         {(() => {
-          const p = panelSnapshotRef.current
+          const p = panel ?? panelSnapshotRef.current
           if (!p) return null
           if (p.kind === 'dictionary') return (
-            <DictionaryPanel word={p.word} onClose={() => setPanel(null)} colors={colors} />
+            <DictionaryPanel word={p.word} onClose={closePanel} colors={colors} />
           )
           if (p.kind === 'notes') return (
             <NotesPanel text={p.text} start={p.start} end={p.end}
-              bookId={bookId!} onClose={() => setPanel(null)} colors={colors} />
+              bookId={bookId!} onClose={closePanel} colors={colors} />
           )
           if (p.kind === 'askai') return (
-            <AskAIPanel text={p.text} onClose={() => setPanel(null)} colors={colors} />
+            <AskAIPanel text={p.text} onClose={closePanel} colors={colors} />
           )
           return null
         })()}
