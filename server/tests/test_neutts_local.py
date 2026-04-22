@@ -59,6 +59,10 @@ class NeuTTSLocalTestCase(unittest.TestCase):
         self.assertEqual(voices[0]["style"], "Warm")
         self.assertEqual(voices[0]["tags"], ["Story"])
 
+    def test_list_neutts_reference_packs_returns_empty_when_root_missing(self) -> None:
+        with patch.object(server_app, "NEUTTS_VOICES_ROOT", self.tempdir / "missing"):
+            self.assertEqual(server_app.list_neutts_reference_packs(), [])
+
     def test_resolve_neutts_voice_respects_model_filters(self) -> None:
         self.create_reference_pack(
             "fast-only",

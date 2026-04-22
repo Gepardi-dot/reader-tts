@@ -2973,6 +2973,8 @@ def neutts_reference_pack_complete(reference_dir: Path) -> bool:
 
 def list_neutts_reference_packs() -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    if not NEUTTS_VOICES_ROOT.is_dir():
+        return results
     for reference_dir in sorted(NEUTTS_VOICES_ROOT.iterdir()):
         if not reference_dir.is_dir() or not neutts_reference_pack_complete(reference_dir):
             continue
