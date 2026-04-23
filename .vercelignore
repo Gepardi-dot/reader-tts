@@ -38,6 +38,9 @@ __pycache__/
 .claude/worktrees/
 
 # Misc
+.env
+.env.*
+!.env.example
 tmp-*.txt
 tmp-*.json
 tmp-*.js

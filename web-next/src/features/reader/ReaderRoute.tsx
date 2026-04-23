@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { api, request } from '@/shared/api/client'
+import { api, request, requestBlob } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -61,6 +61,33 @@ interface TtsProviderInfo {
 interface ProvidersResponse {
   defaultNarrationStyle: string
   providers: TtsProviderInfo[]
+}
+
+interface LiveAudioPayload {
+  provider: string
+  voice: string | null
+  model: string | null
+  output_format: 'mp3'
+  narration_style: string
+  length_scale: number
+  sentence_silence: number
+  pageNumber: number
+  start: number
+  end: number
+  text: string
+}
+
+interface LiveAudioResult {
+  url: string
+}
+
+interface ProviderTestResult {
+  provider: string
+  voice: string | null
+  model: string | null
+  sampleText: string
+  audioUrl: string
+  message: string
 }
 
 interface Appearance {
@@ -125,10 +152,93 @@ const TTS_PROVIDERS = [
   { id: 'piper',        label: 'Piper (offline)' },
 ]
 
-// Characters per chunk for local/remote providers that benefit from splitting
+// Streaming-style playback: keep the first request small so audio can start quickly,
+// then synthesize larger follow-up chunks while the first chunk is playing.
+const FIRST_AUDIO_CHARS: Record<string, number> = {
+  google:       240,
+  openai:       180,
+  polly:        220,
+  qwen:         160,
+  qwen_local:   140,
+  neutts_local: 140,
+  kokoro:       180,
+  piper:        220,
+}
+
 const CHUNK_CHARS: Record<string, number> = {
-  neutts_local: 520,
-  kokoro:       900,  // Kokoro handles larger chunks well; fewer round-trips = faster
+  google:       420,
+  openai:       800,
+  polly:        900,
+  qwen:         650,
+  qwen_local:   420,
+  neutts_local: 420,
+  kokoro:       300,
+  piper:        900,
+}
+
+const DEFAULT_FIRST_AUDIO_CHARS = 180
+const DEFAULT_AUDIO_CHARS = 800
+const PREFETCH_CHUNK_LIMIT = 3
+const LIVE_AUDIO_MEMORY_TTL_MS = 10 * 60_000
+const AUDIO_SLICE_CHARS = 2200
+const PROVIDER_PREVIEW_TEXT = (
+  'When the room quieted, the story finally found its rhythm. '
+  + 'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
+)
+
+const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
+  google: 2,
+  openai: 2,
+  polly: 2,
+  qwen: 2,
+  kokoro: 2,
+}
+
+const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
+  kokoro: 2,
+}
+
+const liveAudioMemoryCache = new Map<string, { expiresAt: number; promise: Promise<LiveAudioResult> }>()
+
+function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
+  return JSON.stringify([
+    bookId,
+    payload.provider,
+    payload.voice ?? '',
+    payload.model ?? '',
+    payload.output_format,
+    payload.length_scale,
+    payload.sentence_silence,
+    payload.start,
+    payload.end,
+    payload.text,
+  ])
+}
+
+function requestLiveAudio(bookId: string, payload: LiveAudioPayload) {
+  const key = liveAudioCacheKey(bookId, payload)
+  const now = Date.now()
+  const cached = liveAudioMemoryCache.get(key)
+  if (cached && cached.expiresAt > now) return cached.promise
+  if (cached) liveAudioMemoryCache.delete(key)
+
+  const promise = request<LiveAudioResult>(`/api/books/${bookId}/live-audio`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).catch((error) => {
+    liveAudioMemoryCache.delete(key)
+    throw error
+  })
+
+  liveAudioMemoryCache.set(key, { expiresAt: now + LIVE_AUDIO_MEMORY_TTL_MS, promise })
+  return promise
+}
+
+function audioSliceStart(textLength: number, scrollPct: number) {
+  if (textLength <= 0) return 0
+  const rawStart = Math.round(scrollPct * textLength) - 200
+  const maxStart = Math.max(0, textLength - AUDIO_SLICE_CHARS)
+  return Math.max(0, Math.min(rawStart, maxStart))
 }
 
 // Provider-tuned pacing
@@ -213,6 +323,28 @@ function audioErrorMessage(error: unknown) {
     return 'Could not reach the audio service. Check the connection and try again.'
   }
   return 'Could not start audio. Check the selected voice provider and try again.'
+}
+
+function needsAuthenticatedAudioFetch(url: string) {
+  if (url.startsWith('/library/')) return true
+  try {
+    const parsed = new URL(url, window.location.href)
+    const localApiHost = ['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(parsed.hostname)
+    return parsed.pathname.startsWith('/library/') && (parsed.origin === window.location.origin || localApiHost)
+  } catch {
+    return false
+  }
+}
+
+async function playableAudioUrl(url: string, signal?: AbortSignal) {
+  if (!needsAuthenticatedAudioFetch(url)) return { url, revoke: () => {} }
+
+  const blob = await requestBlob(url, { signal })
+  const objectUrl = URL.createObjectURL(blob)
+  return {
+    url: objectUrl,
+    revoke: () => URL.revokeObjectURL(objectUrl),
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1308,13 +1440,16 @@ function buildAudioChunks(
   fullText: string,
   globalStart: number,
   targetChars: number,
+  firstTargetChars = targetChars,
 ): Array<{ start: number; end: number; text: string }> {
   const chunks: Array<{ start: number; end: number; text: string }> = []
   let localPos = 0
 
   while (localPos < fullText.length) {
+    const isFirstChunk = chunks.length === 0
+    const currentTarget = isFirstChunk ? firstTargetChars : targetChars
     const remaining = fullText.length - localPos
-    if (remaining <= targetChars) {
+    if (remaining <= currentTarget) {
       // Last (or only) chunk — take everything left
       chunks.push({
         start: globalStart + localPos,
@@ -1324,9 +1459,13 @@ function buildAudioChunks(
       break
     }
 
-    // Find the last sentence boundary within [targetChars-100, targetChars+200]
-    const searchWindow = fullText.slice(localPos + Math.max(0, targetChars - 100),
-                                        localPos + targetChars + 200)
+    const backtrack = isFirstChunk ? 60 : 100
+    const lookahead = isFirstChunk ? 60 : 200
+    const searchStart = Math.max(0, currentTarget - backtrack)
+    // Find the last sentence boundary near the target. The first chunk gets a
+    // narrow window so startup latency stays low even if it cuts earlier.
+    const searchWindow = fullText.slice(localPos + searchStart,
+                                        localPos + currentTarget + lookahead)
     let boundary = -1
     for (let i = searchWindow.length - 1; i >= 0; i--) {
       if (/[.!?]/.test(searchWindow[i]) && /[\s"']/.test(searchWindow[i + 1] ?? ' ')) {
@@ -1335,9 +1474,11 @@ function buildAudioChunks(
       }
     }
 
+    const hardSlice = fullText.slice(localPos, localPos + currentTarget)
+    const lastSpace = Math.max(hardSlice.lastIndexOf(' '), hardSlice.lastIndexOf('\n'), hardSlice.lastIndexOf('\t'))
     const chunkLen = boundary >= 0
-      ? Math.max(0, targetChars - 100) + boundary
-      : targetChars   // hard cut if no sentence found
+      ? searchStart + boundary
+      : (lastSpace > currentTarget * 0.6 ? lastSpace + 1 : currentTarget)
 
     const localEnd = localPos + chunkLen
     const slice = fullText.slice(localPos, localEnd)
@@ -1363,44 +1504,44 @@ export interface AudioHandle {
   stop:   () => void
 }
 
-function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderChange, voice, onVoiceChange, onPhaseChange, onHandleReady, onError }: {
-  onClose: () => void; bookId: string
-  getSlice: () => { text: string; start: number }
+function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVoiceChange, onError }: {
+  onClose: () => void
   colors: typeof THEMES['paper']
   provider: string; onProviderChange: (p: string) => void
   voice: string | null; onVoiceChange: (v: string | null) => void
-  onPhaseChange?: (phase: AudioPhase, cur: number, total: number) => void
-  onHandleReady?: (h: AudioHandle) => void
   onError?: (message: string) => void
 }) {
   const [phase,   setPhase]   = useState<'idle' | 'buffering' | 'playing' | 'paused'>('idle')
   const [chunks,  setChunks]  = useState<AudioChunk[]>([])
   const [curIdx,  setCurIdx]  = useState(0)
   const [rate,    setRate]    = useState(1.0)
+  const [sampleText, setSampleText] = useState(PROVIDER_PREVIEW_TEXT)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
   const audioRef    = useRef<HTMLAudioElement | null>(null)
   const rateRef     = useRef(rate)
   const chunksRef   = useRef<AudioChunk[]>([])
+  const curIdxRef   = useRef(0)
   const abortRef    = useRef<AbortController | null>(null)
-  // Stable refs so the play bar's handle never goes stale
-  const toggleRef   = useRef<() => void>(() => {})
-  const stopRef     = useRef<() => void>(() => {})
+  const audioObjectUrlsRef = useRef<Set<string>>(new Set())
+  const chunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
   rateRef.current   = rate
   chunksRef.current = chunks
 
-  // Report phase + progress upward so the play bar can render outside the sheet
-  useEffect(() => {
-    onPhaseChange?.(phase, curIdx, chunks.length)
-  }, [phase, curIdx, chunks.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  function rememberAudioObjectUrl(url: string) {
+    if (url.startsWith('blob:')) audioObjectUrlsRef.current.add(url)
+  }
 
-  // Expose stable handle on mount
-  useEffect(() => {
-    onHandleReady?.({
-      toggle: () => toggleRef.current(),
-      stop:   () => stopRef.current(),
-    })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  function revokeAudioObjectUrls() {
+    for (const url of audioObjectUrlsRef.current) URL.revokeObjectURL(url)
+    audioObjectUrlsRef.current.clear()
+  }
+
+  useEffect(() => () => {
+    abortRef.current?.abort()
+    audioRef.current?.pause()
+    chunkFetchesRef.current.clear()
+    revokeAudioObjectUrls()
   }, [])
 
   // Fetch voice list
@@ -1413,6 +1554,8 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
   const activeProvider = providerOptions.find(p => p.id === provider)
   const providerVoices = activeProvider?.voices ?? []
   const selectedProviderUnavailable = Boolean(providersRes?.providers?.length && (!activeProvider || !activeProvider.available))
+  const selectedVoiceId = voice ?? (providerVoices[0]?.id ?? null)
+  const selectedVoiceIndex = providerVoices.findIndex((item) => item.id === selectedVoiceId)
 
   // ── Fetch a single chunk and store its URL ──────────────────────────────────
 
@@ -1423,29 +1566,97 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
     setChunks(next)
   }
 
-  async function fetchChunk(idx: number, chunk: AudioChunk, signal: AbortSignal): Promise<string | null> {
+  async function fetchChunk(idx: number, _chunk: AudioChunk, signal: AbortSignal): Promise<string | null> {
+    const existingChunk = chunksRef.current[idx]
+    if (existingChunk?.url) return existingChunk.url
+    const existingFetch = chunkFetchesRef.current.get(idx)
+    if (existingFetch) return existingFetch
+
     updateChunk(idx, { status: 'fetching' })
-    try {
-      const { lengthScale, sentenceSilence } = pacingFor(provider)
-      const { url } = await request<{ url: string }>(`/api/books/${bookId}/live-audio`, {
-        method: 'POST', signal,
-        body: JSON.stringify({
-          provider, voice, model: null, output_format: 'mp3',
-          narration_style: '', length_scale: lengthScale, sentence_silence: sentenceSilence,
-          pageNumber: 1, start: chunk.start, end: chunk.end, text: chunk.text,
-        }),
-      })
-      updateChunk(idx, { status: 'ready', url })
-      return url
-    } catch (e) {
-      if ((e as Error).name !== 'AbortError') {
-        const message = audioErrorMessage(e)
-        setErrorMsg(message)
-        onError?.(message)
-        updateChunk(idx, { status: 'error' })
+    const fetchPromise = (async () => {
+      try {
+        const { lengthScale, sentenceSilence } = pacingFor(provider)
+        const previewLengthScale = Math.max(0.6, Math.min(lengthScale * rateRef.current, 1.5))
+        const preview = await request<ProviderTestResult>('/api/providers/test', {
+          method: 'POST',
+          body: JSON.stringify({
+            provider,
+            voice,
+            model: null,
+            narration_style: '',
+            length_scale: previewLengthScale,
+            sentence_silence: sentenceSilence,
+          }),
+          signal,
+        })
+        if (signal.aborted) return null
+        const playable = await playableAudioUrl(preview.audioUrl, signal)
+        if (signal.aborted) {
+          playable.revoke()
+          return null
+        }
+        setSampleText(preview.sampleText || PROVIDER_PREVIEW_TEXT)
+        rememberAudioObjectUrl(playable.url)
+        updateChunk(idx, { status: 'ready', url: playable.url })
+        return playable.url
+      } catch (e) {
+        if ((e as Error).name !== 'AbortError') {
+          const message = audioErrorMessage(e)
+          setErrorMsg(message)
+          onError?.(message)
+          updateChunk(idx, { status: 'error' })
+        }
+        return null
+      } finally {
+        chunkFetchesRef.current.delete(idx)
       }
-      return null
+    })()
+
+    chunkFetchesRef.current.set(idx, fetchPromise)
+    return fetchPromise
+  }
+
+  function prefetchAhead(fromIdx: number, currentChunks: AudioChunk[], signal: AbortSignal) {
+    const nextIdx = fromIdx + 1
+    const nextChunk = currentChunks[nextIdx]
+    if (!nextChunk) return
+
+    if (!nextChunk.url && nextChunk.status === 'idle') {
+      void fetchChunk(nextIdx, nextChunk, signal)
+      return
     }
+
+    const afterNextIdx = nextIdx + 1
+    const afterNextChunk = currentChunks[afterNextIdx]
+    if (!afterNextChunk || !nextChunk.url) return
+    if (afterNextChunk.url || afterNextChunk.status === 'fetching') return
+    void fetchChunk(afterNextIdx, afterNextChunk, signal)
+  }
+
+  async function continuePlayback(nextIdx: number, ctrl: AbortController) {
+    const latest = chunksRef.current
+    if (nextIdx >= latest.length) {
+      setPhase('idle')
+      setCurIdx(0)
+      curIdxRef.current = 0
+      revokeAudioObjectUrls()
+      return
+    }
+
+    const nextChunk = latest[nextIdx]
+    if (nextChunk.url) {
+      playChunkAt(nextIdx, latest, ctrl)
+      return
+    }
+
+    setPhase('buffering')
+    const url = await fetchChunk(nextIdx, nextChunk, ctrl.signal)
+    if (ctrl.signal.aborted) return
+    if (!url) {
+      setPhase('idle')
+      return
+    }
+    playChunkAt(nextIdx, chunksRef.current, ctrl)
   }
 
   // ── Play a chunk, prefetch next, chain onended ──────────────────────────────
@@ -1460,6 +1671,7 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
     audioRef.current  = audio
     setPhase('playing')
     setCurIdx(idx)
+    curIdxRef.current = idx
     setErrorMsg(null)
     audio.play().catch(() => {
       if (ctrl.signal.aborted) return
@@ -1467,46 +1679,12 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
       setErrorMsg('Audio is ready. Tap play again to start playback.')
     })
 
-    // Prefetch next chunk immediately (so it's ready before this one ends)
-    const nextIdx = idx + 1
-    if (nextIdx < currentChunks.length && currentChunks[nextIdx].status === 'idle') {
-      fetchChunk(nextIdx, currentChunks[nextIdx], ctrl.signal).then((url) => {
-        if (!url || ctrl.signal.aborted) return
-        // Prefetch chunk after next too (2-chunk lookahead)
-        const afterNext = nextIdx + 1
-        const latest = chunksRef.current
-        if (afterNext < latest.length && latest[afterNext].status === 'idle') {
-          fetchChunk(afterNext, latest[afterNext], ctrl.signal)
-        }
-      })
-    }
+    // Keep the next couple of chunks in flight while the current one is playing.
+    prefetchAhead(idx, currentChunks, ctrl.signal)
 
     audio.onended = () => {
       if (ctrl.signal.aborted) return
-      const latest = chunksRef.current
-      if (nextIdx >= latest.length) {
-        // All chunks done
-        setPhase('idle')
-        setCurIdx(0)
-        return
-      }
-      const next = latest[nextIdx]
-      if (next.status === 'ready' && next.url) {
-        playChunkAt(nextIdx, latest, ctrl)
-      } else {
-        // Brief buffering between chunks (should be rare with 2-chunk lookahead)
-        setPhase('buffering')
-        const waitInterval = setInterval(() => {
-          const c2 = chunksRef.current[nextIdx]
-          if (c2?.status === 'ready' && c2.url) {
-            clearInterval(waitInterval)
-            playChunkAt(nextIdx, chunksRef.current, ctrl)
-          } else if (c2?.status === 'error') {
-            clearInterval(waitInterval)
-            setPhase('idle')
-          }
-        }, 200)
-      }
+      void continuePlayback(idx + 1, ctrl)
     }
     audio.onerror = () => {
       if (ctrl.signal.aborted) return
@@ -1519,6 +1697,9 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
 
   async function startPlayback() {
     abortRef.current?.abort()
+    audioRef.current?.pause()
+    revokeAudioObjectUrls()
+    chunkFetchesRef.current.clear()
     const ctrl = new AbortController()
     abortRef.current = ctrl
     setErrorMsg(null)
@@ -1530,27 +1711,20 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
       return
     }
 
-    const { text, start } = getSlice()
-    if (!text.trim()) {
-      setErrorMsg('There is no readable text at this position.')
+    if (!selectedVoiceId) {
+      setErrorMsg('Choose a voice to preview.')
       return
     }
 
-    const chunkSize = CHUNK_CHARS[provider] ?? text.length  // cloud = one request
-    const raw = buildAudioChunks(text, start, chunkSize)
-    const initial: AudioChunk[] = raw.map(r => ({ ...r, url: null, status: 'idle' }))
+    const initial: AudioChunk[] = [{ start: 0, end: 0, text: sampleText, url: null, status: 'idle' }]
     setChunks(initial)
     chunksRef.current = initial
     setCurIdx(0)
+    curIdxRef.current = 0
     setPhase('buffering')
 
-    // Fetch chunk 0 immediately; for chunked providers kick off chunk 1 in parallel
     const url0 = await fetchChunk(0, initial[0], ctrl.signal)
     if (ctrl.signal.aborted || !url0) { setPhase('idle'); return }
-
-    if (isChunking(provider) && initial.length > 1) {
-      fetchChunk(1, initial[1], ctrl.signal)
-    }
 
     playChunkAt(0, chunksRef.current, ctrl)
   }
@@ -1558,8 +1732,11 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
   function stopPlayback() {
     abortRef.current?.abort()
     audioRef.current?.pause()
+    revokeAudioObjectUrls()
+    chunkFetchesRef.current.clear()
     setPhase('idle')
     setCurIdx(0)
+    curIdxRef.current = 0
   }
 
   function togglePlay() {
@@ -1580,10 +1757,6 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
     // 'buffering' → ignore taps
   }
 
-  // Keep stable refs up-to-date on every render
-  toggleRef.current = togglePlay
-  stopRef.current   = stopPlayback
-
   // Stop when sheet closes
   const handleClose = () => { stopPlayback(); onClose() }
 
@@ -1592,6 +1765,7 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
   const isBuffering = phase === 'buffering'
   const isPlaying   = phase === 'playing'
   const isPaused    = phase === 'paused'
+  const playDisabled = isBuffering || selectedProviderUnavailable || !selectedVoiceId
 
   const totalChunks  = chunks.length
   const readyChunks  = chunks.filter(c => c.status === 'ready').length
@@ -1600,9 +1774,18 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
   // Buffering label
   const bufferLabel = (() => {
     if (!isBuffering) return null
-    if (provider === 'neutts_local' || provider === 'kokoro') return 'Synthesising…'
-    return 'Loading…'
+    if (provider === 'neutts_local' || provider === 'kokoro') return 'Generating sample…'
+    return 'Loading preview…'
   })()
+
+  function cycleVoice(direction: -1 | 1) {
+    if (providerVoices.length < 2) return
+    const baseIndex = selectedVoiceIndex >= 0 ? selectedVoiceIndex : 0
+    const nextIndex = (baseIndex + direction + providerVoices.length) % providerVoices.length
+    stopPlayback()
+    setErrorMsg(null)
+    onVoiceChange(providerVoices[nextIndex].id)
+  }
 
   return (
     <div className="px-4 pt-1 pb-safe space-y-5"
@@ -1670,6 +1853,14 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
           }} />
       </div>
 
+      <div className="rounded-2xl border px-4 py-3 space-y-1.5"
+        style={{ borderColor: `${colors.text}12`, background: `${colors.text}05` }}>
+        <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40">Voice Sample</p>
+        <p className="text-sm leading-6 opacity-75 italic">
+          "{sampleText}"
+        </p>
+      </div>
+
       {/* Progress bar — visible while loading/playing multi-chunk */}
       {showProgress && (
         <div className="space-y-1.5">
@@ -1691,7 +1882,6 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
         </div>
       )}
 
-      {/* Buffering label for single-chunk (cloud) providers */}
       {isBuffering && !showProgress && (
         <p className="text-xs text-center opacity-40">{bufferLabel}</p>
       )}
@@ -1705,10 +1895,15 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
 
       {/* Controls */}
       <div className="flex items-center justify-center gap-8 py-2 pb-4">
-        <button className="p-2 opacity-30 hover:opacity-60 transition-opacity"><SkipBack size={22} /></button>
+        <button
+          onClick={() => cycleVoice(-1)}
+          disabled={providerVoices.length < 2 || isBuffering}
+          className="p-2 opacity-30 hover:opacity-60 transition-opacity disabled:opacity-15"
+          aria-label="Previous voice"
+        ><SkipBack size={22} /></button>
         <button
           onClick={togglePlay}
-          disabled={isBuffering}
+          disabled={playDisabled}
           className="w-14 h-14 rounded-full bg-primary text-white flex items-center justify-center shadow-lg active:scale-95 transition-transform disabled:opacity-50"
         >
           {isBuffering
@@ -1718,43 +1913,18 @@ function AudioContent({ onClose, bookId, getSlice, colors, provider, onProviderC
                 : <Play size={24} fill="currentColor" />
               )}
         </button>
-        <button className="p-2 opacity-30 hover:opacity-60 transition-opacity"><SkipForward size={22} /></button>
+        <button
+          onClick={() => cycleVoice(1)}
+          disabled={providerVoices.length < 2 || isBuffering}
+          className="p-2 opacity-30 hover:opacity-60 transition-opacity disabled:opacity-15"
+          aria-label="Next voice"
+        ><SkipForward size={22} /></button>
       </div>
     </div>
   )
 }
 
 // ── Word Audio Banner ─────────────────────────────────────────────────────────
-
-function WordAudioBanner({ word, status, onStop, onPlay }: {
-  word: string; status: 'loading' | 'ready' | 'playing'; onStop: () => void; onPlay: () => void
-}) {
-  return (
-    <motion.div
-      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2.5 rounded-2xl shadow-xl"
-      style={{
-        background: 'rgba(28,28,30,0.96)', backdropFilter: 'blur(16px)',
-        border: '1px solid rgba(255,255,255,0.10)', color: '#fff',
-      }}
-      initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: 10 }} transition={{ type: 'spring', damping: 28 }}
-    >
-      {status === 'loading'
-        ? <div className="w-4 h-4 border-2 border-white/50 border-t-transparent rounded-full animate-spin" />
-        : status === 'ready'
-          ? <button onClick={onPlay} className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center hover:bg-white/15">
-              <Play size={12} fill="currentColor" />
-            </button>
-          : <Mic size={15} className="opacity-55" />}
-      <span className="text-sm max-w-[180px] truncate">
-        {status === 'ready' ? `${word} · tap play` : word}
-      </span>
-      <button onClick={onStop} className="p-0.5 ml-1 opacity-45 hover:opacity-80 transition-opacity">
-        <X size={13} />
-      </button>
-    </motion.div>
-  )
-}
 
 // ── Play Bar ──────────────────────────────────────────────────────────────────
 // Persistent bottom bar visible while audio is buffering / playing / paused.
@@ -1869,12 +2039,10 @@ export function ReaderRoute() {
   const [panel,         setPanel]         = useState<SecondaryPanel | null>(null)
   const [toast,         setToast]         = useState<string | null>(null)
   const [wordAudio,     setWordAudio]     = useState<{ word: string; status: 'loading' | 'ready' | 'playing' } | null>(null)
+  const [wordAudioCurIdx, setWordAudioCurIdx] = useState(0)
+  const [wordAudioTotal,  setWordAudioTotal]  = useState(0)
   const [ttsProvider,   setTtsProvider]   = useState(() => loadAudioPrefs().provider)
   const [ttsVoice,      setTtsVoice]      = useState<string | null>(() => loadAudioPrefs().voice)
-  const [audioPhase,    setAudioPhase]    = useState<AudioPhase>('idle')
-  const [audioCurIdx,   setAudioCurIdx]   = useState(0)
-  const [audioTotal,    setAudioTotal]    = useState(0)
-  const audioHandleRef  = useRef<AudioHandle | null>(null)
 
   const lastScrollY           = useRef(0)
   const latestScrollPct       = useRef(0)
@@ -1882,9 +2050,14 @@ export function ReaderRoute() {
   const saveTimer             = useRef<ReturnType<typeof setTimeout> | null>(null)
   const justShowedMenu        = useRef(false)
   const scrolledToOffsetRef   = useRef(false)
-  const wordAudioRef      = useRef<HTMLAudioElement | null>(null)
-  const readerTextRef     = useRef<HTMLDivElement | null>(null)
-  const panelSnapshotRef  = useRef<SecondaryPanel | null>(null)
+  const wordAudioRef          = useRef<HTMLAudioElement | null>(null)
+  const wordAudioAbortRef     = useRef<AbortController | null>(null)
+  const wordAudioCurIdxRef    = useRef(0)
+  const wordAudioChunksRef    = useRef<AudioChunk[]>([])
+  const wordAudioChunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
+  const wordAudioObjectUrlsRef = useRef<Set<string>>(new Set())
+  const readerTextRef         = useRef<HTMLDivElement | null>(null)
+  const panelSnapshotRef      = useRef<SecondaryPanel | null>(null)
   const openPanel = useCallback((nextPanel: SecondaryPanel) => {
     panelSnapshotRef.current = nextPanel
     setPanel(nextPanel)
@@ -1924,6 +2097,13 @@ export function ReaderRoute() {
   const playBarVoiceLabel = effectiveProviderInfo
     ?.voices.find(v => v.id === effectiveTtsVoice)
     ?.label ?? effectiveTtsVoice ?? effectiveProviderInfo?.name ?? effectiveTtsProvider
+  const wordAudioPhase: AudioPhase = !wordAudio
+    ? 'idle'
+    : wordAudio.status === 'loading'
+      ? 'buffering'
+      : wordAudio.status === 'playing'
+        ? 'playing'
+        : 'paused'
 
   // Restore scroll position — also handles ?offset= from notes navigation
   useEffect(() => {
@@ -1991,11 +2171,16 @@ export function ReaderRoute() {
       prefetchRef.current = ctrl
 
       const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
-      const start = Math.max(0, Math.round(scrollPct * payload.text.length) - 200)
-      const fullSlice = payload.text.slice(start, start + 2200)
+      const start = audioSliceStart(payload.text.length, scrollPct)
+      const fullSlice = payload.text.slice(start, start + AUDIO_SLICE_CHARS)
       if (!fullSlice.trim()) return
 
-      const chunkDefs = buildAudioChunks(fullSlice, start, CHUNK_CHARS[effectiveTtsProvider] ?? 900)
+      const chunkDefs = buildAudioChunks(
+        fullSlice,
+        start,
+        CHUNK_CHARS[effectiveTtsProvider] ?? DEFAULT_AUDIO_CHARS,
+        FIRST_AUDIO_CHARS[effectiveTtsProvider] ?? DEFAULT_FIRST_AUDIO_CHARS,
+      ).slice(0, PREFETCH_CHUNK_LIMIT)
       if (chunkDefs.length === 0) return
 
       // Prefetch all chunks sequentially — by the time the user hits play most are cached
@@ -2003,13 +2188,18 @@ export function ReaderRoute() {
         for (const chunk of chunkDefs) {
           if (ctrl.signal.aborted) return
           try {
-            await request(`/api/books/${bookId}/live-audio`, {
-              method: 'POST', signal: ctrl.signal,
-              body: JSON.stringify({
-                provider: effectiveTtsProvider, voice: effectiveTtsVoice, model: null, output_format: 'mp3',
-                narration_style: '', length_scale: lengthScale, sentence_silence: sentenceSilence,
-                pageNumber: 1, start: chunk.start, end: chunk.end, text: chunk.text,
-              }),
+            await requestLiveAudio(bookId, {
+              provider: effectiveTtsProvider,
+              voice: effectiveTtsVoice,
+              model: null,
+              output_format: 'mp3',
+              narration_style: '',
+              length_scale: lengthScale,
+              sentence_silence: sentenceSilence,
+              pageNumber: 1,
+              start: chunk.start,
+              end: chunk.end,
+              text: chunk.text,
             })
           } catch { /* silent */ }
         }
@@ -2205,12 +2395,156 @@ export function ReaderRoute() {
 
   // ── Play word ─────────────────────────────────────────────────────────────
 
-  async function playWord(word: string, startOffset: number) {
+  function clearWordAudioObjectUrls() {
+    for (const url of wordAudioObjectUrlsRef.current) URL.revokeObjectURL(url)
+    wordAudioObjectUrlsRef.current.clear()
+  }
+
+  function updateWordAudioChunk(idx: number, patch: Partial<AudioChunk>) {
+    const next = [...wordAudioChunksRef.current]
+    if (next[idx]) next[idx] = { ...next[idx], ...patch }
+    wordAudioChunksRef.current = next
+  }
+
+  async function fetchWordAudioChunk(idx: number, chunk: AudioChunk, signal: AbortSignal): Promise<string | null> {
+    const existingChunk = wordAudioChunksRef.current[idx]
+    if (existingChunk?.url) return existingChunk.url
+    const existingFetch = wordAudioChunkFetchesRef.current.get(idx)
+    if (existingFetch) return existingFetch
+
+    updateWordAudioChunk(idx, { status: 'fetching' })
+    const fetchPromise = (async () => {
+      try {
+        const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
+        const { url } = await requestLiveAudio(bookId!, {
+          provider: effectiveTtsProvider,
+          voice: effectiveTtsVoice,
+          model: null,
+          output_format: 'mp3',
+          narration_style: '',
+          length_scale: lengthScale,
+          sentence_silence: sentenceSilence,
+          pageNumber: 1,
+          start: chunk.start,
+          end: chunk.end,
+          text: chunk.text,
+        })
+        if (signal.aborted) return null
+        const playable = await playableAudioUrl(url, signal)
+        if (signal.aborted) {
+          playable.revoke()
+          return null
+        }
+        if (playable.url.startsWith('blob:')) wordAudioObjectUrlsRef.current.add(playable.url)
+        updateWordAudioChunk(idx, { status: 'ready', url: playable.url })
+        prefetchWordAudioAhead(wordAudioCurIdxRef.current, wordAudioChunksRef.current, signal)
+        return playable.url
+      } catch (error) {
+        if ((error as Error).name !== 'AbortError') {
+          setWordAudio(null)
+          showToast(audioErrorMessage(error))
+          updateWordAudioChunk(idx, { status: 'error' })
+        }
+        return null
+      } finally {
+        wordAudioChunkFetchesRef.current.delete(idx)
+      }
+    })()
+
+    wordAudioChunkFetchesRef.current.set(idx, fetchPromise)
+    return fetchPromise
+  }
+
+  function prefetchWordAudioAhead(fromIdx: number, currentChunks: AudioChunk[], signal: AbortSignal) {
+    const nextIdx = fromIdx + 1
+    const nextChunk = currentChunks[nextIdx]
+    if (!nextChunk) return
+
+    if (!nextChunk.url && nextChunk.status === 'idle') {
+      void fetchWordAudioChunk(nextIdx, nextChunk, signal)
+      return
+    }
+
+    const afterNextIdx = nextIdx + 1
+    const afterNextChunk = currentChunks[afterNextIdx]
+    if (!afterNextChunk || !nextChunk.url) return
+    if (afterNextChunk.url || afterNextChunk.status === 'fetching') return
+    void fetchWordAudioChunk(afterNextIdx, afterNextChunk, signal)
+  }
+
+  function stopWordAudio() {
+    wordAudioAbortRef.current?.abort()
+    wordAudioAbortRef.current = null
     wordAudioRef.current?.pause()
+    wordAudioRef.current = null
+    wordAudioCurIdxRef.current = 0
+    wordAudioChunksRef.current = []
+    wordAudioChunkFetchesRef.current.clear()
+    clearWordAudioObjectUrls()
+    setWordAudioCurIdx(0)
+    setWordAudioTotal(0)
+    setWordAudio(null)
+  }
+
+  async function continueWordAudioPlayback(nextIdx: number, ctrl: AbortController, word: string) {
+    const latest = wordAudioChunksRef.current
+    if (nextIdx >= latest.length) {
+      stopWordAudio()
+      return
+    }
+
+    const nextChunk = latest[nextIdx]
+    if (nextChunk.url) {
+      playWordAudioChunkAt(nextIdx, latest, ctrl, word)
+      return
+    }
+
+    setWordAudio({ word, status: 'loading' })
+    const url = await fetchWordAudioChunk(nextIdx, nextChunk, ctrl.signal)
+    if (ctrl.signal.aborted) return
+    if (!url) {
+      stopWordAudio()
+      return
+    }
+    playWordAudioChunkAt(nextIdx, wordAudioChunksRef.current, ctrl, word)
+  }
+
+  function playWordAudioChunkAt(idx: number, currentChunks: AudioChunk[], ctrl: AbortController, word: string) {
+    const chunk = currentChunks[idx]
+    if (!chunk?.url) return
+
+    wordAudioRef.current?.pause()
+    const audio = new Audio(chunk.url)
+    wordAudioRef.current = audio
+    wordAudioCurIdxRef.current = idx
+    setWordAudioCurIdx(idx)
+    setWordAudio({ word, status: 'playing' })
+
+    audio.play().catch(() => {
+      if (ctrl.signal.aborted) return
+      setWordAudio({ word, status: 'ready' })
+      showToast('Audio is ready. Tap the banner play button.')
+    })
+
+    prefetchWordAudioAhead(idx, currentChunks, ctrl.signal)
+
+    audio.onended = () => {
+      if (ctrl.signal.aborted) return
+      void continueWordAudioPlayback(idx + 1, ctrl, word)
+    }
+    audio.onerror = () => {
+      if (ctrl.signal.aborted) return
+      showToast('Audio playback failed. Try starting it again.')
+      stopWordAudio()
+    }
+  }
+
+  async function playWord(word: string, startOffset: number) {
+    stopWordAudio()
     setWordAudio({ word, status: 'loading' })
     const fullText = payload?.text ?? ''
     const start = Math.max(0, Math.min(startOffset, fullText.length))
-    const end = Math.min(fullText.length, start + 2200)
+    const end = Math.min(fullText.length, start + AUDIO_SLICE_CHARS)
     const snippet = fullText.slice(start, end)
     if (!snippet.trim()) {
       setWordAudio(null)
@@ -2218,29 +2552,46 @@ export function ReaderRoute() {
       return
     }
 
-    try {
-      const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
-      const { url } = await request<{ url: string }>(`/api/books/${bookId}/live-audio`, {
-        method: 'POST',
-        body: JSON.stringify({
-          provider: effectiveTtsProvider, voice: effectiveTtsVoice, model: null, output_format: 'mp3',
-          narration_style: '', length_scale: lengthScale, sentence_silence: sentenceSilence,
-          pageNumber: 1, start, end, text: snippet,
-        }),
-      })
-      const audio = new Audio(url)
-      wordAudioRef.current = audio
-      audio.onended = () => setWordAudio(null)
-      audio.onerror = () => setWordAudio(null)
-      try {
-        await audio.play()
-        setWordAudio({ word, status: 'playing' })
-      } catch {
-        setWordAudio({ word, status: 'ready' })
-        showToast('Audio is ready. Tap the banner play button.')
-      }
-    } catch (error) {
+    const chunkSize = CHUNK_CHARS[effectiveTtsProvider] ?? DEFAULT_AUDIO_CHARS
+    const firstChunkSize = FIRST_AUDIO_CHARS[effectiveTtsProvider] ?? DEFAULT_FIRST_AUDIO_CHARS
+    const raw = buildAudioChunks(snippet, start, chunkSize, firstChunkSize)
+    const initial: AudioChunk[] = raw.map((chunk) => ({ ...chunk, url: null, status: 'idle' }))
+    if (!initial.length) {
       setWordAudio(null)
+      showToast('There is no readable text at this position.')
+      return
+    }
+
+    wordAudioChunksRef.current = initial
+    wordAudioCurIdxRef.current = 0
+    setWordAudioCurIdx(0)
+    setWordAudioTotal(initial.length)
+    const ctrl = new AbortController()
+    wordAudioAbortRef.current = ctrl
+
+    const startReadyChunkCount = Math.min(
+      initial.length,
+      START_PLAYBACK_READY_CHUNKS[effectiveTtsProvider] ?? 1,
+    )
+    const bootstrapCount = Math.min(
+      initial.length,
+      Math.max(PLAYBACK_BOOTSTRAP_CHUNKS[effectiveTtsProvider] ?? 1, startReadyChunkCount),
+    )
+    for (let idx = 0; idx < bootstrapCount; idx += 1) {
+      void fetchWordAudioChunk(idx, initial[idx], ctrl.signal)
+    }
+
+    try {
+      const startupReady = await Promise.all(
+        initial.slice(0, startReadyChunkCount).map((chunk, idx) => fetchWordAudioChunk(idx, chunk, ctrl.signal)),
+      )
+      if (ctrl.signal.aborted || startupReady.some((url) => !url)) {
+        stopWordAudio()
+        return
+      }
+      playWordAudioChunkAt(0, wordAudioChunksRef.current, ctrl, word)
+    } catch (error) {
+      stopWordAudio()
       showToast(audioErrorMessage(error))
     }
   }
@@ -2253,17 +2604,24 @@ export function ReaderRoute() {
       .catch(() => showToast('Playback was blocked by the browser. Tap play again.'))
   }
 
-  function stopWordAudio() {
-    wordAudioRef.current?.pause()
-    wordAudioRef.current = null
-    setWordAudio(null)
+  function toggleWordAudio() {
+    if (!wordAudio) return
+    if (wordAudio.status === 'loading') return
+    if (wordAudio.status === 'playing') {
+      wordAudioRef.current?.pause()
+      setWordAudio({ word: wordAudio.word, status: 'ready' })
+      return
+    }
+    resumeWordAudio()
   }
 
-  const getAudioText = useCallback(() => {
-    if (!payload?.text) return { text: '', start: 0 }
-    const start = Math.max(0, Math.round(scrollPct * payload.text.length) - 200)
-    return { text: payload.text.slice(start, start + 2200), start }
-  }, [payload?.text, scrollPct])
+  useEffect(() => () => {
+    wordAudioAbortRef.current?.abort()
+    wordAudioRef.current?.pause()
+    wordAudioChunkFetchesRef.current.clear()
+    for (const url of wordAudioObjectUrlsRef.current) URL.revokeObjectURL(url)
+    wordAudioObjectUrlsRef.current.clear()
+  }, [])
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -2276,6 +2634,12 @@ export function ReaderRoute() {
     [payload?.text],
   )
   const readPct = Math.round(scrollPct * 100)
+  const activePlayBarPhase = wordAudioPhase
+  const activePlayBarCurIdx = wordAudioCurIdx
+  const activePlayBarTotal = wordAudioTotal
+  const activePlayBarHandle = wordAudioPhase !== 'idle'
+    ? { toggle: toggleWordAudio, stop: stopWordAudio }
+    : null
 
   return (
     <div
@@ -2425,46 +2789,26 @@ export function ReaderRoute() {
       <BottomSheet open={sheet === 'audio'} onClose={() => setSheet('none')} bg={colors.bg}>
         <AudioContent
           onClose={() => setSheet('none')}
-          bookId={bookId!}
-          getSlice={getAudioText}
           colors={colors}
           provider={effectiveTtsProvider}
           onProviderChange={setTtsProvider}
           voice={effectiveTtsVoice}
           onVoiceChange={setTtsVoice}
-          onPhaseChange={(ph, cur, total) => {
-            setAudioPhase(ph)
-            setAudioCurIdx(cur)
-            setAudioTotal(total)
-          }}
-          onHandleReady={(h) => { audioHandleRef.current = h }}
           onError={showToast}
         />
       </BottomSheet>
 
       {/* ── Play bar (visible while audio is active) ──────────────────── */}
       <AnimatePresence>
-        {audioPhase !== 'idle' && (
+        {activePlayBarPhase !== 'idle' && (
           <PlayBar
-            phase={audioPhase}
-            curIdx={audioCurIdx}
-            totalChunks={audioTotal}
+            phase={activePlayBarPhase}
+            curIdx={activePlayBarCurIdx}
+            totalChunks={activePlayBarTotal}
             voiceLabel={playBarVoiceLabel}
             colors={colors}
-            handle={audioHandleRef.current}
+            handle={activePlayBarHandle}
             onOpenSheet={() => setSheet('audio')}
-          />
-        )}
-      </AnimatePresence>
-
-      {/* ── Word audio banner ─────────────────────────────────────────── */}
-      <AnimatePresence>
-        {wordAudio && (
-          <WordAudioBanner
-            word={wordAudio.word}
-            status={wordAudio.status}
-            onStop={stopWordAudio}
-            onPlay={resumeWordAudio}
           />
         )}
       </AnimatePresence>

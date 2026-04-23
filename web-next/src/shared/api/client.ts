@@ -79,6 +79,34 @@ export async function request<T = unknown>(
   return res.text() as unknown as T
 }
 
+export async function requestBlob(
+  url: string,
+  options: RequestInit = {},
+): Promise<Blob> {
+  let token = getToken() || await readSessionToken()
+  const headers = new Headers(options.headers)
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+
+  let res = await fetch(resolveUrl(url), { ...options, headers })
+
+  if (res.status === 401) {
+    const refreshedToken = await refreshSessionToken(token)
+    if (refreshedToken && refreshedToken !== token) {
+      token = refreshedToken
+      headers.set('Authorization', `Bearer ${token}`)
+      res = await fetch(resolveUrl(url), { ...options, headers })
+    }
+  }
+
+  if (res.status === 401) throw new AuthError('Unauthorized')
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText)
+    throw new Error(`${res.status}: ${text}`)
+  }
+
+  return res.blob()
+}
+
 function isLocalHostname(hostname: string) {
   return (
     hostname === 'localhost' ||

@@ -6,8 +6,8 @@
 #   fly secrets set KOKORO_API_KEY=$(openssl rand -hex 32)
 #   fly deploy --dockerfile Dockerfile.kokoro
 #
-# Recommended machine: shared-cpu-2x, 1 GB RAM (model needs ~600 MB)
-#   fly scale vm shared-cpu-2x --memory 1024
+# Recommended machine: shared-cpu-2x, 2 GB RAM (keeps Kokoro from being OOM-killed during synthesis)
+#   fly scale vm shared-cpu-2x --memory 2048
 #
 # Get URL: fly info
 # Then set in Vercel:
@@ -44,4 +44,4 @@ primary_region = "ams"
 
 [[vm]]
   size   = "shared-cpu-2x"
-  memory = "1024mb"
+  memory = "2048mb"
