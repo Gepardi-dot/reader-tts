@@ -7,6 +7,7 @@ import {
   Play, Pause, SkipBack, SkipForward,
   Minus, Plus, AlignLeft, AlignCenter, AlignJustify,
   Copy, BookMarked, Globe, BookOpen, Mic, NotebookPen, Sparkles, Search,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -2646,43 +2647,60 @@ export function ReaderRoute() {
       className="min-h-svh"
       style={{ backgroundColor: colors.bg, color: colors.text }}
     >
-      {/* ── Top bar ───────────────────────────────────────────────────── */}
+      {/* ── Top bar (floating pill) ───────────────────────────────── */}
       <header
-        className="fixed inset-x-0 top-0 z-40 flex items-center px-4 h-12 transition-transform duration-200"
+        className="fixed z-40 flex items-center px-2.5 h-12"
         style={{
+          top: 16,
+          left: '50%',
+          width: 'min(560px, calc(100vw - 32px))',
+          borderRadius: 14,
           backgroundColor: colors.bar,
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)',
-          transform: barVisible ? 'translateY(0)' : 'translateY(-100%)',
-          borderBottom: `1px solid ${colors.text}14`,
+          backdropFilter: 'blur(14px)',
+          WebkitBackdropFilter: 'blur(14px)',
+          border: `1px solid ${colors.text}0f`,
+          boxShadow: '0 2px 12px rgba(0,0,0,0.06)',
+          opacity: barVisible ? 1 : 0,
+          transform: barVisible
+            ? 'translateX(-50%) translateY(0)'
+            : 'translateX(-50%) translateY(-14px)',
+          transition: 'opacity 200ms, transform 200ms',
+          pointerEvents: barVisible ? 'auto' : 'none',
         }}
       >
         <Link to="/library"
-          className="flex items-center gap-1.5 text-sm hover:opacity-55 transition-opacity shrink-0"
-          style={{ color: colors.text }}>
-          <ArrowLeft size={16} />
-          <span className="hidden sm:inline">Library</span>
+          className="flex items-center justify-center w-9 h-9 rounded-lg hover:opacity-55 transition-opacity shrink-0"
+          style={{ color: colors.text }}
+          aria-label="Back to Library"
+        >
+          <ArrowLeft size={18} />
         </Link>
 
-        <div className="flex-1 text-center px-3 min-w-0">
-          <p className="text-sm font-medium truncate"
-            style={{ color: colors.text, fontFamily: '"Playfair Display", Georgia, serif' }}>
+        <div className="flex-1 text-center px-2 min-w-0">
+          <p
+            className="text-[12.5px] truncate"
+            style={{ color: `${colors.text}99`, fontFamily: '"Inter", system-ui, sans-serif' }}
+          >
             {payload?.book.title ?? ''}
           </p>
-          <div className="h-0.5 rounded-full mt-1 mx-auto transition-all duration-300"
-            style={{ width: `${readPct}%`, maxWidth: '180px', backgroundColor: `${colors.text}35` }} />
         </div>
 
-        <div className="flex items-center gap-0.5 shrink-0">
-          <button onClick={() => setSheet(s => s === 'audio' ? 'none' : 'audio')}
-            className="p-2 rounded-md transition-opacity hover:opacity-55"
-            style={{ color: colors.text }} aria-label="Audio">
-            <Volume2 size={18} />
+        <div className="flex items-center shrink-0">
+          <button
+            onClick={() => setSheet(s => s === 'audio' ? 'none' : 'audio')}
+            className="flex items-center justify-center w-9 h-9 rounded-lg hover:opacity-55 transition-opacity"
+            style={{ color: colors.text }}
+            aria-label="Audio"
+          >
+            <Volume2 size={16} />
           </button>
-          <button onClick={() => setSheet(s => s === 'appearance' ? 'none' : 'appearance')}
-            className="p-2 rounded-md transition-opacity hover:opacity-55"
-            style={{ color: colors.text }} aria-label="Appearance">
-            <Settings2 size={18} />
+          <button
+            onClick={() => setSheet(s => s === 'appearance' ? 'none' : 'appearance')}
+            className="flex items-center justify-center w-9 h-9 rounded-lg hover:opacity-55 transition-opacity"
+            style={{ color: colors.text }}
+            aria-label="Appearance"
+          >
+            <Settings2 size={16} />
           </button>
         </div>
       </header>
@@ -2705,7 +2723,7 @@ export function ReaderRoute() {
 
       {/* ── Scrollable text ───────────────────────────────────────────── */}
       <div
-        className="mx-auto px-5 pt-16 pb-32 transition-all duration-200"
+        className="mx-auto px-5 pt-20 pb-36 transition-all duration-200"
         style={{
           maxWidth: `${WIDTH_PX[appearance.width]}px`,
           WebkitTouchCallout: 'none',  // suppress iOS long-press callout
@@ -2735,6 +2753,64 @@ export function ReaderRoute() {
             ))}
           </div>
         )}
+      </div>
+
+      {/* ── Bottom progress bar (floating pill) ─────────────────────── */}
+      <div
+        className="fixed z-40 flex items-center gap-2.5 px-3"
+        style={{
+          bottom: 18,
+          left: '50%',
+          height: 44,
+          width: 'min(420px, calc(100vw - 32px))',
+          borderRadius: 999,
+          backgroundColor: colors.bar,
+          backdropFilter: 'blur(14px)',
+          WebkitBackdropFilter: 'blur(14px)',
+          border: `1px solid ${colors.text}0f`,
+          boxShadow: '0 4px 14px rgba(0,0,0,0.08)',
+          opacity: barVisible && activePlayBarPhase === 'idle' ? 1 : 0,
+          transform: barVisible && activePlayBarPhase === 'idle'
+            ? 'translateX(-50%) translateY(0)'
+            : 'translateX(-50%) translateY(10px)',
+          transition: 'opacity 200ms, transform 200ms',
+          pointerEvents: barVisible && activePlayBarPhase === 'idle' ? 'auto' : 'none',
+        }}
+      >
+        <button
+          onClick={() => window.scrollBy({ top: -Math.round(window.innerHeight * 0.8), behavior: 'smooth' })}
+          className="flex items-center justify-center w-8 h-8 rounded-full shrink-0 hover:opacity-55 transition-opacity"
+          style={{ color: colors.text }}
+          aria-label="Scroll up"
+        >
+          <ChevronLeft size={16} />
+        </button>
+
+        <div
+          className="flex-1 h-[3px] rounded-full"
+          style={{ background: `${colors.text}18` }}
+        >
+          <div
+            className="h-full rounded-full transition-all duration-300"
+            style={{ width: `${readPct}%`, background: colors.text }}
+          />
+        </div>
+
+        <span
+          className="text-[11px] shrink-0 tabular-nums"
+          style={{ color: `${colors.text}80`, fontFamily: '"Inter", system-ui, sans-serif' }}
+        >
+          {readPct}%
+        </span>
+
+        <button
+          onClick={() => window.scrollBy({ top: Math.round(window.innerHeight * 0.8), behavior: 'smooth' })}
+          className="flex items-center justify-center w-8 h-8 rounded-full shrink-0 hover:opacity-55 transition-opacity"
+          style={{ color: colors.text }}
+          aria-label="Scroll down"
+        >
+          <ChevronRight size={16} />
+        </button>
       </div>
 
       {/* ── Selection menu ────────────────────────────────────────────── */}
