@@ -1,11 +1,9 @@
 import { useMemo } from 'react'
 import { useQuery, useQueries } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { FileText, BookOpen, ArrowRight, ExternalLink } from 'lucide-react'
+import { FileText } from 'lucide-react'
 import { api } from '@/shared/api/client'
-import { cn } from '@/lib/utils'
 
-// ── Types matching real API ───────────────────────────
 interface Book {
   id: string
   title: string
@@ -23,18 +21,15 @@ interface Highlight {
   createdAt: string
 }
 
-// ── Colour accents ────────────────────────────────────
-const COLOR_BAR: Record<Highlight['color'], string> = {
-  amber: 'bg-amber-400',
-  rose:  'bg-rose-400',
-  sky:   'bg-sky-400',
+interface Entry extends Highlight {
+  book: Book
 }
 
-const COLOR_BG: Record<Highlight['color'], string> = {
-  amber: 'bg-amber-50',
-  rose:  'bg-rose-50',
-  sky:   'bg-sky-50',
-}
+const COLORS = [
+  { strip: '#fbbf24', bg: '#fffbeb66' },
+  { strip: '#fb7185', bg: '#fff1f266' },
+  { strip: '#38bdf8', bg: '#f0f9ff66' },
+]
 
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime()
@@ -46,37 +41,55 @@ function timeAgo(iso: string) {
   return months < 12 ? `${months}mo ago` : `${Math.floor(months / 12)}y ago`
 }
 
-// ── Skeleton ──────────────────────────────────────────
-function Skeleton() {
+function NoteCard({ entry, index }: { entry: Entry; index: number }) {
+  const { strip, bg } = COLORS[index % COLORS.length]
   return (
-    <div className="px-4 space-y-4 pt-2">
-      {[1, 2].map((g) => (
-        <div key={g} className="rounded-xl border border-border bg-card overflow-hidden">
-          <div className="px-4 py-3 border-b border-border bg-muted/40 flex items-center justify-between">
-            <div className="h-4 w-40 rounded bg-muted animate-pulse" />
-            <div className="h-4 w-16 rounded bg-muted animate-pulse" />
-          </div>
-          <div className="divide-y divide-border">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="flex gap-3 p-4">
-                <div className="w-1 rounded-full bg-muted animate-pulse shrink-0" />
-                <div className="flex-1 space-y-2">
-                  <div className="h-3.5 w-full rounded bg-muted animate-pulse" />
-                  <div className="h-3.5 w-4/5 rounded bg-muted animate-pulse" />
-                  <div className="h-3 w-16 rounded bg-muted animate-pulse mt-2" />
-                </div>
-              </div>
-            ))}
-          </div>
+    <Link
+      to={`/book/${entry.book.id}?offset=${entry.start}`}
+      className="flex gap-0 rounded-xl overflow-hidden border border-[#e9e9e7] bg-white hover:shadow-sm transition-shadow"
+    >
+      {/* 4px colour strip */}
+      <div className="w-1 shrink-0" style={{ background: strip }} />
+
+      {/* Body */}
+      <div className="flex-1 px-3 py-2.5" style={{ background: bg }}>
+        <p
+          className="m-0 text-[13.5px] leading-[1.5] text-[#37352f]"
+          style={{ fontFamily: 'Lora, Georgia, serif' }}
+        >
+          "{entry.text}"
+        </p>
+
+        {entry.note && (
+          <p
+            className="mt-1.5 ml-2.5 pl-2 text-[12px] text-[#6c6c70] leading-snug border-l-2 border-[#e9e9e7]"
+          >
+            {entry.note}
+          </p>
+        )}
+
+        <div className="mt-1.5 text-[10px] font-medium text-[#9b9a97]">
+          {timeAgo(entry.createdAt)}
         </div>
-      ))}
+      </div>
+    </Link>
+  )
+}
+
+function SkeletonCard() {
+  return (
+    <div className="flex rounded-xl overflow-hidden border border-[#e9e9e7] bg-white">
+      <div className="w-1 shrink-0 bg-[#e9e9e7] animate-pulse" />
+      <div className="flex-1 px-3 py-2.5 space-y-2">
+        <div className="h-3 w-full rounded bg-[#f3f3f1] animate-pulse" />
+        <div className="h-3 w-2/3 rounded bg-[#f3f3f1] animate-pulse" />
+        <div className="h-2.5 w-10 rounded bg-[#f3f3f1] animate-pulse mt-1" />
+      </div>
     </div>
   )
 }
 
-// ── Main ──────────────────────────────────────────────
 export function NotesRoute() {
-  // 1. Fetch all books
   const { data: booksRaw, isLoading: booksLoading } = useQuery({
     queryKey: ['books'],
     queryFn: async () => {
@@ -85,13 +98,11 @@ export function NotesRoute() {
     },
   })
 
-  // Only query books that actually have highlights
   const booksWithNotes = useMemo(
     () => (booksRaw ?? []).filter((b) => b.highlightCount > 0),
     [booksRaw],
   )
 
-  // 2. Fetch highlights for each relevant book in parallel
   const highlightQueries = useQueries({
     queries: booksWithNotes.map((book) => ({
       queryKey: ['highlights', book.id],
@@ -105,111 +116,48 @@ export function NotesRoute() {
 
   const isLoading = booksLoading || highlightQueries.some((q) => q.isLoading)
 
-  // 3. Group: book → its highlights/notes (skip vocabulary kind)
-  const groups = useMemo(() => {
+  const entries: Entry[] = useMemo(() => {
     return booksWithNotes
-      .map((book, i) => {
-        const entries = (highlightQueries[i]?.data ?? []).filter(
-          (h) => h.kind === 'highlight' || h.kind === 'note',
-        )
-        return { book, entries }
-      })
-      .filter((g) => g.entries.length > 0)
+      .flatMap((book, i) =>
+        (highlightQueries[i]?.data ?? [])
+          .filter((h) => h.kind === 'highlight' || h.kind === 'note')
+          .map((h) => ({ ...h, book })),
+      )
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
   }, [booksWithNotes, highlightQueries])
-
-  const totalCount = groups.reduce((n, g) => n + g.entries.length, 0)
 
   return (
     <div className="min-h-svh bg-background pb-24 md:pb-6">
-      {/* ── Header ─────────────────────────────────── */}
       <div className="px-4 pt-6 pb-4">
         <div className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold text-foreground">Notes</h1>
-          {totalCount > 0 && (
-            <span className="text-sm text-muted-foreground">{totalCount} entries</span>
+          <h1 className="text-[22px] font-semibold text-foreground tracking-tight">Notes</h1>
+          {entries.length > 0 && (
+            <span className="text-sm text-muted-foreground">{entries.length} entries</span>
           )}
         </div>
-        <p className="text-sm text-muted-foreground mt-1">
+        <p className="text-[13px] text-muted-foreground mt-1">
           Highlights and notes from your reading
         </p>
       </div>
 
-      {/* ── Content ────────────────────────────────── */}
       {isLoading ? (
-        <Skeleton />
-      ) : groups.length === 0 ? (
+        <div className="px-4 space-y-3">
+          {Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)}
+        </div>
+      ) : entries.length === 0 ? (
         <div className="flex flex-col items-center justify-center px-6 py-24 text-center">
           <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
             <FileText size={28} className="text-muted-foreground/50" />
           </div>
           <p className="font-medium text-foreground mb-1">No notes yet</p>
-          <p className="text-sm text-muted-foreground max-w-xs">
+          <p className="text-[13px] text-muted-foreground max-w-xs">
             Select text in any book and choose <strong>Notes</strong> to save a highlight here.
           </p>
         </div>
       ) : (
-        <div className="px-4 space-y-4">
-          {groups.map(({ book, entries }) => (
-            <div
-              key={book.id}
-              className="rounded-xl border border-border bg-card overflow-hidden"
-            >
-              {/* Book header */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
-                <div className="flex items-center gap-2 min-w-0">
-                  <BookOpen size={14} className="text-muted-foreground shrink-0" />
-                  <span className="text-sm font-medium text-foreground truncate">
-                    {book.title}
-                  </span>
-                </div>
-                <Link
-                  to={`/book/${book.id}`}
-                  className="flex items-center gap-1 text-xs text-primary shrink-0 ml-3 hover:opacity-70 transition-opacity"
-                >
-                  Open <ArrowRight size={12} />
-                </Link>
-              </div>
-
-              {/* Entries */}
-              <div className="divide-y divide-border">
-                {entries.map((entry) => (
-                  <Link
-                    key={entry.id}
-                    to={`/book/${book.id}?offset=${entry.start}`}
-                    className="flex gap-0 min-h-[56px] group hover:brightness-[0.97] transition-[filter] block"
-                  >
-                    {/* Color strip */}
-                    <div
-                      className={cn('w-1 shrink-0 self-stretch rounded-l-none', COLOR_BAR[entry.color])}
-                    />
-                    <div className={cn('flex-1 px-4 py-3', COLOR_BG[entry.color], 'bg-opacity-30')}>
-                      {/* Quoted text */}
-                      <p
-                        className="text-sm text-foreground leading-relaxed"
-                        style={{ fontFamily: 'Lora, Georgia, serif' }}
-                      >
-                        "{entry.text}"
-                      </p>
-                      {/* Note annotation */}
-                      {entry.note && (
-                        <p className="text-sm text-muted-foreground mt-1.5 pl-3 border-l-2 border-border">
-                          {entry.note}
-                        </p>
-                      )}
-                      {/* Date + jump hint */}
-                      <div className="flex items-center justify-between mt-2">
-                        <p className="text-[11px] text-muted-foreground">
-                          {timeAgo(entry.createdAt)}
-                        </p>
-                        <span className="flex items-center gap-1 text-[11px] text-primary opacity-0 group-hover:opacity-100 transition-opacity">
-                          View in book <ExternalLink size={10} />
-                        </span>
-                      </div>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            </div>
+        <div className="px-4 space-y-3">
+          {entries.map((entry, i) => (
+            <NoteCard key={entry.id} entry={entry} index={i} />
           ))}
         </div>
       )}
