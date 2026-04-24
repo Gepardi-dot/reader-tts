@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Search, Trash2, BookOpen, Upload } from 'lucide-react'
@@ -31,6 +31,91 @@ interface ReadingProgress { pageNumber: number; totalPages: number; updatedAt?: 
 
 // Warm cover tints cycling across books
 const COVER_COLORS = ['#fef6ee', '#eef4fb', '#f0efe9', '#f8eef0']
+
+const PARTICLE_WORDS = [
+  'chapter', 'verse', 'prologue', 'epilogue', 'memoir', 'fable',
+  'metaphor', 'stanza', 'plot', 'motif', 'narrative', 'tome', 'folio',
+  'preface', 'author', 'genre', 'prose', 'lyric', 'allegory',
+  'subtext', 'draft', 'canon', 'excerpt', 'footnote', 'margin',
+  'ink', 'page', 'spine', 'cover', 'binding', 'serif', 'glyph',
+]
+
+interface WP {
+  word: string; x: number; y: number
+  vx: number; vy: number; size: number
+  peakAlpha: number; dir: 1 | -1; startX: number; endX: number
+}
+
+function WordParticles() {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')!
+    let raf: number
+    let w = 0, h = 0
+
+    function resize() {
+      w = canvas.offsetWidth
+      h = canvas.offsetHeight
+      canvas.width  = w
+      canvas.height = h
+    }
+    resize()
+    const ro = new ResizeObserver(resize)
+    ro.observe(canvas)
+
+    function spawn(anywhere = false): WP {
+      const dir: 1 | -1 = Math.random() < 0.5 ? 1 : -1
+      const speed = 0.35 + Math.random() * 0.4
+      const startX = dir === 1 ? -90 : w + 90
+      const endX   = dir === 1 ? w + 90 : -90
+      return {
+        word:      PARTICLE_WORDS[Math.floor(Math.random() * PARTICLE_WORDS.length)],
+        x:         anywhere ? Math.random() * w : startX,
+        y:         20 + Math.random() * (h - 40),
+        vx:        dir * speed,
+        vy:        (Math.random() - 0.5) * 0.06,
+        size:      10 + Math.random() * 5,
+        peakAlpha: 0.07 + Math.random() * 0.06,
+        dir, startX, endX,
+      }
+    }
+
+    const particles: WP[] = Array.from({ length: 22 }, () => spawn(true))
+
+    function draw() {
+      ctx.clearRect(0, 0, w, h)
+      for (const p of particles) {
+        p.x += p.vx
+        p.y += p.vy
+        const travel = Math.abs(p.endX - p.startX)
+        const gone   = Math.abs(p.x - p.startX)
+        const t      = Math.min(gone / travel, 1)
+        const fade   = t < 0.2 ? t / 0.2 : t > 0.8 ? (1 - t) / 0.2 : 1
+        ctx.globalAlpha = p.peakAlpha * fade
+        ctx.fillStyle   = '#37352f'
+        ctx.font        = `400 ${p.size}px "Lora", Georgia, serif`
+        ctx.fillText(p.word, p.x, p.y)
+        if (p.dir === 1 ? p.x > w + 90 : p.x < -90) Object.assign(p, spawn(false))
+      }
+      ctx.globalAlpha = 1
+      raf = requestAnimationFrame(draw)
+    }
+
+    draw()
+    return () => { cancelAnimationFrame(raf); ro.disconnect() }
+  }, [])
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="absolute inset-0 w-full h-full pointer-events-none"
+      aria-hidden
+    />
+  )
+}
 
 type FilterType = 'all' | 'reading' | 'finished' | 'unread'
 const FILTER_LABELS: { id: FilterType; label: string }[] = [
@@ -172,7 +257,9 @@ export function LibraryRoute() {
   const bookToDelete = books.find((b) => b.id === deleteId)
 
   return (
-    <div className="p-6 pb-8 max-w-7xl mx-auto">
+    <div className="relative min-h-full">
+    <WordParticles />
+    <div className="relative z-10 p-6 pb-8 max-w-7xl mx-auto">
       {/* Header */}
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-[22px] font-semibold text-foreground tracking-tight">Library</h1>
@@ -274,6 +361,7 @@ export function LibraryRoute() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
     </div>
   )
 }

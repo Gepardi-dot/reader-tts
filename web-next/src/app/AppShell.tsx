@@ -15,15 +15,14 @@ function StudioFlame({ size = 15, className }: { size?: number; className?: stri
 }
 
 const NAV_ITEMS = [
-  { to: '/library',    icon: Library,   label: 'Library' },
-  { to: '/notes',      icon: SquarePen, label: 'Notes' },
-  { to: '/vocabulary', icon: Type,      label: 'Words' },
+  { to: '/library',    icon: Library,     label: 'Library' },
+  { to: '/notes',      icon: SquarePen,   label: 'Notes' },
+  { to: '/vocabulary', icon: Type,        label: 'Words' },
   { to: '/studio',     icon: StudioFlame, label: 'Studio' },
-  { to: '/audio',      icon: Mic,       label: 'Audio' },
-  { to: '/upload',     icon: Upload,    label: 'Upload' },
+  { to: '/audio',      icon: Mic,         label: 'Audio' },
+  { to: '/upload',     icon: Upload,      label: 'Upload' },
 ]
 
-// Bottom nav shows first 5; Upload lives in sidebar only on desktop
 const MOBILE_NAV = NAV_ITEMS.slice(0, 5)
 
 function BrandLogo() {
@@ -32,7 +31,6 @@ function BrandLogo() {
       className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-md border shrink-0"
       style={{ background: '#f7f7f5', borderColor: '#f4f3ef' }}
     >
-      {/* Serif "R" mark with gold underline */}
       <div className="relative pb-[3px] shrink-0">
         <span
           className="text-[18px] leading-none text-foreground block"
@@ -45,7 +43,6 @@ function BrandLogo() {
           style={{ background: 'linear-gradient(90deg, #c8960c, #e8b824)' }}
         />
       </div>
-      {/* "Book Reader" — Book normal weight, Reader italic */}
       <span
         className="text-[13px] leading-none text-foreground whitespace-nowrap"
         style={{ fontFamily: '"Playfair Display", Georgia, serif' }}
@@ -77,19 +74,16 @@ export function AppShell() {
     navigate('/login', { replace: true })
   }
 
-  // Reader: full-screen, no shell chrome
   if (isReader) return <Outlet />
 
   return (
     <div className="flex h-svh overflow-hidden bg-background">
-      {/* ── Desktop sidebar (Notion style) ─────────────── */}
+      {/* ── Desktop sidebar ─────────────────────────────── */}
       <aside className="hidden md:flex w-60 flex-col shrink-0 border-r border-border bg-[var(--sidebar)]">
-        {/* Workspace header */}
         <div className="flex items-center px-4 h-14 border-b border-border shrink-0 bg-[#f7f7f5]">
           <BrandLogo />
         </div>
 
-        {/* Nav links */}
         <nav className="flex-1 overflow-y-auto p-2 space-y-0.5">
           {NAV_ITEMS.map(({ to, icon: Icon, label }) => (
             <NavLink
@@ -110,7 +104,6 @@ export function AppShell() {
           ))}
         </nav>
 
-        {/* User + sign-out */}
         <div className="p-2 border-t border-border">
           <button
             onClick={handleSignOut}
@@ -124,17 +117,14 @@ export function AppShell() {
 
       {/* ── Main area ───────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Mobile top bar */}
         <header className="md:hidden flex items-center h-12 px-4 border-b border-border bg-background/95 backdrop-blur-sm shrink-0 z-10">
           <BrandLogo />
         </header>
 
-        {/* Scrollable page content */}
         <main className="flex-1 overflow-y-auto overscroll-y-contain">
           <Outlet />
         </main>
 
-        {/* ── Mobile bottom nav ──────────────────────── */}
         <nav
           className="md:hidden flex items-center justify-around border-t border-border bg-background/95 backdrop-blur-sm shrink-0"
           style={{
