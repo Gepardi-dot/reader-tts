@@ -337,6 +337,23 @@ function audioErrorMessage(error: unknown) {
   return 'Could not start audio. Check the selected voice provider and try again.'
 }
 
+function aiErrorMessage(error: unknown, fallback = 'Something went wrong.') {
+  const raw = error instanceof Error ? error.message : String(error)
+  const detail = raw.match(/"detail"\s*:\s*"([^"]+)"/)?.[1]
+  const message = (detail ?? raw).trim()
+
+  if (/Authentication required|Unauthorized|Session expired/i.test(message)) {
+    return 'Your session expired. Sign in again, then try again.'
+  }
+  if (/AI service is not configured|not configured|configured yet/i.test(message)) {
+    return 'AI is not available on this server right now.'
+  }
+  if (/Failed to fetch|NetworkError|fetch|timeout/i.test(message)) {
+    return 'Could not reach the AI service. Check the connection and try again.'
+  }
+  return message || fallback
+}
+
 function needsAuthenticatedAudioFetch(url: string) {
   if (url.startsWith('/library/')) return true
   try {
@@ -1312,8 +1329,17 @@ async function streamSSE(
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Request failed' }))
-    throw new Error((err as { detail?: string }).detail ?? `Request failed (${res.status})`)
+    const raw = await res.text()
+    if (raw) {
+      let detail = ''
+      try {
+        detail = (JSON.parse(raw) as { detail?: string }).detail ?? ''
+      } catch {
+        // Ignore non-JSON error bodies and fall back to the raw text.
+      }
+      throw new Error(detail || raw.trim() || `Request failed (${res.status})`)
+    }
+    throw new Error(`Request failed (${res.status})`)
   }
 
   const reader  = res.body!.getReader()
@@ -1365,6 +1391,20 @@ function streamAssistantChat(
   )
 }
 
+function streamTranslation(
+  text: string,
+  targetLanguage: string,
+  onDelta: (d: string) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  return streamSSE(
+    '/api/ai/ask',
+    { text, mode: 'translate', target_language: targetLanguage },
+    onDelta,
+    signal,
+  )
+}
+
 function AskAIPanel({ text, onClose, colors }: {
   text: string; onClose: () => void; colors: typeof THEMES['paper']
 }) {
@@ -1394,7 +1434,8 @@ function AskAIPanel({ text, onClose, colors }: {
     }, ac.signal)
       .catch((e: unknown) => {
         if ((e as { name?: string }).name !== 'AbortError') {
-          setErrMsg((e instanceof Error ? e.message : null) ?? 'AI is not available.')
+          setMessages([])
+          setErrMsg(aiErrorMessage(e, 'AI is not available right now.'))
         }
       })
       .finally(() => setStreaming(false))
@@ -1422,7 +1463,8 @@ function AskAIPanel({ text, onClose, colors }: {
     }, ac.signal)
       .catch((e: unknown) => {
         if ((e as { name?: string }).name !== 'AbortError') {
-          setErrMsg((e instanceof Error ? e.message : null) ?? 'Something went wrong.')
+          setMessages(history)
+          setErrMsg(aiErrorMessage(e))
         }
       })
       .finally(() => {
@@ -1562,48 +1604,12 @@ function TranslatePanel({ text, onClose, colors }: {
     setStreaming(true)
 
     try {
-      const { supabase } = await import('@/lib/supabase')
-      const { data }     = await supabase.auth.getSession()
-      const token        = data.session?.access_token ?? ''
-      const base         = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
-
-      const res = await fetch(`${base}/api/ai/ask`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({ text, mode: 'translate', target_language: targetLang }),
-        signal: ac.signal,
-      })
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Request failed' }))
-        throw new Error((err as { detail?: string }).detail ?? 'Request failed')
-      }
-
-      const reader  = res.body!.getReader()
-      const decoder = new TextDecoder()
-      let   buf     = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const raw = line.slice(6)
-          if (raw === '[DONE]') return
-          const chunk = JSON.parse(raw) as { delta?: string; error?: string }
-          if (chunk.error) throw new Error(chunk.error)
-          if (chunk.delta) setResult(prev => prev + chunk.delta)
-        }
-      }
+      await streamTranslation(text, targetLang, (delta) => {
+        setResult(prev => prev + delta)
+      }, ac.signal)
     } catch (e: unknown) {
       if ((e as { name?: string }).name !== 'AbortError') {
-        setErrMsg((e instanceof Error ? e.message : null) ?? 'Translation failed.')
+        setErrMsg(aiErrorMessage(e, 'Translation failed.'))
       }
     } finally {
       setStreaming(false)
@@ -1733,7 +1739,7 @@ function AssistantChat({ bookTitle, pageContext, onClose, colors }: {
       }, ac.signal)
     } catch (e: unknown) {
       if ((e as { name?: string }).name !== 'AbortError') {
-        setErrMsg((e instanceof Error ? e.message : null) ?? 'Something went wrong.')
+        setErrMsg(aiErrorMessage(e))
         setMessages(history)
       }
     } finally {

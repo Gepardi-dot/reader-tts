@@ -34,52 +34,12 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-import pdf_to_audio
-from server.gemma_provider import (
-    build_gemma_answer_coach,
-    build_gemma_context_generator,
-    build_gemma_lesson_generator,
-    build_gemma_sentence_coach,
-    gemma_runtime_configured,
-)
-from server.vocabulary_studio import VocabularyStudioService, create_vocabulary_router
-
-
 ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT / ".env")
+ENV_FILE = ROOT / ".env"
+_RUNTIME_ENV_LOCK = threading.Lock()
+_RUNTIME_ENV_MTIME_NS: int | None = None
 
-logger = logging.getLogger(__name__)
-
-
-def env_value(name: str) -> str | None:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    value = value.strip()
-    return value or None
-
-
-def env_int_value(name: str, default: int) -> int:
-    value = env_value(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def env_float_value(name: str, default: float) -> float:
-    value = env_value(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-for env_name in (
+RUNTIME_ENV_NAMES = (
     "AWS_PROFILE",
     "AWS_REGION",
     "AWS_DEFAULT_REGION",
@@ -100,6 +60,7 @@ for env_name in (
     "GEMMA_MODEL",
     "GEMMA_TIMEOUT_SECONDS",
     "VOCAB_CONTEXT_PROVIDER",
+    "NVIDIA_API_KEY",
     "DASHSCOPE_API_KEY",
     "DASHSCOPE_BASE_HTTP_API_URL",
     "QWEN_TTS_MODEL",
@@ -142,9 +103,85 @@ for env_name in (
     "SUPABASE_JWT_SECRET",
     "ADB_EXE",
     "SAMSUNG_DICTIONARY_DEVICE_ID",
-):
-    if env_name in os.environ and env_value(env_name) is None:
-        os.environ.pop(env_name, None)
+)
+
+
+def prune_blank_runtime_env() -> None:
+    for env_name in RUNTIME_ENV_NAMES:
+        value = os.environ.get(env_name)
+        if value is not None and not value.strip():
+            os.environ.pop(env_name, None)
+
+
+def load_runtime_env(*, force: bool = False) -> None:
+    global _RUNTIME_ENV_MTIME_NS
+
+    try:
+        env_mtime_ns = ENV_FILE.stat().st_mtime_ns
+    except FileNotFoundError:
+        env_mtime_ns = None
+
+    if not force and env_mtime_ns == _RUNTIME_ENV_MTIME_NS:
+        return
+
+    with _RUNTIME_ENV_LOCK:
+        try:
+            current_mtime_ns = ENV_FILE.stat().st_mtime_ns
+        except FileNotFoundError:
+            current_mtime_ns = None
+
+        if not force and current_mtime_ns == _RUNTIME_ENV_MTIME_NS:
+            return
+
+        prune_blank_runtime_env()
+        if ENV_FILE.exists():
+            load_dotenv(ENV_FILE, override=True)
+        prune_blank_runtime_env()
+        _RUNTIME_ENV_MTIME_NS = current_mtime_ns
+
+
+load_runtime_env(force=True)
+
+logger = logging.getLogger(__name__)
+
+
+def env_value(name: str) -> str | None:
+    load_runtime_env()
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def env_int_value(name: str, default: int) -> int:
+    value = env_value(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def env_float_value(name: str, default: float) -> float:
+    value = env_value(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+import pdf_to_audio
+from server.gemma_provider import (
+    build_gemma_answer_coach,
+    build_gemma_context_generator,
+    build_gemma_lesson_generator,
+    build_gemma_sentence_coach,
+    gemma_runtime_configured,
+)
+from server.vocabulary_studio import VocabularyStudioService, create_vocabulary_router
 
 
 def runtime_root() -> Path:
@@ -6483,7 +6520,7 @@ async def ask_ai(req: AskAIRequest):
     """
     api_key = env_value("NVIDIA_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured.")
+        raise HTTPException(status_code=503, detail="AI service is not configured on this server.")
 
     # ── Translate mode ────────────────────────────────────────────────────────
     if req.mode == "translate":
@@ -6581,7 +6618,7 @@ async def assistant_chat(req: AssistantChatRequest):
     """
     api_key = env_value("NVIDIA_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured.")
+        raise HTTPException(status_code=503, detail="AI service is not configured on this server.")
 
     system = (
         f'You are a reading assistant helping someone read "{req.book_title}". '
@@ -6667,7 +6704,7 @@ async def vocab_check(req: VocabCheckRequest):
     """
     api_key = env_value("NVIDIA_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured.")
+        raise HTTPException(status_code=503, detail="AI service is not configured on this server.")
 
     word = req.word.strip()
     definition = (req.definition or "").strip()
@@ -6805,7 +6842,7 @@ async def define_word(req: DefineWordRequest):
     """
     api_key = env_value("NVIDIA_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured.")
+        raise HTTPException(status_code=503, detail="AI service is not configured on this server.")
 
     word = req.word.strip()
     if not word:
