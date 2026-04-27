@@ -6,7 +6,7 @@ import {
   ArrowLeft, ArrowRight, Languages, MessageSquare, Settings2, Type, Volume2, X,
   Play, Pause, SkipBack, SkipForward,
   Minus, Plus, AlignLeft, AlignCenter, AlignJustify,
-  Copy, BookMarked, BookOpen, Mic, NotebookPen, Sparkles, Search, TextSelect,
+  Copy, BookMarked, Globe, BookOpen, Mic, NotebookPen, Sparkles, Search,
   ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
@@ -525,88 +525,6 @@ function getWordAtPoint(clientX: number, clientY: number): { text: string; rect:
   return { text, rect: range.getBoundingClientRect(), range }
 }
 
-function findDomPointAtOffset(
-  root: Node,
-  targetOffset: number,
-): { node: Node; offset: number } | null {
-  let accumulated = 0
-  function walk(node: Node): { node: Node; offset: number } | null {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const len = (node.textContent ?? '').length
-      if (accumulated + len >= targetOffset) {
-        return { node, offset: targetOffset - accumulated }
-      }
-      accumulated += len
-      return null
-    }
-    for (const child of Array.from(node.childNodes)) {
-      const result = walk(child)
-      if (result) return result
-    }
-    return null
-  }
-  return walk(root)
-}
-
-function domRangeForSourceOffsets(
-  startSrc: number,
-  endSrc: number,
-  root: HTMLElement,
-): Range | null {
-  const paragraphs = Array.from(
-    root.querySelectorAll<HTMLElement>('[data-reader-paragraph-start]'),
-  )
-  let startPoint: { node: Node; offset: number } | null = null
-  let endPoint:   { node: Node; offset: number } | null = null
-
-  for (const para of paragraphs) {
-    const paraStart = Number(para.dataset.readerParagraphStart)
-    const paraText  = para.textContent ?? ''
-    const paraEnd   = paraStart + paraText.length
-
-    if (!startPoint && startSrc >= paraStart && startSrc <= paraEnd) {
-      startPoint = findDomPointAtOffset(para, startSrc - paraStart)
-    }
-    if (!endPoint && endSrc >= paraStart && endSrc <= paraEnd) {
-      endPoint = findDomPointAtOffset(para, endSrc - paraStart)
-    }
-    if (startPoint && endPoint) break
-  }
-
-  if (!startPoint || !endPoint) return null
-  try {
-    const range = document.createRange()
-    range.setStart(startPoint.node, startPoint.offset)
-    range.setEnd(endPoint.node, endPoint.offset)
-    return range
-  } catch { return null }
-}
-
-function sentenceBounds(
-  startOffset: number,
-  endOffset: number,
-  fullText: string,
-): { start: number; end: number } {
-  const SENT_TERM = /[.!?。？！]/
-
-  let start = startOffset
-  while (start > 0) {
-    if (SENT_TERM.test(fullText[start - 1])) break
-    if (fullText[start - 1] === '\n') break
-    start--
-  }
-  while (start < endOffset && /\s/.test(fullText[start])) start++
-
-  let end = Math.max(endOffset, start + 1)
-  while (end < fullText.length) {
-    if (SENT_TERM.test(fullText[end])) { end++; break }
-    if (fullText[end] === '\n') break
-    end++
-  }
-
-  return { start, end }
-}
-
 async function firstVocabularyDeckId(): Promise<string | null> {
   const res = await api.get<{ items: VocabularyDeckRef[] }>('/api/vocabulary/decks')
   return res.items[0]?.id ?? null
@@ -666,11 +584,11 @@ function BottomSheet({ open, onClose, children, bg = '#ffffff' }: {
 // ── Selection Menu ────────────────────────────────────────────────────────────
 
 const WORD_ACTIONS = [
-  { id: 'expand',     Icon: TextSelect, label: 'Sentence' },
   { id: 'copy',       Icon: Copy,       label: 'Copy'   },
   { id: 'play',       Icon: Mic,        label: 'Play'   },
   { id: 'vocabulary', Icon: BookMarked, label: 'Vocab'  },
   { id: 'dictionary', Icon: BookOpen,   label: 'Define' },
+  { id: 'google',     Icon: Globe,      label: 'Google' },
 ] as const
 
 const SENTENCE_ACTIONS = [
@@ -685,17 +603,15 @@ interface SelectionMenuProps {
   bookId: string
   fullText: string
   ttsProvider?: string
-  readerRef: React.RefObject<HTMLDivElement | null>
   onClose: () => void
-  onExpand: (newSel: SelectionState) => void
   onOpenPanel: (p: SecondaryPanel) => void
   onToast: (msg: string) => void
   onPlayWord: (text: string, startOffset: number) => void
 }
 
 function SelectionMenu({
-  sel, bookId, fullText, readerRef,
-  onClose, onExpand, onOpenPanel, onToast, onPlayWord,
+  sel, bookId, fullText,
+  onClose, onOpenPanel, onToast, onPlayWord,
 }: SelectionMenuProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [busyColor,  setBusyColor]  = useState<string | null>(null)
@@ -725,28 +641,6 @@ function SelectionMenu({
 
   async function handleWord(id: string) {
     switch (id) {
-      case 'expand': {
-        const { start, end } = sentenceBounds(sel.startOffset, sel.endOffset, fullText)
-        const sentText = fullText.slice(start, end).trim()
-        if (!sentText || sentText.split(/\s+/).length < 2) { onToast('No sentence found'); break }
-        const root = readerRef.current
-        const range = root ? domRangeForSourceOffsets(start, end, root) : null
-        const rects = range ? selectionRectsFromRange(range, range.getBoundingClientRect()) : sel.rects
-        const boundingRect = range?.getBoundingClientRect() ?? { left: sel.viewportX, top: sel.viewportY, width: 0, height: sel.selHeight } as DOMRect
-        onExpand({
-          text: sentText,
-          startOffset: start,
-          endOffset: end,
-          mode: 'sentence',
-          viewportX: boundingRect.left + boundingRect.width / 2,
-          viewportY: boundingRect.top,
-          selHeight: boundingRect.height || sel.selHeight,
-          selLeft: boundingRect.left,
-          selWidth: boundingRect.width,
-          rects,
-        })
-        break
-      }
       case 'copy':
         navigator.clipboard.writeText(sel.text).catch(() => {})
         onToast('Copied')
@@ -1377,30 +1271,49 @@ function NotesPanel({ text, start, end, bookId, onClose, colors }: {
 
 interface AIChatMessage { role: 'user' | 'assistant'; content: string }
 
-async function streamAskAI(
-  text: string,
-  messages: AIChatMessage[],
+// Streams a server-sent-events endpoint that emits {"delta": "..."} chunks.
+// Refreshes the auth session once on 401 so a stale token doesn't kill the request.
+async function streamSSE(
+  url: string,
+  body: unknown,
   onDelta: (d: string) => void,
   signal: AbortSignal,
 ): Promise<void> {
   const { supabase } = await import('@/lib/supabase')
-  const { data }     = await supabase.auth.getSession()
-  const token        = data.session?.access_token ?? ''
-  const base         = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
+  const base = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
+  const target = url.startsWith('http') ? url : `${base}${url}`
 
-  const res = await fetch(`${base}/api/ai/ask`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({ text, messages }),
-    signal,
-  })
+  async function getToken(forceRefresh: boolean): Promise<string> {
+    if (forceRefresh) {
+      const { data } = await supabase.auth.refreshSession()
+      return data.session?.access_token ?? ''
+    }
+    const { data } = await supabase.auth.getSession()
+    return data.session?.access_token ?? ''
+  }
+
+  async function fire(token: string) {
+    return fetch(target, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
+  }
+
+  let token = await getToken(false)
+  let res = await fire(token)
+  if (res.status === 401) {
+    token = await getToken(true)
+    res = await fire(token)
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Request failed' }))
-    throw new Error((err as { detail?: string }).detail ?? 'Request failed')
+    throw new Error((err as { detail?: string }).detail ?? `Request failed (${res.status})`)
   }
 
   const reader  = res.body!.getReader()
@@ -1417,11 +1330,39 @@ async function streamAskAI(
       if (!line.startsWith('data: ')) continue
       const raw = line.slice(6)
       if (raw === '[DONE]') return
-      const chunk = JSON.parse(raw) as { delta?: string; error?: string }
-      if (chunk.error) throw new Error(chunk.error)
-      if (chunk.delta) onDelta(chunk.delta)
+      try {
+        const chunk = JSON.parse(raw) as { delta?: string; error?: string }
+        if (chunk.error) throw new Error(chunk.error)
+        if (chunk.delta) onDelta(chunk.delta)
+      } catch {
+        // Ignore malformed lines — keep streaming
+      }
     }
   }
+}
+
+function streamAskAI(
+  text: string,
+  messages: AIChatMessage[],
+  onDelta: (d: string) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  return streamSSE('/api/ai/ask', { text, messages }, onDelta, signal)
+}
+
+function streamAssistantChat(
+  bookTitle: string,
+  pageContext: string,
+  messages: AIChatMessage[],
+  onDelta: (d: string) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  return streamSSE(
+    '/api/ai/chat',
+    { book_title: bookTitle, page_context: pageContext, messages },
+    onDelta,
+    signal,
+  )
 }
 
 function AskAIPanel({ text, onClose, colors }: {
@@ -1777,66 +1718,19 @@ function AssistantChat({ bookTitle, pageContext, onClose, colors }: {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  async function send() {
-    const q = input.trim()
-    if (!q || streaming) return
-    setInput('')
-    setErrMsg('')
-
-    const history: AIChatMessage[] = [...messages, { role: 'user', content: q }]
+  async function runTurn(history: AIChatMessage[]) {
     setMessages([...history, { role: 'assistant', content: '' }])
     setStreaming(true)
+    setErrMsg('')
 
     const ac = new AbortController()
     let assistantContent = ''
 
     try {
-      const { supabase } = await import('@/lib/supabase')
-      const { data }     = await supabase.auth.getSession()
-      const token        = data.session?.access_token ?? ''
-      const base         = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
-
-      const res = await fetch(`${base}/api/ai/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          book_title:   bookTitle,
-          page_context: pageContext,
-          messages:     history,
-        }),
-        signal: ac.signal,
-      })
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Request failed' }))
-        throw new Error((err as { detail?: string }).detail ?? 'Request failed')
-      }
-
-      const reader  = res.body!.getReader()
-      const decoder = new TextDecoder()
-      let   buf     = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const raw = line.slice(6)
-          if (raw === '[DONE]') return
-          const chunk = JSON.parse(raw) as { delta?: string; error?: string }
-          if (chunk.error) throw new Error(chunk.error)
-          if (chunk.delta) {
-            assistantContent += chunk.delta
-            setMessages([...history, { role: 'assistant', content: assistantContent }])
-          }
-        }
-      }
+      await streamAssistantChat(bookTitle, pageContext, history, (delta) => {
+        assistantContent += delta
+        setMessages([...history, { role: 'assistant', content: assistantContent }])
+      }, ac.signal)
     } catch (e: unknown) {
       if ((e as { name?: string }).name !== 'AbortError') {
         setErrMsg((e instanceof Error ? e.message : null) ?? 'Something went wrong.')
@@ -1846,8 +1740,13 @@ function AssistantChat({ bookTitle, pageContext, onClose, colors }: {
       setStreaming(false)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
+  }
 
-    return () => ac.abort()
+  async function send() {
+    const q = input.trim()
+    if (!q || streaming) return
+    setInput('')
+    await runTurn([...messages, { role: 'user', content: q }])
   }
 
   const empty = messages.length === 0
@@ -1860,57 +1759,8 @@ function AssistantChat({ bookTitle, pageContext, onClose, colors }: {
   ]
 
   function sendSuggestion(text: string) {
-    setInput(text)
-    setTimeout(() => {
-      setInput('')
-      const history: AIChatMessage[] = [{ role: 'user', content: text }]
-      setMessages([...history, { role: 'assistant', content: '' }])
-      setStreaming(true)
-      setErrMsg('')
-
-      ;(async () => {
-        const ac = new AbortController()
-        let assistantContent = ''
-        try {
-          const { supabase } = await import('@/lib/supabase')
-          const { data }     = await supabase.auth.getSession()
-          const token        = data.session?.access_token ?? ''
-          const base         = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
-          const res = await fetch(`${base}/api/ai/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-            body: JSON.stringify({ book_title: bookTitle, page_context: pageContext, messages: history }),
-            signal: ac.signal,
-          })
-          if (!res.ok) { const err = await res.json().catch(() => ({ detail: 'Request failed' })); throw new Error((err as { detail?: string }).detail ?? 'Request failed') }
-          const reader  = res.body!.getReader()
-          const decoder = new TextDecoder()
-          let   buf     = ''
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            buf += decoder.decode(value, { stream: true })
-            const lines = buf.split('\n'); buf = lines.pop() ?? ''
-            for (const line of lines) {
-              if (!line.startsWith('data: ')) continue
-              const raw = line.slice(6)
-              if (raw === '[DONE]') return
-              const chunk = JSON.parse(raw) as { delta?: string; error?: string }
-              if (chunk.error) throw new Error(chunk.error)
-              if (chunk.delta) { assistantContent += chunk.delta; setMessages([...history, { role: 'assistant', content: assistantContent }]) }
-            }
-          }
-        } catch (e: unknown) {
-          if ((e as { name?: string }).name !== 'AbortError') {
-            setErrMsg((e instanceof Error ? e.message : null) ?? 'Something went wrong.')
-            setMessages(history)
-          }
-        } finally {
-          setStreaming(false)
-          setTimeout(() => inputRef.current?.focus(), 50)
-        }
-      })()
-    }, 0)
+    if (streaming) return
+    void runTurn([{ role: 'user', content: text }])
   }
 
   const isDark = colors.bg === '#1a1a18'
@@ -3130,23 +2980,100 @@ export function ReaderRoute() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selection, payload?.text, scrollPct])
 
+  // ── Mobile drag-to-select ─────────────────────────────────────────────────
+  // Touch a word and slide your finger across the sentence to grow the
+  // selection word-by-word. Vertical drags fall through to native scroll.
+  const dragRef = useRef<{
+    startRange: Range | null
+    startX: number
+    startY: number
+    mode: 'idle' | 'deciding' | 'selecting' | 'scrolling'
+  }>({ startRange: null, startX: 0, startY: 0, mode: 'idle' })
+  const [isDragSelecting, setIsDragSelecting] = useState(false)
+
+  const handleTouchStart = useCallback((ev: React.TouchEvent<HTMLDivElement>) => {
+    if (ev.touches.length !== 1) {
+      dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
+      return
+    }
+    const t = ev.touches[0]
+    const w = getWordAtPoint(t.clientX, t.clientY)
+    if (!w) {
+      dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
+      return
+    }
+    dragRef.current = {
+      startRange: w.range,
+      startX: t.clientX,
+      startY: t.clientY,
+      mode: 'deciding',
+    }
+  }, [])
+
   const handleTouchEnd = useCallback((_ev: React.TouchEvent<HTMLDivElement>) => {
-    setTimeout(() => {
-      const sel = window.getSelection()
-      if (!sel || sel.rangeCount === 0) return
-      try {
-        const range = sel.getRangeAt(0)
-        const previewState = buildStateFromRange(range, 'sentence')
-        if (!previewState) return
-        const wc = previewState.text.split(/\s+/).filter(Boolean).length
-        if (wc < 1) return
-        justShowedMenu.current = true
-        const state = wc >= 2 ? previewState : { ...previewState, mode: 'word' as const }
-        // Clear native selection → suppresses iOS/Android selection handles & toolbar
-        sel.removeAllRanges()
-        setSelection(state)
-      } catch { /* swallow */ }
-    }, 80)
+    const r = dragRef.current
+    if (r.mode === 'selecting') {
+      // Selection state is already up-to-date from the last touchmove.
+      // Mark so the trailing click event doesn't reset it.
+      justShowedMenu.current = true
+      setIsDragSelecting(false)
+    }
+    dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
+  }, [])
+
+  // Non-passive touchmove — required so we can preventDefault to suppress page
+  // scroll while the user is sweeping across a sentence.
+  useEffect(() => {
+    const el = readerTextRef.current
+    if (!el) return
+
+    const onMove = (e: TouchEvent) => {
+      const r = dragRef.current
+      if (!r.startRange || e.touches.length !== 1) return
+      const t = e.touches[0]
+      const dx = t.clientX - r.startX
+      const dy = t.clientY - r.startY
+
+      if (r.mode === 'deciding') {
+        const dist = Math.hypot(dx, dy)
+        if (dist < 8) return
+        // If the gesture is mostly vertical, defer to scroll
+        if (Math.abs(dy) > Math.abs(dx) * 1.4 && Math.abs(dy) > 12) {
+          r.mode = 'scrolling'
+          return
+        }
+        r.mode = 'selecting'
+        setIsDragSelecting(true)
+      }
+
+      if (r.mode === 'selecting') {
+        e.preventDefault()
+        const cur = getWordAtPoint(t.clientX, t.clientY)
+        if (!cur) return
+
+        const combined = document.createRange()
+        try {
+          const cmp = r.startRange.compareBoundaryPoints(Range.START_TO_START, cur.range)
+          if (cmp <= 0) {
+            combined.setStart(r.startRange.startContainer, r.startRange.startOffset)
+            combined.setEnd(cur.range.endContainer, cur.range.endOffset)
+          } else {
+            combined.setStart(cur.range.startContainer, cur.range.startOffset)
+            combined.setEnd(r.startRange.endContainer, r.startRange.endOffset)
+          }
+        } catch { return }
+
+        const text = combined.toString().trim()
+        const wc = text.split(/\s+/).filter(Boolean).length
+        const state = buildStateFromRange(combined, wc > 1 ? 'sentence' : 'word')
+        if (state) setSelection(state)
+        // Suppress native browser selection — we draw our own overlay
+        window.getSelection()?.removeAllRanges()
+      }
+    }
+
+    el.addEventListener('touchmove', onMove, { passive: false })
+    return () => el.removeEventListener('touchmove', onMove)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text, scrollPct])
 
@@ -3492,6 +3419,7 @@ export function ReaderRoute() {
         }}
         onMouseUp={handleMouseUp}
         onClick={handleClick}
+        onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
         onContextMenu={(e) => e.preventDefault()}
       >
@@ -3577,15 +3505,13 @@ export function ReaderRoute() {
 
       {/* ── Selection menu ────────────────────────────────────────────── */}
       <AnimatePresence>
-        {selection && (
+        {selection && !isDragSelecting && (
           <SelectionMenu
             sel={selection}
             bookId={bookId!}
             fullText={payload?.text ?? ''}
             ttsProvider={ttsProvider}
-            readerRef={readerTextRef}
             onClose={() => { setSelection(null); window.getSelection()?.removeAllRanges() }}
-            onExpand={(newSel) => setSelection(newSel)}
             onOpenPanel={openPanel}
             onToast={showToast}
             onPlayWord={playWord}
