@@ -6,7 +6,7 @@ import {
   ArrowLeft, ArrowRight, Languages, MessageSquare, Settings2, Type, Volume2, X,
   Play, Pause, SkipBack, SkipForward,
   Minus, Plus, AlignLeft, AlignCenter, AlignJustify,
-  Copy, BookMarked, Globe, BookOpen, Mic, NotebookPen, Sparkles, Search,
+  Copy, BookMarked, BookOpen, Mic, NotebookPen, Sparkles, Search, TextSelect,
   ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
@@ -515,6 +515,88 @@ function getWordAtPoint(clientX: number, clientY: number): { text: string; rect:
   return { text, rect: range.getBoundingClientRect(), range }
 }
 
+function findDomPointAtOffset(
+  root: Node,
+  targetOffset: number,
+): { node: Node; offset: number } | null {
+  let accumulated = 0
+  function walk(node: Node): { node: Node; offset: number } | null {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const len = (node.textContent ?? '').length
+      if (accumulated + len >= targetOffset) {
+        return { node, offset: targetOffset - accumulated }
+      }
+      accumulated += len
+      return null
+    }
+    for (const child of Array.from(node.childNodes)) {
+      const result = walk(child)
+      if (result) return result
+    }
+    return null
+  }
+  return walk(root)
+}
+
+function domRangeForSourceOffsets(
+  startSrc: number,
+  endSrc: number,
+  root: HTMLElement,
+): Range | null {
+  const paragraphs = Array.from(
+    root.querySelectorAll<HTMLElement>('[data-reader-paragraph-start]'),
+  )
+  let startPoint: { node: Node; offset: number } | null = null
+  let endPoint:   { node: Node; offset: number } | null = null
+
+  for (const para of paragraphs) {
+    const paraStart = Number(para.dataset.readerParagraphStart)
+    const paraText  = para.textContent ?? ''
+    const paraEnd   = paraStart + paraText.length
+
+    if (!startPoint && startSrc >= paraStart && startSrc <= paraEnd) {
+      startPoint = findDomPointAtOffset(para, startSrc - paraStart)
+    }
+    if (!endPoint && endSrc >= paraStart && endSrc <= paraEnd) {
+      endPoint = findDomPointAtOffset(para, endSrc - paraStart)
+    }
+    if (startPoint && endPoint) break
+  }
+
+  if (!startPoint || !endPoint) return null
+  try {
+    const range = document.createRange()
+    range.setStart(startPoint.node, startPoint.offset)
+    range.setEnd(endPoint.node, endPoint.offset)
+    return range
+  } catch { return null }
+}
+
+function sentenceBounds(
+  startOffset: number,
+  endOffset: number,
+  fullText: string,
+): { start: number; end: number } {
+  const SENT_TERM = /[.!?。？！]/
+
+  let start = startOffset
+  while (start > 0) {
+    if (SENT_TERM.test(fullText[start - 1])) break
+    if (fullText[start - 1] === '\n') break
+    start--
+  }
+  while (start < endOffset && /\s/.test(fullText[start])) start++
+
+  let end = Math.max(endOffset, start + 1)
+  while (end < fullText.length) {
+    if (SENT_TERM.test(fullText[end])) { end++; break }
+    if (fullText[end] === '\n') break
+    end++
+  }
+
+  return { start, end }
+}
+
 async function firstVocabularyDeckId(): Promise<string | null> {
   const res = await api.get<{ items: VocabularyDeckRef[] }>('/api/vocabulary/decks')
   return res.items[0]?.id ?? null
@@ -574,11 +656,11 @@ function BottomSheet({ open, onClose, children, bg = '#ffffff' }: {
 // ── Selection Menu ────────────────────────────────────────────────────────────
 
 const WORD_ACTIONS = [
+  { id: 'expand',     Icon: TextSelect, label: 'Sentence' },
   { id: 'copy',       Icon: Copy,       label: 'Copy'   },
   { id: 'play',       Icon: Mic,        label: 'Play'   },
   { id: 'vocabulary', Icon: BookMarked, label: 'Vocab'  },
   { id: 'dictionary', Icon: BookOpen,   label: 'Define' },
-  { id: 'google',     Icon: Globe,      label: 'Google' },
 ] as const
 
 const SENTENCE_ACTIONS = [
@@ -593,15 +675,17 @@ interface SelectionMenuProps {
   bookId: string
   fullText: string
   ttsProvider?: string
+  readerRef: React.RefObject<HTMLDivElement | null>
   onClose: () => void
+  onExpand: (newSel: SelectionState) => void
   onOpenPanel: (p: SecondaryPanel) => void
   onToast: (msg: string) => void
   onPlayWord: (text: string, startOffset: number) => void
 }
 
 function SelectionMenu({
-  sel, bookId, fullText,
-  onClose, onOpenPanel, onToast, onPlayWord,
+  sel, bookId, fullText, readerRef,
+  onClose, onExpand, onOpenPanel, onToast, onPlayWord,
 }: SelectionMenuProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [busyColor,  setBusyColor]  = useState<string | null>(null)
@@ -631,6 +715,28 @@ function SelectionMenu({
 
   async function handleWord(id: string) {
     switch (id) {
+      case 'expand': {
+        const { start, end } = sentenceBounds(sel.startOffset, sel.endOffset, fullText)
+        const sentText = fullText.slice(start, end).trim()
+        if (!sentText || sentText.split(/\s+/).length < 2) { onToast('No sentence found'); break }
+        const root = readerRef.current
+        const range = root ? domRangeForSourceOffsets(start, end, root) : null
+        const rects = range ? selectionRectsFromRange(range, range.getBoundingClientRect()) : sel.rects
+        const boundingRect = range?.getBoundingClientRect() ?? { left: sel.viewportX, top: sel.viewportY, width: 0, height: sel.selHeight } as DOMRect
+        onExpand({
+          text: sentText,
+          startOffset: start,
+          endOffset: end,
+          mode: 'sentence',
+          viewportX: boundingRect.left + boundingRect.width / 2,
+          viewportY: boundingRect.top,
+          selHeight: boundingRect.height || sel.selHeight,
+          selLeft: boundingRect.left,
+          selWidth: boundingRect.width,
+          rects,
+        })
+        break
+      }
       case 'copy':
         navigator.clipboard.writeText(sel.text).catch(() => {})
         onToast('Copied')
@@ -3477,7 +3583,9 @@ export function ReaderRoute() {
             bookId={bookId!}
             fullText={payload?.text ?? ''}
             ttsProvider={ttsProvider}
+            readerRef={readerTextRef}
             onClose={() => { setSelection(null); window.getSelection()?.removeAllRanges() }}
+            onExpand={(newSel) => setSelection(newSel)}
             onOpenPanel={openPanel}
             onToast={showToast}
             onPlayWord={playWord}
