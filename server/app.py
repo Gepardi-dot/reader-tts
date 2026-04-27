@@ -259,7 +259,7 @@ SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json" if SUPABASE_
 BOOK_STORAGE_ENDPOINT = env_value("BOOK_STORAGE_ENDPOINT")
 BOOK_STORAGE_ADDRESSING_STYLE = (env_value("BOOK_STORAGE_ADDRESSING_STYLE") or "virtual").lower()
 LOCAL_DEV_USER_ID = "00000000-0000-0000-0000-000000000001"
-LIVE_AUDIO_CACHE_VERSION = 3
+LIVE_AUDIO_CACHE_VERSION = 5
 PROVIDER_TEST_CACHE_VERSION = 2
 TTSProviderId = Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local", "kokoro"]
 GEMINI_MAX_RETRY_ATTEMPTS = 3
@@ -4789,15 +4789,55 @@ def wav_duration_seconds(path: Path) -> float:
         return wav_file.getnframes() / frame_rate
 
 
-def build_audio_timing_manifest(text: str, chunks: list[str], chunk_wavs: list[Path], *, audio_url: str) -> dict[str, Any]:
+def build_audio_timing_manifest(
+    text: str,
+    chunks: list[str],
+    chunk_wavs: list[Path],
+    *,
+    audio_url: str,
+    source_offset: int = 0,
+) -> dict[str, Any]:
+    return build_audio_timing_manifest_from_durations(
+        text,
+        chunks,
+        [max(0.0, wav_duration_seconds(chunk_wav)) for chunk_wav in chunk_wavs],
+        audio_url=audio_url,
+        source_offset=source_offset,
+    )
+
+
+def estimate_chunk_durations(chunks: list[str], total_duration: float) -> list[float]:
+    if not chunks:
+        return []
+
+    safe_total = max(0.0, total_duration)
+    if safe_total == 0.0:
+        return [0.0 for _ in chunks]
+
+    weights = [estimate_timing_weight(chunk) for chunk in chunks]
+    total_weight = sum(weights) or float(len(chunks))
+    durations = [safe_total * (weight / total_weight) for weight in weights]
+    if durations:
+        durations[-1] = max(0.0, safe_total - sum(durations[:-1]))
+    return durations
+
+
+def build_audio_timing_manifest_from_durations(
+    text: str,
+    chunks: list[str],
+    chunk_durations: list[float],
+    *,
+    audio_url: str,
+    source_offset: int = 0,
+) -> dict[str, Any]:
     sentence_spans = build_text_sentence_spans(text)
     chunk_spans = map_chunks_to_text_spans(text, chunks)
     cues: list[dict[str, Any]] = []
     time_cursor = 0.0
     total_duration = 0.0
 
-    for chunk_span, chunk_wav in zip(chunk_spans, chunk_wavs):
-        chunk_duration = max(0.0, wav_duration_seconds(chunk_wav))
+    for chunk_span, chunk_duration in zip(chunk_spans, chunk_durations):
+        chunk_duration = max(0.0, float(chunk_duration))
         chunk_start = int(chunk_span["start"])
         chunk_end = int(chunk_span["end"])
         if chunk_end <= chunk_start:
@@ -4831,8 +4871,8 @@ def build_audio_timing_manifest(text: str, chunks: list[str], chunk_wavs: list[P
 
             cues.append(
                 {
-                    "start": int(segment["start"]),
-                    "end": int(segment["end"]),
+                    "start": source_offset + int(segment["start"]),
+                    "end": source_offset + int(segment["end"]),
                     "timeStart": round(time_cursor, 4),
                     "timeEnd": round(max(time_cursor, next_time), 4),
                 }
@@ -6105,6 +6145,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
     synthesis_text = selected_text.strip()
     if not synthesis_text:
         raise HTTPException(status_code=400, detail="Live audio selection cannot be only whitespace.")
+    trimmed_start = request.start + len(selected_text) - len(selected_text.lstrip())
 
     chosen_model: str | None = None
     chosen_voice = request.voice or provider.get("defaultVoice")
@@ -6143,19 +6184,29 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
     output_dir = book_live_audio_dir(book_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{request.provider}-{digest}.{playback_format}"
+    timing_path = output_dir / f"{output_path.name}.timing.json"
     storage_key = book_live_audio_storage_key(book_id, output_path.name) if book_storage_enabled() else None
+    timing_storage_key = book_live_audio_storage_key(book_id, timing_path.name) if book_storage_enabled() else None
     cached = output_path.exists() and output_path.stat().st_size > 0
     if not cached and storage_key:
         cached = restore_file_from_storage(storage_key, output_path)
+    timing_manifest = read_json(timing_path) if timing_path.exists() else None
+    if timing_manifest is None and timing_storage_key:
+        timing_manifest = read_storage_json(timing_storage_key)
+        if timing_manifest is not None:
+            write_json(timing_path, timing_manifest)
 
     resolved_model = chosen_model or ""
+    chunks = prepare_live_synthesis_chunks(synthesis_text, request.provider)
     if not cached:
-        chunks = prepare_live_synthesis_chunks(synthesis_text, request.provider)
+        chunk_dir = output_dir / f".{output_path.stem}-chunks"
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        chunk_dir.mkdir(parents=True, exist_ok=True)
         resolved_model = synthesize_provider_audio(
             provider_id=request.provider,
             chunks=chunks,
             output_path=output_path,
-            chunk_dir=None,
+            chunk_dir=chunk_dir,
             voice=chosen_voice,
             model=request.model,
             narration_style=request.narration_style,
@@ -6164,19 +6215,48 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
             sentence_silence=request.sentence_silence,
             job_id=None,
         )
+        try:
+            chunk_wavs = sorted(chunk_dir.glob("chunk_*.wav"))
+            if chunk_wavs:
+                timing_manifest = build_audio_timing_manifest(
+                    synthesis_text,
+                    chunks,
+                    chunk_wavs,
+                    audio_url=relative_url(output_path),
+                    source_offset=trimmed_start,
+                )
+        finally:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
     if storage_key and output_path.exists():
         write_storage_bytes(storage_key, output_path.read_bytes(), content_type="audio/wav")
+
+    response_url = generate_book_storage_download_url(storage_key) if storage_key else relative_url(output_path)
+    if timing_manifest is None and output_path.exists():
+        timing_manifest = build_audio_timing_manifest_from_durations(
+            synthesis_text,
+            chunks,
+            estimate_chunk_durations(chunks, wav_duration_seconds(output_path)),
+            audio_url=response_url,
+            source_offset=trimmed_start,
+        )
+    if timing_manifest is not None:
+        timing_manifest["audioUrl"] = response_url
+        write_json(timing_path, timing_manifest)
+        if timing_storage_key:
+            write_storage_json(timing_storage_key, timing_manifest)
 
     return {
         "provider": request.provider,
         "voice": chosen_voice,
         "model": resolved_model or None,
         "format": playback_format,
-        "url": generate_book_storage_download_url(storage_key) if storage_key else relative_url(output_path),
+        "url": response_url,
         "start": request.start,
         "end": request.end,
         "pageNumber": request.pageNumber,
         "cached": cached,
+        "duration": timing_manifest.get("duration") if timing_manifest else None,
+        "cues": timing_manifest.get("cues", []) if timing_manifest else [],
     }
 
 

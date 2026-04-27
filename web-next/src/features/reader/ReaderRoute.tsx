@@ -78,8 +78,17 @@ interface LiveAudioPayload {
   text: string
 }
 
+interface LiveAudioCue {
+  start: number
+  end: number
+  timeStart: number
+  timeEnd: number
+}
+
 interface LiveAudioResult {
   url: string
+  duration?: number | null
+  cues?: LiveAudioCue[]
 }
 
 interface ProviderTestResult {
@@ -485,6 +494,68 @@ function locateSelectionRange(range: Range, root: HTMLElement, fullText: string)
   return trimLocatedSelection(startOffset, endOffset, fullText)
 }
 
+function findDomPointAtOffset(
+  root: Node,
+  targetOffset: number,
+): { node: Node; offset: number } | null {
+  let accumulated = 0
+
+  function walk(node: Node): { node: Node; offset: number } | null {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const len = (node.textContent ?? '').length
+      if (accumulated + len >= targetOffset) {
+        return { node, offset: Math.max(0, targetOffset - accumulated) }
+      }
+      accumulated += len
+      return null
+    }
+    for (const child of Array.from(node.childNodes)) {
+      const result = walk(child)
+      if (result) return result
+    }
+    return null
+  }
+
+  return walk(root)
+}
+
+function domRangeForSourceOffsets(
+  startSrc: number,
+  endSrc: number,
+  root: HTMLElement,
+): Range | null {
+  const paragraphs = Array.from(
+    root.querySelectorAll<HTMLElement>('[data-reader-paragraph-start]'),
+  )
+  let startPoint: { node: Node; offset: number } | null = null
+  let endPoint: { node: Node; offset: number } | null = null
+
+  for (const para of paragraphs) {
+    const paraStart = Number(para.dataset.readerParagraphStart)
+    const paraText = para.textContent ?? ''
+    const paraEnd = paraStart + paraText.length
+
+    if (!startPoint && startSrc >= paraStart && startSrc <= paraEnd) {
+      startPoint = findDomPointAtOffset(para, startSrc - paraStart)
+    }
+    if (!endPoint && endSrc >= paraStart && endSrc <= paraEnd) {
+      endPoint = findDomPointAtOffset(para, endSrc - paraStart)
+    }
+    if (startPoint && endPoint) break
+  }
+
+  if (!startPoint || !endPoint) return null
+
+  try {
+    const range = document.createRange()
+    range.setStart(startPoint.node, startPoint.offset)
+    range.setEnd(endPoint.node, endPoint.offset)
+    return range
+  } catch {
+    return null
+  }
+}
+
 function caretRangeAt(x: number, y: number): Range | null {
   if (typeof document.caretRangeFromPoint === 'function') {
     return document.caretRangeFromPoint(x, y)
@@ -634,6 +705,16 @@ function SelectionMenu({
   const [busyColor,  setBusyColor]  = useState<string | null>(null)
   const queryClient = useQueryClient()
 
+  useEffect(() => {
+    const normalized = normalizeLookupWord(sel.text)
+    if (sel.mode !== 'word' || !normalized || normalized.includes(' ')) return
+    void queryClient.prefetchQuery({
+      queryKey: dictionaryQueryKey(normalized),
+      queryFn: () => fetchOfflineDictionary(normalized),
+      staleTime: DICTIONARY_STALE_TIME_MS,
+    })
+  }, [queryClient, sel.mode, sel.text])
+
   const menuW = sel.mode === 'word' ? 300 : 268
   const cx = Math.min(
     Math.max(sel.viewportX, menuW / 2 + 10),
@@ -703,6 +784,11 @@ function SelectionMenu({
         break
       }
       case 'dictionary':
+        void queryClient.prefetchQuery({
+          queryKey: dictionaryQueryKey(sel.text),
+          queryFn: () => fetchOfflineDictionary(sel.text),
+          staleTime: DICTIONARY_STALE_TIME_MS,
+        })
         onOpenPanel({ kind: 'dictionary', word: sel.text })
         onClose()
         break
@@ -853,12 +939,26 @@ interface DisplayData {
   source: 'offline' | 'online'
 }
 
+const DICTIONARY_STALE_TIME_MS = 5 * 60_000
+
+function normalizeLookupWord(value: string) {
+  return value.trim().toLowerCase()
+}
+
+function dictionaryQueryKey(word: string) {
+  return ['dictionary', normalizeLookupWord(word)] as const
+}
+
+function fetchOfflineDictionary(word: string) {
+  return api.get<DictResponse>(`/api/dictionary/lookup?term=${encodeURIComponent(normalizeLookupWord(word))}`)
+}
+
 // ── Dictionary Panel ──────────────────────────────────────────────────────────
 
 function DictionaryPanel({ word: initialWord, onClose, colors }: {
   word: string; onClose: () => void; colors: typeof THEMES['paper']
 }) {
-  const [lookupWord, setLookupWord] = useState(initialWord)
+  const [lookupWord, setLookupWord] = useState(() => normalizeLookupWord(initialWord) || initialWord)
   const [inputValue, setInputValue] = useState(initialWord)
   const [speaking,   setSpeaking]   = useState(false)
   const [vocabState, setVocabState] = useState<'idle' | 'busy' | 'saved'>('idle')
@@ -866,9 +966,9 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
 
   // 1. Offline dictionary (backend)
   const { data: offlineData, isLoading: offlineLoading } = useQuery({
-    queryKey: ['dictionary', lookupWord],
-    queryFn: () => api.get<DictResponse>(`/api/dictionary/lookup?term=${encodeURIComponent(lookupWord)}`),
-    staleTime: 5 * 60_000,
+    queryKey: dictionaryQueryKey(lookupWord),
+    queryFn: () => fetchOfflineDictionary(lookupWord),
+    staleTime: DICTIONARY_STALE_TIME_MS,
   })
 
   const hasOfflineDefs = !offlineLoading && (offlineData?.entries ?? [])
@@ -1018,16 +1118,21 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
 
         {/* Loading skeleton */}
         {isLoading && (
-          <div className="px-5 pt-5 space-y-3 animate-pulse">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-full shrink-0" style={{ backgroundColor: `${colors.text}10` }} />
-              <div className="space-y-2 flex-1">
-                <div className="h-8 w-44 rounded-lg" style={{ backgroundColor: `${colors.text}12` }} />
-                <div className="h-3 w-24 rounded" style={{ backgroundColor: `${colors.text}08` }} />
+          <div className="px-5 pt-5 pb-4 animate-pulse">
+            <div className="flex items-start gap-4 mb-5">
+              <div className="w-12 h-12 rounded-full shrink-0" style={{ backgroundColor: '#4285f412' }} />
+              <div className="flex-1 pt-0.5 min-w-0">
+                <h2
+                  className="text-[28px] font-normal leading-tight break-words"
+                  style={{ fontFamily: 'Lora, Georgia, serif', color: colors.text }}
+                >
+                  {lookupWord}
+                </h2>
+                <div className="mt-2 h-3 w-24 rounded" style={{ backgroundColor: `${colors.text}08` }} />
               </div>
             </div>
-            <div className="h-3 w-16 rounded mt-2" style={{ backgroundColor: `${colors.text}08` }} />
-            <div className="space-y-2 pt-1">
+            <div className="h-3 w-16 rounded mb-4" style={{ backgroundColor: `${colors.text}08` }} />
+            <div className="space-y-2">
               {[100, 88, 75, 92, 60].map((w, i) => (
                 <div key={i} className="h-3.5 rounded" style={{ backgroundColor: `${colors.text}10`, width: `${w}%` }} />
               ))}
@@ -2118,7 +2223,14 @@ function buildAudioChunks(
 
 type AudioPhase = 'idle' | 'buffering' | 'playing' | 'paused'
 type ChunkStatus = 'idle' | 'fetching' | 'ready' | 'error'
-interface AudioChunk { start: number; end: number; text: string; url: string | null; status: ChunkStatus }
+interface AudioChunk {
+  start: number
+  end: number
+  text: string
+  url: string | null
+  status: ChunkStatus
+  cues?: LiveAudioCue[]
+}
 
 export interface AudioHandle {
   toggle: () => void
@@ -2659,6 +2771,7 @@ export function ReaderRoute() {
   const [wordAudio,     setWordAudio]     = useState<{ word: string; status: 'loading' | 'ready' | 'playing' } | null>(null)
   const [wordAudioCurIdx, setWordAudioCurIdx] = useState(0)
   const [wordAudioTotal,  setWordAudioTotal]  = useState(0)
+  const [audioFollowRects, setAudioFollowRects] = useState<SelectionRect[]>([])
   const [ttsProvider,   setTtsProvider]   = useState(() => loadAudioPrefs().provider)
   const [ttsVoice,      setTtsVoice]      = useState<string | null>(() => loadAudioPrefs().voice)
 
@@ -2674,6 +2787,8 @@ export function ReaderRoute() {
   const wordAudioChunksRef    = useRef<AudioChunk[]>([])
   const wordAudioChunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
   const wordAudioObjectUrlsRef = useRef<Set<string>>(new Set())
+  const activeAudioCueKeyRef    = useRef<string | null>(null)
+  const activeAudioCueRangeRef  = useRef<{ start: number; end: number } | null>(null)
   const readerTextRef         = useRef<HTMLDivElement | null>(null)
   const panelSnapshotRef      = useRef<SecondaryPanel | null>(null)
   const openPanel = useCallback((nextPanel: SecondaryPanel) => {
@@ -2875,6 +2990,14 @@ export function ReaderRoute() {
       const pct = max > 0 ? Math.min(1, y / max) : 0
       latestScrollPct.current = pct
       setScrollPct(pct)
+      const activeCueRange = activeAudioCueRangeRef.current
+      if (activeCueRange) {
+        showAudioFollow(
+          activeCueRange.start,
+          activeCueRange.end,
+          Boolean(wordAudioRef.current && !wordAudioRef.current.paused),
+        )
+      }
       const goingDown = y > lastScrollY.current && y > 60
       setBarVisible(!goingDown)
       lastScrollY.current = y
@@ -3096,6 +3219,72 @@ export function ReaderRoute() {
     wordAudioChunksRef.current = next
   }
 
+  function clearAudioFollow() {
+    activeAudioCueKeyRef.current = null
+    activeAudioCueRangeRef.current = null
+    setAudioFollowRects([])
+  }
+
+  function showAudioFollow(startOffset: number, endOffset: number, follow: boolean) {
+    const root = readerTextRef.current
+    if (!root) {
+      setAudioFollowRects([])
+      return
+    }
+
+    const range = domRangeForSourceOffsets(startOffset, endOffset, root)
+    if (!range) {
+      setAudioFollowRects([])
+      return
+    }
+
+    const fallbackRect = range.getBoundingClientRect()
+    if (fallbackRect.width === 0 && fallbackRect.height === 0) {
+      setAudioFollowRects([])
+      return
+    }
+
+    const rects = selectionRectsFromRange(range, fallbackRect)
+    setAudioFollowRects(rects)
+
+    if (!follow || rects.length === 0) return
+
+    const top = Math.min(...rects.map((rect) => rect.top))
+    const bottom = Math.max(...rects.map((rect) => rect.top + rect.height))
+    const safeTop = window.innerHeight * 0.22
+    const safeBottom = window.innerHeight * 0.72
+    if (top >= safeTop && bottom <= safeBottom) return
+
+    const centerY = (top + bottom) / 2
+    const targetY = window.innerHeight * 0.42
+    const delta = centerY - targetY
+    if (Math.abs(delta) < 12) return
+
+    window.scrollBy({ top: delta, behavior: 'smooth' })
+  }
+
+  function syncAudioFollowCue(chunk: AudioChunk, currentTime: number, follow: boolean) {
+    const cues = (chunk.cues ?? []).filter((cue) => cue.end > cue.start)
+    const activeCue = cues.find((cue, index) => {
+      const cueStart = Math.max(0, cue.timeStart)
+      const cueEnd = Math.max(cueStart, cue.timeEnd)
+      const isLastCue = index === cues.length - 1
+      return currentTime >= cueStart && (currentTime < cueEnd || (isLastCue && currentTime <= cueEnd + 0.2))
+    }) ?? (cues.length
+      ? (currentTime < cues[0].timeStart ? cues[0] : cues[cues.length - 1])
+      : null)
+
+    const startOffset = activeCue?.start ?? chunk.start
+    const endOffset = activeCue?.end ?? chunk.end
+    const nextKey = `${startOffset}:${endOffset}`
+
+    activeAudioCueRangeRef.current = { start: startOffset, end: endOffset }
+    if (activeAudioCueKeyRef.current === nextKey) return
+
+    activeAudioCueKeyRef.current = nextKey
+    showAudioFollow(startOffset, endOffset, follow)
+  }
+
   async function fetchWordAudioChunk(idx: number, chunk: AudioChunk, signal: AbortSignal): Promise<string | null> {
     const existingChunk = wordAudioChunksRef.current[idx]
     if (existingChunk?.url) return existingChunk.url
@@ -3106,7 +3295,7 @@ export function ReaderRoute() {
     const fetchPromise = (async () => {
       try {
         const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
-        const { url } = await requestLiveAudio(bookId!, {
+        const { url, cues } = await requestLiveAudio(bookId!, {
           provider: effectiveTtsProvider,
           voice: effectiveTtsVoice,
           model: null,
@@ -3126,7 +3315,7 @@ export function ReaderRoute() {
           return null
         }
         if (playable.url.startsWith('blob:')) wordAudioObjectUrlsRef.current.add(playable.url)
-        updateWordAudioChunk(idx, { status: 'ready', url: playable.url })
+        updateWordAudioChunk(idx, { status: 'ready', url: playable.url, cues: cues ?? [] })
         prefetchWordAudioAhead(wordAudioCurIdxRef.current, wordAudioChunksRef.current, signal)
         return playable.url
       } catch (error) {
@@ -3169,6 +3358,7 @@ export function ReaderRoute() {
     wordAudioChunksRef.current = []
     wordAudioChunkFetchesRef.current.clear()
     clearWordAudioObjectUrls()
+    clearAudioFollow()
     setWordAudioCurIdx(0)
     setWordAudioTotal(0)
     setWordAudio(null)
@@ -3207,6 +3397,7 @@ export function ReaderRoute() {
     wordAudioCurIdxRef.current = idx
     setWordAudioCurIdx(idx)
     setWordAudio({ word, status: 'playing' })
+    syncAudioFollowCue(chunk, audio.currentTime, true)
 
     audio.play().catch(() => {
       if (ctrl.signal.aborted) return
@@ -3216,6 +3407,18 @@ export function ReaderRoute() {
 
     prefetchWordAudioAhead(idx, currentChunks, ctrl.signal)
 
+    audio.onplay = () => {
+      if (ctrl.signal.aborted) return
+      syncAudioFollowCue(chunk, audio.currentTime, true)
+    }
+    audio.ontimeupdate = () => {
+      if (ctrl.signal.aborted) return
+      syncAudioFollowCue(chunk, audio.currentTime, true)
+    }
+    audio.onseeked = () => {
+      if (ctrl.signal.aborted) return
+      syncAudioFollowCue(chunk, audio.currentTime, true)
+    }
     audio.onended = () => {
       if (ctrl.signal.aborted) return
       void continueWordAudioPlayback(idx + 1, ctrl, word)
@@ -3307,6 +3510,8 @@ export function ReaderRoute() {
     wordAudioAbortRef.current?.abort()
     wordAudioRef.current?.pause()
     wordAudioChunkFetchesRef.current.clear()
+    activeAudioCueKeyRef.current = null
+    activeAudioCueRangeRef.current = null
     for (const url of wordAudioObjectUrlsRef.current) URL.revokeObjectURL(url)
     wordAudioObjectUrlsRef.current.clear()
   }, [])
@@ -3399,6 +3604,22 @@ export function ReaderRoute() {
           </button>
         </div>
       </header>
+
+      {audioFollowRects.map((rect, index) => (
+        <div
+          key={`audio-follow-${Math.round(rect.top)}-${Math.round(rect.left)}-${index}`}
+          className="fixed pointer-events-none z-[54] rounded-[4px]"
+          style={{
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+            backgroundColor: 'rgba(59, 130, 246, 0.18)',
+            boxShadow: 'inset 0 0 0 1px rgba(59, 130, 246, 0.30)',
+            transition: 'left 140ms linear, top 140ms linear, width 140ms linear, height 140ms linear',
+          }}
+        />
+      ))}
 
       {/* ── Custom word highlight overlay (replaces browser selection highlight) ── */}
       {selection?.rects.map((rect, index) => (
