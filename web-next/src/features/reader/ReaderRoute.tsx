@@ -172,7 +172,7 @@ const FIRST_AUDIO_CHARS: Record<string, number> = {
   qwen:         160,
   qwen_local:   140,
   neutts_local: 140,
-  kokoro:       110,
+  kokoro:        65,
   piper:        220,
 }
 
@@ -204,7 +204,7 @@ const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
   openai: 2,
   polly: 2,
   qwen: 2,
-  kokoro: 4,
+  kokoro: 8,
 }
 
 // How many ready chunks we wait for before pressing play. Set to 1 everywhere
@@ -215,7 +215,7 @@ const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
 const PREFETCH_AHEAD_TARGET: Record<string, number> = {
-  kokoro: 3,
+  kokoro: 6,
 }
 const DEFAULT_PREFETCH_AHEAD = 2
 
@@ -2228,6 +2228,7 @@ interface AudioChunk {
   end: number
   text: string
   url: string | null
+  buffer: AudioBuffer | null
   status: ChunkStatus
   cues?: LiveAudioCue[]
 }
@@ -2446,7 +2447,7 @@ function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVo
       return
     }
 
-    const initial: AudioChunk[] = [{ start: 0, end: 0, text: sampleText, url: null, status: 'idle' }]
+    const initial: AudioChunk[] = [{ start: 0, end: 0, text: sampleText, url: null, buffer: null, status: 'idle' }]
     setChunks(initial)
     chunksRef.current = initial
     setCurIdx(0)
@@ -2787,6 +2788,12 @@ export function ReaderRoute() {
   const wordAudioChunksRef    = useRef<AudioChunk[]>([])
   const wordAudioChunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
   const wordAudioObjectUrlsRef = useRef<Set<string>>(new Set())
+  // Web Audio API — gapless playback
+  const wordAudioCtxRef           = useRef<AudioContext | null>(null)
+  const wordAudioSourceRef        = useRef<AudioBufferSourceNode | null>(null)
+  const wordAudioScheduledEndRef  = useRef<number>(0)
+  const wordAudioChunkStartRef    = useRef<number>(0)
+  const wordAudioRafRef           = useRef<number | null>(null)
   const activeAudioCueKeyRef    = useRef<string | null>(null)
   const activeAudioCueRangeRef  = useRef<{ start: number; end: number } | null>(null)
   const readerTextRef         = useRef<HTMLDivElement | null>(null)
@@ -2995,7 +3002,10 @@ export function ReaderRoute() {
         showAudioFollow(
           activeCueRange.start,
           activeCueRange.end,
-          Boolean(wordAudioRef.current && !wordAudioRef.current.paused),
+          Boolean(
+            (wordAudioCtxRef.current?.state === 'running') ||
+            (wordAudioRef.current && !wordAudioRef.current.paused),
+          ),
         )
       }
       const goingDown = y > lastScrollY.current && y > 60
@@ -3213,6 +3223,36 @@ export function ReaderRoute() {
     wordAudioObjectUrlsRef.current.clear()
   }
 
+  function getWordAudioCtx(): AudioContext {
+    if (!wordAudioCtxRef.current || wordAudioCtxRef.current.state === 'closed') {
+      wordAudioCtxRef.current = new AudioContext()
+      wordAudioScheduledEndRef.current = 0
+    }
+    return wordAudioCtxRef.current
+  }
+
+  function stopWordAudioCueRAF() {
+    if (wordAudioRafRef.current !== null) {
+      cancelAnimationFrame(wordAudioRafRef.current)
+      wordAudioRafRef.current = null
+    }
+  }
+
+  function startWordAudioCueRAF() {
+    stopWordAudioCueRAF()
+    const ctx = wordAudioCtxRef.current
+    if (!ctx) return
+    const chunkStart = wordAudioChunkStartRef.current
+    const curIdx = wordAudioCurIdxRef.current
+    const tick = () => {
+      if (wordAudioAbortRef.current?.signal.aborted) return
+      const chunk = wordAudioChunksRef.current[curIdx]
+      if (chunk) syncAudioFollowCue(chunk, Math.max(0, ctx.currentTime - chunkStart), false)
+      wordAudioRafRef.current = requestAnimationFrame(tick)
+    }
+    wordAudioRafRef.current = requestAnimationFrame(tick)
+  }
+
   function updateWordAudioChunk(idx: number, patch: Partial<AudioChunk>) {
     const next = [...wordAudioChunksRef.current]
     if (next[idx]) next[idx] = { ...next[idx], ...patch }
@@ -3309,15 +3349,28 @@ export function ReaderRoute() {
           text: chunk.text,
         })
         if (signal.aborted) return null
-        const playable = await playableAudioUrl(url, signal)
-        if (signal.aborted) {
-          playable.revoke()
-          return null
-        }
-        if (playable.url.startsWith('blob:')) wordAudioObjectUrlsRef.current.add(playable.url)
-        updateWordAudioChunk(idx, { status: 'ready', url: playable.url, cues: cues ?? [] })
+
+        // Download bytes once, create blob URL + decode for Web Audio gapless playback
+        const blob = needsAuthenticatedAudioFetch(url)
+          ? await requestBlob(url, { signal })
+          : await fetch(url, { signal }).then(r => r.blob())
+        if (signal.aborted) return null
+
+        const blobUrl = URL.createObjectURL(blob)
+        wordAudioObjectUrlsRef.current.add(blobUrl)
+
+        let buffer: AudioBuffer | null = null
+        try {
+          const ctx = wordAudioCtxRef.current
+          if (ctx && ctx.state !== 'closed') {
+            buffer = await ctx.decodeAudioData(await blob.arrayBuffer())
+          }
+        } catch { /* decode failure: fallback to HTMLAudio */ }
+
+        if (signal.aborted) return null
+        updateWordAudioChunk(idx, { status: 'ready', url: blobUrl, buffer, cues: cues ?? [] })
         prefetchWordAudioAhead(wordAudioCurIdxRef.current, wordAudioChunksRef.current, signal)
-        return playable.url
+        return blobUrl
       } catch (error) {
         if ((error as Error).name !== 'AbortError') {
           setWordAudio(null)
@@ -3350,8 +3403,21 @@ export function ReaderRoute() {
   }
 
   function stopWordAudio() {
+    stopWordAudioCueRAF()
     wordAudioAbortRef.current?.abort()
     wordAudioAbortRef.current = null
+    // Stop Web Audio source
+    try {
+      if (wordAudioSourceRef.current) {
+        wordAudioSourceRef.current.onended = null
+        wordAudioSourceRef.current.stop(0)
+        wordAudioSourceRef.current.disconnect()
+      }
+    } catch { /* already stopped */ }
+    wordAudioSourceRef.current = null
+    wordAudioScheduledEndRef.current = 0
+    wordAudioChunkStartRef.current = 0
+    if (wordAudioCtxRef.current?.state === 'suspended') void wordAudioCtxRef.current.resume()
     wordAudioRef.current?.pause()
     wordAudioRef.current = null
     wordAudioCurIdxRef.current = 0
@@ -3391,47 +3457,79 @@ export function ReaderRoute() {
     const chunk = currentChunks[idx]
     if (!chunk?.url) return
 
-    wordAudioRef.current?.pause()
-    const audio = new Audio(chunk.url)
-    wordAudioRef.current = audio
+    stopWordAudioCueRAF()
     wordAudioCurIdxRef.current = idx
     setWordAudioCurIdx(idx)
     setWordAudio({ word, status: 'playing' })
-    syncAudioFollowCue(chunk, audio.currentTime, true)
-
-    audio.play().catch(() => {
-      if (ctrl.signal.aborted) return
-      setWordAudio({ word, status: 'ready' })
-      showToast('Audio is ready. Tap the banner play button.')
-    })
-
     prefetchWordAudioAhead(idx, currentChunks, ctrl.signal)
 
-    audio.onplay = () => {
-      if (ctrl.signal.aborted) return
-      syncAudioFollowCue(chunk, audio.currentTime, true)
-    }
-    audio.ontimeupdate = () => {
-      if (ctrl.signal.aborted) return
-      syncAudioFollowCue(chunk, audio.currentTime, true)
-    }
-    audio.onseeked = () => {
-      if (ctrl.signal.aborted) return
-      syncAudioFollowCue(chunk, audio.currentTime, true)
-    }
-    audio.onended = () => {
-      if (ctrl.signal.aborted) return
-      void continueWordAudioPlayback(idx + 1, ctrl, word)
-    }
-    audio.onerror = () => {
-      if (ctrl.signal.aborted) return
-      showToast('Audio playback failed. Try starting it again.')
-      stopWordAudio()
+    const ctx = wordAudioCtxRef.current
+    if (ctx && ctx.state !== 'closed' && chunk.buffer) {
+      // ── Web Audio path — gapless scheduling ─────────────────────────
+      if (ctx.state === 'suspended') void ctx.resume()
+
+      // Disconnect previous source without stopping scheduled future buffers
+      try {
+        if (wordAudioSourceRef.current) {
+          wordAudioSourceRef.current.onended = null
+          wordAudioSourceRef.current.disconnect()
+        }
+      } catch { /* ignore */ }
+      wordAudioRef.current?.pause()
+      wordAudioRef.current = null
+
+      const source = ctx.createBufferSource()
+      source.buffer = chunk.buffer
+      source.connect(ctx.destination)
+      wordAudioSourceRef.current = source
+
+      const now = ctx.currentTime
+      const startAt = Math.max(now + 0.002, wordAudioScheduledEndRef.current)
+      source.start(startAt)
+      wordAudioScheduledEndRef.current = startAt + chunk.buffer.duration
+      wordAudioChunkStartRef.current = startAt
+      syncAudioFollowCue(chunk, 0, true)
+      startWordAudioCueRAF()
+
+      source.onended = () => {
+        if (ctrl.signal.aborted) return
+        stopWordAudioCueRAF()
+        void continueWordAudioPlayback(idx + 1, ctrl, word)
+      }
+    } else {
+      // ── HTMLAudio fallback ────────────────────────────────────────────
+      wordAudioRef.current?.pause()
+      const audio = new Audio(chunk.url)
+      wordAudioRef.current = audio
+      syncAudioFollowCue(chunk, 0, true)
+
+      audio.play().catch(() => {
+        if (ctrl.signal.aborted) return
+        setWordAudio({ word, status: 'ready' })
+        showToast('Audio is ready. Tap the banner play button.')
+      })
+
+      audio.ontimeupdate = () => {
+        if (ctrl.signal.aborted) return
+        syncAudioFollowCue(chunk, audio.currentTime, true)
+      }
+      audio.onended = () => {
+        if (ctrl.signal.aborted) return
+        void continueWordAudioPlayback(idx + 1, ctrl, word)
+      }
+      audio.onerror = () => {
+        if (ctrl.signal.aborted) return
+        showToast('Audio playback failed. Try starting it again.')
+        stopWordAudio()
+      }
     }
   }
 
   async function playWord(word: string, startOffset: number) {
     stopWordAudio()
+    // Create + unlock AudioContext here — must be in a user-gesture call stack (iOS Safari)
+    const audioCtx = getWordAudioCtx()
+    void audioCtx.resume()
     setWordAudio({ word, status: 'loading' })
     const fullText = payload?.text ?? ''
     const start = Math.max(0, Math.min(startOffset, fullText.length))
@@ -3446,7 +3544,7 @@ export function ReaderRoute() {
     const chunkSize = CHUNK_CHARS[effectiveTtsProvider] ?? DEFAULT_AUDIO_CHARS
     const firstChunkSize = FIRST_AUDIO_CHARS[effectiveTtsProvider] ?? DEFAULT_FIRST_AUDIO_CHARS
     const raw = buildAudioChunks(snippet, start, chunkSize, firstChunkSize)
-    const initial: AudioChunk[] = raw.map((chunk) => ({ ...chunk, url: null, status: 'idle' }))
+    const initial: AudioChunk[] = raw.map((chunk) => ({ ...chunk, url: null, buffer: null, status: 'idle' }))
     if (!initial.length) {
       setWordAudio(null)
       showToast('There is no readable text at this position.')
@@ -3488,8 +3586,17 @@ export function ReaderRoute() {
   }
 
   function resumeWordAudio() {
+    if (!wordAudio) return
+    const ctx = wordAudioCtxRef.current
+    if (ctx && ctx.state === 'suspended') {
+      void ctx.resume().then(() => {
+        setWordAudio({ word: wordAudio.word, status: 'playing' })
+        startWordAudioCueRAF()
+      })
+      return
+    }
     const audio = wordAudioRef.current
-    if (!audio || !wordAudio) return
+    if (!audio) return
     audio.play()
       .then(() => setWordAudio({ word: wordAudio.word, status: 'playing' }))
       .catch(() => showToast('Playback was blocked by the browser. Tap play again.'))
@@ -3499,6 +3606,12 @@ export function ReaderRoute() {
     if (!wordAudio) return
     if (wordAudio.status === 'loading') return
     if (wordAudio.status === 'playing') {
+      const ctx = wordAudioCtxRef.current
+      if (ctx && ctx.state === 'running') {
+        stopWordAudioCueRAF()
+        void ctx.suspend().then(() => setWordAudio({ word: wordAudio.word, status: 'ready' }))
+        return
+      }
       wordAudioRef.current?.pause()
       setWordAudio({ word: wordAudio.word, status: 'ready' })
       return
@@ -3507,7 +3620,12 @@ export function ReaderRoute() {
   }
 
   useEffect(() => () => {
+    stopWordAudioCueRAF()
     wordAudioAbortRef.current?.abort()
+    try { wordAudioSourceRef.current?.stop(0); wordAudioSourceRef.current?.disconnect() } catch { /* already stopped */ }
+    wordAudioSourceRef.current = null
+    wordAudioCtxRef.current?.close().catch(() => {})
+    wordAudioCtxRef.current = null
     wordAudioRef.current?.pause()
     wordAudioChunkFetchesRef.current.clear()
     activeAudioCueKeyRef.current = null
