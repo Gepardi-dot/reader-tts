@@ -1327,7 +1327,7 @@ function AskAIPanel({ text, onClose, colors }: {
   useEffect(() => {
     const ac = new AbortController()
     let assistantContent = ''
-    // placeholder for the streaming assistant message
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMessages([{ role: 'assistant', content: '' }])
     setStreaming(true)
 
@@ -1555,6 +1555,7 @@ function TranslatePanel({ text, onClose, colors }: {
 
   // auto-translate on open
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void translate(lang)
     return () => abortRef.current?.abort()
   // eslint-disable-next-line react-hooks/exhaustive-deps

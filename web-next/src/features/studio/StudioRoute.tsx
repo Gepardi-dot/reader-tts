@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { BookOpen, Check, Circle, Sparkles, Volume2, X } from 'lucide-react'
 import { api } from '@/shared/api/client'
+import { isVocabWord, isPlaceholderDefinition } from './vocabUtils'
 
 const C = {
   bg: 'transparent',
@@ -33,19 +34,6 @@ const FONT = {
 }
 
 type Rating = 'again' | 'hard' | 'good' | 'easy'
-
-/**
- * A vocab card is only valid for practice if its front is a single word.
- * Multi-word highlights ("the marrow of literary effort") leak in from
- * sentence-level saves and corrupt MCQ/cloze/recall exercises.
- */
-export function isVocabWord(text: string): boolean {
-  if (typeof text !== 'string') return false
-  const tokens = text.trim().split(/\s+/).filter(Boolean)
-  if (tokens.length !== 1) return false
-  // also reject pure punctuation / digit-only tokens
-  return /[\p{L}]/u.test(tokens[0])
-}
 
 interface VocabCheck {
   verdict: 'correct' | 'partial' | 'incorrect'
@@ -86,24 +74,6 @@ async function aiDefineWord(word: string, bookSentence?: string | null): Promise
   })
 }
 
-const PLACEHOLDER_DEF_PATTERNS = [
-  /^saved from (your )?reading\.?$/i,
-  /^definition unavailable\.?$/i,
-  /^a word from your reading\.?$/i,
-  /^see [a-z]/i,
-]
-
-/**
- * A "definition" stored on the note isn't really a definition if it's missing
- * or one of the well-known placeholder strings. These cards corrupt MCQ — the
- * "correct" answer is a meaningless string.
- */
-export function isPlaceholderDefinition(def: string | null | undefined): boolean {
-  if (!def) return true
-  const trimmed = def.trim()
-  if (trimmed.length < 3) return true
-  return PLACEHOLDER_DEF_PATTERNS.some((re) => re.test(trimmed))
-}
 type CardState = 'new' | 'learning' | 'review' | 'relearning'
 type ExerciseType = 'mcq' | 'cloze' | 'mnemonic' | 'recall' | 'write-sentence' | 'write-definition'
 type Screen = 'dashboard' | 'practice' | 'results'

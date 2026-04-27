@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isVocabWord, isPlaceholderDefinition } from './StudioRoute'
+import { isVocabWord, isPlaceholderDefinition } from './vocabUtils'
 
 describe('isVocabWord', () => {
   it('accepts a single lowercase word', () => {
