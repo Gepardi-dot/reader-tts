@@ -43,13 +43,6 @@ RUNTIME_ENV_NAMES = (
     "AWS_PROFILE",
     "AWS_REGION",
     "AWS_DEFAULT_REGION",
-    "POLLY_REGION",
-    "AWS_POLLY_VOICE_ID",
-    "POLLY_VOICE_ID",
-    "AWS_POLLY_ENGINE",
-    "POLLY_ENGINE",
-    "AWS_POLLY_LANGUAGE_CODE",
-    "POLLY_LANGUAGE_CODE",
     "OPENAI_API_KEY",
     "OPENAI_CONTEXT_MODEL",
     "OPENAI_TTS_MODEL",
@@ -61,30 +54,6 @@ RUNTIME_ENV_NAMES = (
     "GEMMA_TIMEOUT_SECONDS",
     "VOCAB_CONTEXT_PROVIDER",
     "NVIDIA_API_KEY",
-    "DASHSCOPE_API_KEY",
-    "DASHSCOPE_BASE_HTTP_API_URL",
-    "QWEN_TTS_MODEL",
-    "QWEN_LOCAL_PYTHON",
-    "QWEN_LOCAL_MODEL",
-    "QWEN_LOCAL_DEVICE",
-    "QWEN_LOCAL_DTYPE",
-    "QWEN_LOCAL_ATTN_IMPLEMENTATION",
-    "QWEN_LOCAL_BATCH_SIZE",
-    "QWEN_LOCAL_TIMEOUT_SECONDS",
-    "QWEN_LOCAL_SOX_DIR",
-    "NEUTTS_WSL_DISTRO",
-    "NEUTTS_WSL_USER",
-    "NEUTTS_WSL_PYTHON",
-    "NEUTTS_WSL_HF_HOME",
-    "NEUTTS_LOCAL_MODEL",
-    "NEUTTS_LOCAL_CODEC",
-    "NEUTTS_LOCAL_TIMEOUT_SECONDS",
-    "NEUTTS_LOCAL_DAEMON_PORT",
-    "NEUTTS_LOCAL_DAEMON_HOST",
-    "NEUTTS_LOCAL_DAEMON_STARTUP_SECONDS",
-    "NEUTTS_REMOTE_URL",
-    "NEUTTS_REMOTE_API_KEY",
-    "NEUTTS_REMOTE_TIMEOUT_SECONDS",
     "KOKORO_REMOTE_URL",
     "KOKORO_REMOTE_API_KEY",
     "KOKORO_REMOTE_TIMEOUT_SECONDS",
@@ -206,7 +175,6 @@ WEB_DIST = frontend_root()
 DEFAULT_AUDIO_DIR = RUNTIME_ROOT / "output"
 PREVIEW_ROOT = DATA_ROOT / "previews"
 VOICES_ROOT = ROOT / "voices"
-NEUTTS_VOICES_ROOT = VOICES_ROOT / "neutts"
 DICTIONARY_BUNDLE_ROOT = ROOT / "dictionary"
 RUNTIME_DICTIONARY_ROOT = RUNTIME_ROOT / "dictionary"
 OFFLINE_DICTIONARY_BUNDLE_DB = DICTIONARY_BUNDLE_ROOT / "offline" / "dictionary.sqlite3"
@@ -214,44 +182,10 @@ OPEN_WORDNET_BUNDLE_DIR = DICTIONARY_BUNDLE_ROOT / "open-wordnet"
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
 OPENAI_TTS_MODEL = env_value("OPENAI_TTS_MODEL") or "gpt-4o-mini-tts"
 GEMINI_TTS_MODEL = env_value("GEMINI_TTS_MODEL") or "gemini-2.5-flash-preview-tts"
-DASHSCOPE_BASE_HTTP_API_URL = env_value("DASHSCOPE_BASE_HTTP_API_URL") or "https://dashscope-intl.aliyuncs.com/api/v1"
-QWEN_TTS_MODEL = env_value("QWEN_TTS_MODEL") or "qwen3-tts-instruct-flash"
-QWEN_LOCAL_PYTHON = env_value("QWEN_LOCAL_PYTHON")
-QWEN_LOCAL_MODEL = env_value("QWEN_LOCAL_MODEL") or "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
-QWEN_LOCAL_DEVICE = env_value("QWEN_LOCAL_DEVICE") or "cuda:0"
-QWEN_LOCAL_DTYPE = env_value("QWEN_LOCAL_DTYPE") or "auto"
-QWEN_LOCAL_ATTN_IMPLEMENTATION = env_value("QWEN_LOCAL_ATTN_IMPLEMENTATION") or ""
-QWEN_LOCAL_BATCH_SIZE = max(1, env_int_value("QWEN_LOCAL_BATCH_SIZE", 6))
-QWEN_LOCAL_TIMEOUT_SECONDS = max(60.0, env_float_value("QWEN_LOCAL_TIMEOUT_SECONDS", 3600.0))
-QWEN_LOCAL_DAEMON_PORT = min(max(env_int_value("QWEN_LOCAL_DAEMON_PORT", 8766), 1024), 65535)
-QWEN_LOCAL_DAEMON_HOST = env_value("QWEN_LOCAL_DAEMON_HOST") or "127.0.0.1"
-QWEN_LOCAL_DAEMON_STARTUP_SECONDS = max(5.0, env_float_value("QWEN_LOCAL_DAEMON_STARTUP_SECONDS", 120.0))
-QWEN_LOCAL_SOX_DIR = env_value("QWEN_LOCAL_SOX_DIR") or ""
-QWEN_LOCAL_HELPER = ROOT / "scripts" / "qwen_local_tts.py"
-NEUTTS_WSL_DISTRO = env_value("NEUTTS_WSL_DISTRO") or "Ubuntu"
-NEUTTS_WSL_USER = env_value("NEUTTS_WSL_USER")
-NEUTTS_WSL_PYTHON = env_value("NEUTTS_WSL_PYTHON")
-NEUTTS_WSL_HF_HOME = env_value("NEUTTS_WSL_HF_HOME")
-NEUTTS_LOCAL_MODEL = env_value("NEUTTS_LOCAL_MODEL") or "neuphonic/neutts-nano-q4-gguf"
-NEUTTS_LOCAL_CODEC = env_value("NEUTTS_LOCAL_CODEC") or "neuphonic/neucodec-onnx-decoder"
-NEUTTS_LOCAL_TIMEOUT_SECONDS = max(60.0, env_float_value("NEUTTS_LOCAL_TIMEOUT_SECONDS", 3600.0))
-NEUTTS_LOCAL_DAEMON_PORT = min(max(env_int_value("NEUTTS_LOCAL_DAEMON_PORT", 8765), 1024), 65535)
-NEUTTS_LOCAL_DAEMON_HOST = env_value("NEUTTS_LOCAL_DAEMON_HOST") or "127.0.0.1"
-NEUTTS_LOCAL_DAEMON_STARTUP_SECONDS = max(5.0, env_float_value("NEUTTS_LOCAL_DAEMON_STARTUP_SECONDS", 90.0))
-NEUTTS_LOCAL_HELPER = ROOT / "scripts" / "neutts_wsl_tts.py"
-NEUTTS_REMOTE_URL = (env_value("NEUTTS_REMOTE_URL") or "").rstrip("/")
-NEUTTS_REMOTE_API_KEY = env_value("NEUTTS_REMOTE_API_KEY") or ""
-NEUTTS_REMOTE_TIMEOUT_SECONDS = max(30.0, env_float_value("NEUTTS_REMOTE_TIMEOUT_SECONDS", 120.0))
 KOKORO_REMOTE_URL = (env_value("KOKORO_REMOTE_URL") or "").rstrip("/")
 KOKORO_REMOTE_API_KEY = env_value("KOKORO_REMOTE_API_KEY") or ""
 KOKORO_REMOTE_TIMEOUT_SECONDS = max(10.0, env_float_value("KOKORO_REMOTE_TIMEOUT_SECONDS", 60.0))
 CANONICAL_WAV_SAMPLE_RATE = 24000
-POLLY_REGION = env_value("POLLY_REGION") or env_value("AWS_REGION") or env_value("AWS_DEFAULT_REGION")
-POLLY_VOICE_ID = env_value("AWS_POLLY_VOICE_ID") or env_value("POLLY_VOICE_ID") or "Matthew"
-POLLY_ENGINE = (env_value("AWS_POLLY_ENGINE") or env_value("POLLY_ENGINE") or "standard").lower()
-POLLY_LANGUAGE_CODE = env_value("AWS_POLLY_LANGUAGE_CODE") or env_value("POLLY_LANGUAGE_CODE") or "en-US"
-POLLY_PCM_SAMPLE_RATE = "16000"
-POLLY_CACHE_TTL_SECONDS = 300
 APP_SECRET_KEY = env_value("APP_SECRET_KEY")
 SUPABASE_URL = (env_value("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_JWT_SECRET = env_value("SUPABASE_JWT_SECRET")
@@ -261,7 +195,7 @@ BOOK_STORAGE_ADDRESSING_STYLE = (env_value("BOOK_STORAGE_ADDRESSING_STYLE") or "
 LOCAL_DEV_USER_ID = "00000000-0000-0000-0000-000000000001"
 LIVE_AUDIO_CACHE_VERSION = 5
 PROVIDER_TEST_CACHE_VERSION = 2
-TTSProviderId = Literal["piper", "google", "openai", "polly", "qwen", "qwen_local", "neutts_local", "kokoro"]
+TTSProviderId = Literal["piper", "google", "openai", "kokoro"]
 GEMINI_MAX_RETRY_ATTEMPTS = 3
 GEMINI_MAX_RETRY_DELAY_SECONDS = 75.0
 BOOK_STORAGE_BUCKET = env_value("BOOK_STORAGE_BUCKET")
@@ -350,48 +284,6 @@ GEMINI_TTS_MODELS = [
     ),
 ]
 GEMINI_TTS_MODEL_IDS = {item["id"] for item in GEMINI_TTS_MODELS}
-QWEN_TTS_MODELS = [
-    provider_model_option(
-        "qwen3-tts-instruct-flash",
-        "Qwen3 TTS Instruct Flash",
-        "Expressive instruction-guided narration for audiobooks, dramatic reads, and premium previews.",
-        storytelling=True,
-    ),
-    provider_model_option(
-        "qwen3-tts-flash",
-        "Qwen3 TTS Flash",
-        "Lower-cost multilingual speech synthesis for straightforward narration and utility reads.",
-    ),
-]
-QWEN_TTS_MODEL_IDS = {item["id"] for item in QWEN_TTS_MODELS}
-QWEN_LOCAL_TTS_MODELS = [
-    provider_model_option(
-        "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-        "Qwen3 TTS Local 0.6B",
-        "Local CustomVoice model with lower memory requirements and no per-request API traffic.",
-    ),
-    provider_model_option(
-        "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-        "Qwen3 TTS Local 1.7B",
-        "Higher-capability local CustomVoice model for richer narration when the machine can handle it.",
-        storytelling=True,
-    ),
-]
-QWEN_LOCAL_TTS_MODEL_IDS = {item["id"] for item in QWEN_LOCAL_TTS_MODELS}
-NEUTTS_LOCAL_TTS_MODELS = [
-    provider_model_option(
-        "neuphonic/neutts-nano-q4-gguf",
-        "NeuTTS Nano Q4",
-        "Fastest local NeuTTS profile for CPU-only laptops and routine audiobook jobs.",
-    ),
-    provider_model_option(
-        "neuphonic/neutts-air-q4-gguf",
-        "NeuTTS Air Q4",
-        "Higher-quality local NeuTTS profile with a heavier CPU cost.",
-        storytelling=True,
-    ),
-]
-NEUTTS_LOCAL_TTS_MODEL_IDS = {item["id"] for item in NEUTTS_LOCAL_TTS_MODELS}
 OPENAI_TTS_MODELS = [
     provider_model_option(
         "gpt-4o-mini-tts",
@@ -410,120 +302,6 @@ OPENAI_VOICES = [
     voice_option("onyx", "Onyx", gender="male", gender_source="estimated", style="Deep", tags=["Story"]),
     voice_option("sage", "Sage", gender="female", gender_source="estimated", style="Measured"),
     voice_option("shimmer", "Shimmer", gender="female", gender_source="estimated", style="Light"),
-]
-QWEN_VOICES = [
-    voice_option(
-        "Cherry",
-        "Cherry",
-        gender="female",
-        gender_source="provider",
-        style="Lively",
-        tags=["Story"],
-        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Serena",
-        "Serena",
-        gender="female",
-        gender_source="provider",
-        style="Warm",
-        tags=["Story"],
-        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Jennifer",
-        "Jennifer",
-        gender="female",
-        gender_source="provider",
-        style="Clear",
-        models=["qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Mia",
-        "Mia",
-        gender="female",
-        gender_source="provider",
-        style="Bright",
-        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Bellona",
-        "Bellona",
-        gender="female",
-        gender_source="provider",
-        style="Dramatic",
-        tags=["Story"],
-        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Ethan",
-        "Ethan",
-        gender="male",
-        gender_source="provider",
-        style="Natural",
-        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Ryan",
-        "Ryan",
-        gender="male",
-        gender_source="provider",
-        style="Conversational",
-        models=["qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Aiden",
-        "Aiden",
-        gender="male",
-        gender_source="provider",
-        style="Measured",
-        models=["qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Neil",
-        "Neil",
-        gender="male",
-        gender_source="provider",
-        style="Steady",
-        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Vincent",
-        "Vincent",
-        gender="male",
-        gender_source="provider",
-        style="Deep",
-        tags=["Story"],
-        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Arthur",
-        "Arthur",
-        gender="male",
-        gender_source="provider",
-        style="Classic",
-        tags=["Story"],
-        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
-    ),
-    voice_option(
-        "Elias",
-        "Elias",
-        gender="male",
-        gender_source="provider",
-        style="Smooth",
-        models=["qwen3-tts-instruct-flash", "qwen3-tts-flash"],
-    ),
-]
-QWEN_LOCAL_VOICES = [
-    voice_option("Vivian", "Vivian", gender="female", gender_source="provider", style="Bright", tags=["Story"]),
-    voice_option("Serena", "Serena", gender="female", gender_source="provider", style="Warm", tags=["Story"]),
-    voice_option("Uncle_Fu", "Uncle Fu", gender="male", gender_source="provider", style="Mellow", tags=["Story"]),
-    voice_option("Dylan", "Dylan", gender="male", gender_source="provider", style="Clear"),
-    voice_option("Eric", "Eric", gender="male", gender_source="provider", style="Lively"),
-    voice_option("Ryan", "Ryan", gender="male", gender_source="provider", style="Dynamic", tags=["Story"]),
-    voice_option("Aiden", "Aiden", gender="male", gender_source="provider", style="Sunny"),
-    voice_option("Ono_Anna", "Ono Anna", gender="female", gender_source="provider", style="Playful"),
-    voice_option("Sohee", "Sohee", gender="female", gender_source="provider", style="Emotive"),
 ]
 GEMINI_VOICES = [
     voice_option("Zephyr", "Zephyr", gender="neutral", gender_source="estimated", style="Bright"),
@@ -577,13 +355,10 @@ PROVIDER_TEST_SNIPPET = (
     "When the room quieted, the story finally found its rhythm. "
     "Read this sample with natural phrasing, steady pacing, and a warm, attentive tone."
 )
-PROVIDER_TEST_LOCAL_SNIPPET = "Quick local voice check. Keep it warm, clear, and steady."
 SUPABASE_DB_URL = env_value("SUPABASE_POOLER_URL") or env_value("SUPABASE_DB_URL") or env_value("DATABASE_URL")
 
 for directory in (DATA_ROOT, BOOKS_ROOT, JOBS_ROOT, DEFAULT_AUDIO_DIR, PREVIEW_ROOT):
     directory.mkdir(parents=True, exist_ok=True)
-if not os.environ.get("VERCEL"):
-    NEUTTS_VOICES_ROOT.mkdir(parents=True, exist_ok=True)
 
 _SENTRY_DSN = env_value("SENTRY_DSN")
 if _SENTRY_DSN:
@@ -726,8 +501,6 @@ def current_user_id() -> str:
 
 job_lock = threading.Lock()
 job_state: dict[str, dict[str, Any]] = {}
-polly_catalog_cache: dict[str, Any] | None = None
-polly_catalog_cache_expires_at = 0.0
 # Books cache: keyed by user_id → (list[book], expires_at)
 _books_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}
 _books_cache_lock = threading.Lock()
@@ -738,10 +511,6 @@ _supabase_jwk_client: Any = None
 _supabase_jwk_client_lock = threading.Lock()
 # Per-request user identity set by auth_middleware
 _current_user_id: ContextVar[str | None] = ContextVar("user_id", default=None)
-qwen_local_lock = threading.Lock()
-neutts_local_lock = threading.Lock()
-qwen_local_daemon_lock = threading.Lock()
-neutts_local_daemon_lock = threading.Lock()
 progress_store_lock = threading.Lock()
 progress_store_ready = False
 
@@ -785,7 +554,7 @@ class LiveAudioRequest(BaseModel):
 
 
 class ProviderWarmupRequest(BaseModel):
-    provider: Literal["qwen_local", "neutts_local"] = "neutts_local"
+    provider: str
     voice: str | None = None
     model: str | None = None
 
@@ -2982,398 +2751,17 @@ def get_voice_models() -> list[dict[str, str]]:
     return results
 
 
-def read_neutts_reference_meta(reference_dir: Path) -> dict[str, Any]:
-    meta_path = reference_dir / "meta.json"
-    if not meta_path.exists():
-        return {}
-
-    try:
-        payload = json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-    return payload if isinstance(payload, dict) else {}
-
-
-def neutts_reference_pack_path(voice_id: str) -> Path:
-    root = NEUTTS_VOICES_ROOT.resolve()
-    candidate = (root / voice_id).resolve()
-    if candidate == root or root not in candidate.parents:
-        raise RuntimeError(f"Invalid NeuTTS voice id: {voice_id}")
-    if not candidate.is_dir():
-        raise RuntimeError(f"NeuTTS voice pack not found: {voice_id}")
-    return candidate
-
-
-def neutts_reference_pack_complete(reference_dir: Path) -> bool:
-    return (reference_dir / "reference.wav").exists() and (reference_dir / "reference.txt").exists()
-
-
-def list_neutts_reference_packs() -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    if not NEUTTS_VOICES_ROOT.is_dir():
-        return results
-    for reference_dir in sorted(NEUTTS_VOICES_ROOT.iterdir()):
-        if not reference_dir.is_dir() or not neutts_reference_pack_complete(reference_dir):
-            continue
-
-        meta = read_neutts_reference_meta(reference_dir)
-        label = str(meta.get("label") or "").strip() or reference_dir.name.replace("-", " ")
-        gender = meta.get("gender")
-        gender_source = meta.get("genderSource")
-        style = str(meta.get("style") or "").strip() or None
-        tags = [str(item).strip() for item in meta.get("tags", []) if str(item).strip()] if isinstance(meta.get("tags"), list) else None
-        models = (
-            [str(item).strip() for item in meta.get("models", []) if str(item).strip()]
-            if isinstance(meta.get("models"), list)
-            else None
-        )
-        results.append(
-            voice_option(
-                reference_dir.name,
-                label,
-                gender=gender if gender in {"male", "female", "neutral"} else None,
-                gender_source=gender_source if gender_source in {"provider", "estimated"} else None,
-                style=style,
-                tags=tags or None,
-                models=models or None,
-            )
-        )
-    return results
-
-
-def polly_sdk_available() -> bool:
-    return importlib.util.find_spec("boto3") is not None
 
 
 def load_boto3():
-    if not polly_sdk_available():
-        raise RuntimeError("Amazon Polly support requires boto3. Reinstall with `pip install -r requirements.txt`.")
-
     try:
         import boto3
         from botocore.config import Config
         from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, NoRegionError, ProfileNotFound
     except ImportError as exc:
-        raise RuntimeError("Amazon Polly support requires boto3. Reinstall with `pip install -r requirements.txt`.") from exc
+        raise RuntimeError("S3 storage support requires boto3. Reinstall with `pip install -r requirements.txt`.") from exc
 
     return boto3, Config, BotoCoreError, ClientError, NoCredentialsError, NoRegionError, ProfileNotFound
-
-
-def dashscope_sdk_available() -> bool:
-    return importlib.util.find_spec("dashscope") is not None
-
-
-def load_dashscope():
-    if not dashscope_sdk_available():
-        raise RuntimeError("Qwen TTS support requires dashscope. Reinstall with `pip install -r requirements.txt`.")
-
-    try:
-        import dashscope
-    except ImportError as exc:
-        raise RuntimeError("Qwen TTS support requires dashscope. Reinstall with `pip install -r requirements.txt`.") from exc
-
-    dashscope.base_http_api_url = DASHSCOPE_BASE_HTTP_API_URL
-    return dashscope
-
-
-def qwen_local_python_path() -> Path:
-    if not QWEN_LOCAL_PYTHON:
-        raise RuntimeError(
-            "QWEN_LOCAL_PYTHON is not configured. Point it at the Python executable inside your qwen-tts environment."
-        )
-
-    candidate = Path(QWEN_LOCAL_PYTHON).expanduser()
-    if candidate.exists():
-        return candidate.resolve()
-
-    located = shutil.which(QWEN_LOCAL_PYTHON)
-    if located:
-        return Path(located).resolve()
-
-    raise RuntimeError(f"QWEN_LOCAL_PYTHON could not be resolved: {QWEN_LOCAL_PYTHON}")
-
-
-def qwen_local_runtime_configured() -> bool:
-    if not QWEN_LOCAL_HELPER.exists():
-        return False
-    try:
-        qwen_local_python_path()
-    except RuntimeError:
-        return False
-    return True
-
-
-def qwen_local_daemon_base_url() -> str:
-    return f"http://{QWEN_LOCAL_DAEMON_HOST}:{QWEN_LOCAL_DAEMON_PORT}"
-
-
-def qwen_local_daemon_healthcheck() -> bool:
-    try:
-        response = httpx.get(f"{qwen_local_daemon_base_url()}/health", timeout=2.0)
-    except httpx.HTTPError:
-        return False
-    return response.status_code == 200
-
-
-def start_qwen_local_daemon() -> None:
-    python_exe = qwen_local_python_path()
-    command = [
-        str(python_exe),
-        str(QWEN_LOCAL_HELPER),
-        "--daemon",
-        "--host",
-        QWEN_LOCAL_DAEMON_HOST,
-        "--port",
-        str(QWEN_LOCAL_DAEMON_PORT),
-    ]
-
-    daemon_log_path = ROOT / "output" / "qwen-local-daemon.log"
-    daemon_log_path.parent.mkdir(parents=True, exist_ok=True)
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    with daemon_log_path.open("a", encoding="utf-8") as log_handle:
-        subprocess.Popen(
-            command,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=log_handle,
-            creationflags=creationflags,
-        )
-
-
-def ensure_qwen_local_daemon_running() -> None:
-    if qwen_local_daemon_healthcheck():
-        return
-
-    with qwen_local_daemon_lock:
-        if qwen_local_daemon_healthcheck():
-            return
-
-        start_qwen_local_daemon()
-        deadline = time.time() + max(5.0, QWEN_LOCAL_DAEMON_STARTUP_SECONDS)
-        while time.time() < deadline:
-            if qwen_local_daemon_healthcheck():
-                return
-            time.sleep(0.5)
-
-    raise RuntimeError("Local Qwen daemon did not become ready in time.")
-
-
-def run_qwen_local_one_shot_request(request_payload: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
-    python_exe = qwen_local_python_path()
-    if not QWEN_LOCAL_HELPER.exists():
-        raise RuntimeError(f"Local Qwen helper script not found: {QWEN_LOCAL_HELPER}")
-
-    with tempfile.TemporaryDirectory(prefix="storybook_qwen_request_", dir=str(DEFAULT_AUDIO_DIR)) as temp_dir:
-        request_path = Path(temp_dir) / "request.json"
-        request_path.write_text(json.dumps(request_payload), encoding="utf-8")
-        command = [str(python_exe), str(QWEN_LOCAL_HELPER), "--input-json", str(request_path)]
-        try:
-            with qwen_local_lock:
-                completed = subprocess.run(
-                    command,
-                    text=True,
-                    capture_output=True,
-                    check=True,
-                    timeout=timeout_seconds,
-                )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"Local Qwen synthesis timed out after {int(timeout_seconds)} seconds.") from exc
-        except subprocess.CalledProcessError as exc:
-            detail = (exc.stderr or exc.stdout or str(exc)).strip()
-            raise RuntimeError(f"Local Qwen synthesis failed: {detail}") from exc
-
-    lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
-    if not lines:
-        raise RuntimeError("Local Qwen synthesis did not return a result manifest.")
-    try:
-        payload = json.loads(lines[-1])
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Local Qwen synthesis returned malformed JSON output.") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("Local Qwen synthesis returned an invalid response payload.")
-    return payload
-
-
-def run_qwen_daemon_request(
-    path: str,
-    request_payload: dict[str, Any],
-    *,
-    timeout_seconds: float,
-) -> dict[str, Any]:
-    ensure_qwen_local_daemon_running()
-    url = f"{qwen_local_daemon_base_url()}{path}"
-    try:
-        response = httpx.post(url, json=request_payload, timeout=timeout_seconds)
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"Local Qwen daemon request failed: {exc}") from exc
-
-    if response.status_code >= 400:
-        detail = response.text
-        try:
-            payload = response.json()
-            detail = str(payload.get("error") or payload.get("detail") or detail)
-        except Exception:
-            pass
-        raise RuntimeError(f"Local Qwen daemon request failed: {detail}")
-
-    try:
-        payload = response.json()
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Local Qwen daemon returned malformed JSON output.") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("Local Qwen daemon returned an invalid response payload.")
-    return payload
-
-
-def run_qwen_helper_request(
-    request_payload: dict[str, Any],
-    *,
-    timeout_seconds: float,
-    prefer_daemon: bool = True,
-) -> dict[str, Any]:
-    if prefer_daemon:
-        try:
-            return run_qwen_daemon_request("/v1/synthesize", request_payload, timeout_seconds=timeout_seconds)
-        except RuntimeError as exc:
-            print(f"Qwen local daemon unavailable, falling back to one-shot execution: {exc}")
-    return run_qwen_local_one_shot_request(request_payload, timeout_seconds=timeout_seconds)
-
-
-def warmup_qwen_local_runtime(model_name: str, voice_id: str) -> dict[str, Any]:
-    request_payload: dict[str, Any] = {
-        "action": "warmup",
-        "model": model_name,
-        "voice": voice_id,
-        "warmup_text": PROVIDER_TEST_LOCAL_SNIPPET,
-        "device": QWEN_LOCAL_DEVICE,
-        "dtype": QWEN_LOCAL_DTYPE,
-        "attn_implementation": QWEN_LOCAL_ATTN_IMPLEMENTATION,
-        "batch_size": QWEN_LOCAL_BATCH_SIZE,
-        "sox_dir": QWEN_LOCAL_SOX_DIR,
-    }
-
-    try:
-        return run_qwen_daemon_request(
-            "/v1/warmup",
-            request_payload,
-            timeout_seconds=max(30.0, min(QWEN_LOCAL_TIMEOUT_SECONDS, 300.0)),
-        )
-    except RuntimeError as exc:
-        print(f"Qwen local warmup could not start resident runtime: {exc}")
-        return {
-            "action": "warmup",
-            "warmed": False,
-            "voice": voice_id,
-            "model": model_name,
-        }
-
-
-def wsl_executable_path() -> Path:
-    located = shutil.which("wsl.exe") or shutil.which("wsl")
-    if located:
-        return Path(located).resolve()
-
-    system_root = os.environ.get("SystemRoot")
-    if system_root:
-        candidate = Path(system_root) / "System32" / "wsl.exe"
-        if candidate.exists():
-            return candidate.resolve()
-
-    raise RuntimeError("WSL is not available on this machine.")
-
-
-def neutts_local_wsl_python() -> str:
-    if not NEUTTS_WSL_PYTHON:
-        raise RuntimeError(
-            "NEUTTS_WSL_PYTHON is not configured. Point it at the Python executable inside your WSL NeuTTS environment."
-        )
-    return NEUTTS_WSL_PYTHON.strip()
-
-
-def windows_path_to_wsl(path: Path | str) -> str:
-    raw = str(path)
-    if raw.startswith("/"):
-        return raw
-
-    resolved = str(Path(raw).expanduser().resolve()).replace("\\", "/")
-    if len(resolved) >= 3 and resolved[1:3] == ":/":
-        return f"/mnt/{resolved[0].lower()}{resolved[2:]}"
-    return resolved
-
-
-def wsl_path_to_windows(path: Path | str) -> Path:
-    raw = str(path).strip()
-    if raw.startswith("/mnt/") and len(raw) > 6:
-        drive = raw[5]
-        remainder = raw[6:].replace("/", "\\")
-        return Path(f"{drive.upper()}:{remainder}")
-    return Path(raw)
-
-
-def neutts_local_runtime_configured() -> bool:
-    if not NEUTTS_LOCAL_HELPER.exists():
-        return False
-    try:
-        wsl_executable_path()
-        neutts_local_wsl_python()
-    except RuntimeError:
-        return False
-    return True
-
-
-def neutts_local_daemon_base_url() -> str:
-    return f"http://{NEUTTS_LOCAL_DAEMON_HOST}:{NEUTTS_LOCAL_DAEMON_PORT}"
-
-
-def neutts_remote_configured() -> bool:
-    """True when a remote NeuTTS server URL is configured (works on Vercel/production)."""
-    return bool(NEUTTS_REMOTE_URL)
-
-
-def neutts_runtime_configured() -> bool:
-    """True when NeuTTS can be used — either via remote server or local WSL."""
-    return neutts_remote_configured() or neutts_local_runtime_configured()
-
-
-def synthesize_neutts_remote(
-    chunks: list[str],
-    voice: str,
-    model: str,
-    output_path: Path,
-) -> None:
-    """
-    Call the remote NeuTTS server, receive WAV bytes, write to output_path.
-    The remote server handles its own disk cache, so repeat requests are instant.
-    """
-    url = f"{NEUTTS_REMOTE_URL}/v1/synthesize"
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if NEUTTS_REMOTE_API_KEY:
-        headers["X-Api-Key"] = NEUTTS_REMOTE_API_KEY
-
-    payload = {
-        "chunks": chunks,
-        "voice": voice,
-        "model": model,
-        "codec": NEUTTS_LOCAL_CODEC,
-    }
-
-    with httpx.Client(timeout=NEUTTS_REMOTE_TIMEOUT_SECONDS) as client:
-        response = client.post(url, json=payload, headers=headers)
-
-    if response.status_code != 200:
-        try:
-            detail = response.json().get("error", response.text[:200])
-        except Exception:
-            detail = response.text[:200]
-        raise RuntimeError(f"Remote NeuTTS server returned {response.status_code}: {detail}")
-
-    if not response.content:
-        raise RuntimeError("Remote NeuTTS server returned an empty response.")
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(response.content)
 
 
 def kokoro_configured() -> bool:
@@ -3410,214 +2798,6 @@ def synthesize_kokoro_remote(
     output_path.write_bytes(response.content)
 
 
-def neutts_local_daemon_healthcheck() -> bool:
-    try:
-        response = httpx.get(f"{neutts_local_daemon_base_url()}/health", timeout=2.0)
-    except httpx.HTTPError:
-        return False
-    return response.status_code == 200
-
-
-def start_neutts_local_daemon() -> None:
-    wsl_exe = wsl_executable_path()
-    linux_python = neutts_local_wsl_python()
-    helper_path = windows_path_to_wsl(NEUTTS_LOCAL_HELPER)
-
-    command = [str(wsl_exe), "-d", NEUTTS_WSL_DISTRO]
-    if NEUTTS_WSL_USER:
-        command.extend(["-u", NEUTTS_WSL_USER])
-    command.extend(
-        [
-            "--",
-            linux_python,
-            helper_path,
-            "--daemon",
-            "--host",
-            NEUTTS_LOCAL_DAEMON_HOST,
-            "--port",
-            str(NEUTTS_LOCAL_DAEMON_PORT),
-        ]
-    )
-
-    daemon_log_path = ROOT / "output" / "neutts-local-daemon.log"
-    daemon_log_path.parent.mkdir(parents=True, exist_ok=True)
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    with daemon_log_path.open("a", encoding="utf-8") as log_handle:
-        subprocess.Popen(
-            command,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=log_handle,
-            creationflags=creationflags,
-        )
-
-
-def reset_neutts_local_wsl_runtime() -> None:
-    wsl_exe = wsl_executable_path()
-    subprocess.run(
-        [str(wsl_exe), "--shutdown"],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
-    time.sleep(2.0)
-
-
-def ensure_neutts_local_daemon_running() -> None:
-    if neutts_local_daemon_healthcheck():
-        return
-
-    last_error: Exception | None = None
-    with neutts_local_daemon_lock:
-        if neutts_local_daemon_healthcheck():
-            return
-
-        for attempt in range(2):
-            try:
-                if attempt == 1:
-                    reset_neutts_local_wsl_runtime()
-                start_neutts_local_daemon()
-            except Exception as exc:
-                last_error = exc
-                continue
-
-            deadline = time.time() + min(NEUTTS_LOCAL_DAEMON_STARTUP_SECONDS, 15.0)
-            while time.time() < deadline:
-                if neutts_local_daemon_healthcheck():
-                    return
-                time.sleep(0.5)
-
-    if last_error is not None:
-        raise RuntimeError(f"Local NeuTTS daemon could not start: {last_error}") from last_error
-    raise RuntimeError("Local NeuTTS daemon did not become ready in time.")
-
-
-def run_neutts_wsl_helper_request(request_payload: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
-    wsl_exe = wsl_executable_path()
-    linux_python = neutts_local_wsl_python()
-    if not NEUTTS_LOCAL_HELPER.exists():
-        raise RuntimeError(f"NeuTTS WSL helper script not found: {NEUTTS_LOCAL_HELPER}")
-
-    with tempfile.TemporaryDirectory(prefix="storybook_neutts_request_", dir=str(DEFAULT_AUDIO_DIR)) as temp_dir:
-        request_path = Path(temp_dir) / "request.json"
-        request_path.write_text(json.dumps(request_payload), encoding="utf-8")
-
-        command = [str(wsl_exe), "-d", NEUTTS_WSL_DISTRO]
-        if NEUTTS_WSL_USER:
-            command.extend(["-u", NEUTTS_WSL_USER])
-        command.extend(
-            [
-                "--",
-                linux_python,
-                windows_path_to_wsl(NEUTTS_LOCAL_HELPER),
-                "--input-json",
-                windows_path_to_wsl(request_path),
-            ]
-        )
-
-        try:
-            completed = subprocess.run(
-                command,
-                text=True,
-                capture_output=True,
-                check=True,
-                timeout=timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"Local NeuTTS synthesis timed out after {int(timeout_seconds)} seconds.") from exc
-        except subprocess.CalledProcessError as exc:
-            detail = (exc.stderr or exc.stdout or str(exc)).strip()
-            raise RuntimeError(f"Local NeuTTS synthesis failed: {detail}") from exc
-
-    lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
-    if not lines:
-        raise RuntimeError("Local NeuTTS synthesis did not return a result manifest.")
-    try:
-        return json.loads(lines[-1])
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Local NeuTTS synthesis returned malformed JSON output.") from exc
-
-
-def run_neutts_daemon_request(
-    path: str,
-    request_payload: dict[str, Any],
-    *,
-    timeout_seconds: float,
-) -> dict[str, Any]:
-    ensure_neutts_local_daemon_running()
-    url = f"{neutts_local_daemon_base_url()}{path}"
-    try:
-        response = httpx.post(url, json=request_payload, timeout=timeout_seconds)
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"Local NeuTTS daemon request failed: {exc}") from exc
-
-    if response.status_code >= 400:
-        detail = response.text
-        try:
-            payload = response.json()
-            detail = str(payload.get("error") or payload.get("detail") or detail)
-        except Exception:
-            pass
-        raise RuntimeError(f"Local NeuTTS daemon request failed: {detail}")
-
-    try:
-        payload = response.json()
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Local NeuTTS daemon returned malformed JSON output.") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("Local NeuTTS daemon returned an invalid response payload.")
-    return payload
-
-
-def run_neutts_helper_request(
-    request_payload: dict[str, Any],
-    *,
-    timeout_seconds: float,
-    prefer_daemon: bool = True,
-) -> dict[str, Any]:
-    if prefer_daemon:
-        try:
-            return run_neutts_daemon_request("/v1/synthesize", request_payload, timeout_seconds=timeout_seconds)
-        except RuntimeError as exc:
-            print(f"NeuTTS daemon unavailable, falling back to one-shot WSL execution: {exc}")
-    return run_neutts_wsl_helper_request(request_payload, timeout_seconds=timeout_seconds)
-
-
-def warmup_neutts_local_runtime(model_name: str, voice_id: str) -> dict[str, Any]:
-    request_payload: dict[str, Any] = {
-        "action": "warmup",
-        "model": model_name,
-        "codec": NEUTTS_LOCAL_CODEC,
-        "reference_dir": windows_path_to_wsl(neutts_reference_pack_path(voice_id)),
-    }
-    if NEUTTS_WSL_HF_HOME:
-        request_payload["hf_home"] = NEUTTS_WSL_HF_HOME
-
-    try:
-        return run_neutts_daemon_request("/v1/warmup", request_payload, timeout_seconds=max(30.0, min(NEUTTS_LOCAL_TIMEOUT_SECONDS, 300.0)))
-    except RuntimeError as exc:
-        print(f"NeuTTS warmup fell back to reference preparation only: {exc}")
-        result = run_neutts_wsl_helper_request(
-            {
-                "action": "prepare_reference",
-                "reference_dir": windows_path_to_wsl(neutts_reference_pack_path(voice_id)),
-                **({"hf_home": NEUTTS_WSL_HF_HOME} if NEUTTS_WSL_HF_HOME else {}),
-            },
-            timeout_seconds=max(30.0, min(NEUTTS_LOCAL_TIMEOUT_SECONDS, 300.0)),
-        )
-        return {
-            "action": "warmup",
-            "warmed": False,
-            "fallback": "prepare_reference",
-            "voicePack": voice_id,
-            "model": model_name,
-            "codec": NEUTTS_LOCAL_CODEC,
-            **result,
-        }
-
-
 def create_aws_session(*, region_name: str | None = None):
     boto3, _, _, _, _, _, ProfileNotFound = load_boto3()
 
@@ -3641,25 +2821,6 @@ def create_aws_session(*, region_name: str | None = None):
         )
 
     return session
-
-
-def create_polly_session():
-    return create_aws_session(region_name=POLLY_REGION)
-
-
-def create_aws_client(service_name: str, *, region_name: str | None = None):
-    session = create_aws_session(region_name=region_name)
-    _, Config, _, _, _, _, _ = load_boto3()
-    client_config = Config(
-        connect_timeout=3,
-        read_timeout=10,
-        retries={"max_attempts": 1},
-    )
-    return session.client(service_name, config=client_config)
-
-
-def create_polly_client():
-    return create_aws_client("polly", region_name=POLLY_REGION)
 
 
 def regional_book_storage_api_url() -> str:
@@ -3716,174 +2877,8 @@ def regional_book_storage_upload_url() -> str:
     return f"https://{BOOK_STORAGE_BUCKET}.s3.{BOOK_STORAGE_REGION}.amazonaws.com/"
 
 
-def gender_label(value: str | None) -> str:
-    if not value:
-        return "Voice"
-    return value.title()
-
-
-def get_polly_catalog(force_refresh: bool = False) -> dict[str, Any]:
-    global polly_catalog_cache, polly_catalog_cache_expires_at
-
-    if not force_refresh and polly_catalog_cache and time.monotonic() < polly_catalog_cache_expires_at:
-        return polly_catalog_cache
-
-    default_catalog = {
-        "available": False,
-        "description": "Configure AWS CLI credentials or AWS_PROFILE to use Amazon Polly.",
-        "voices": [],
-        "defaultVoice": POLLY_VOICE_ID,
-    }
-
-    try:
-        client = create_polly_client()
-        request: dict[str, Any] = {"Engine": POLLY_ENGINE, "LanguageCode": POLLY_LANGUAGE_CODE}
-        voices: list[dict[str, str]] = []
-
-        while True:
-            response = client.describe_voices(**request)
-            for voice in response.get("Voices", []):
-                supported_engines = voice.get("SupportedEngines", [])
-                if POLLY_ENGINE not in supported_engines:
-                    continue
-                voices.append(
-                    {
-                        "id": voice["Id"],
-                        "label": f"{voice['Name']} - {gender_label(voice.get('Gender'))}, {voice.get('LanguageCode', POLLY_LANGUAGE_CODE)}",
-                        "gender": (voice.get("Gender") or "").lower() or None,
-                        "genderSource": "provider",
-                        "style": voice.get("LanguageCode", POLLY_LANGUAGE_CODE),
-                    }
-                )
-
-            next_token = response.get("NextToken")
-            if not next_token:
-                break
-            request["NextToken"] = next_token
-
-        voices.sort(key=lambda item: item["label"])
-        if not voices:
-            catalog = {
-                "available": False,
-                "description": f"No Polly voices matched engine {POLLY_ENGINE} in {POLLY_LANGUAGE_CODE}.",
-                "voices": [],
-                "defaultVoice": POLLY_VOICE_ID,
-            }
-        else:
-            default_voice = POLLY_VOICE_ID if any(voice["id"] == POLLY_VOICE_ID for voice in voices) else voices[0]["id"]
-            region_label = POLLY_REGION or env_value("AWS_REGION") or "AWS default region"
-            catalog = {
-                "available": True,
-                "description": f"AWS Polly {POLLY_ENGINE} voices from {region_label}.",
-                "voices": voices,
-                "defaultVoice": default_voice,
-            }
-    except Exception as exc:
-        catalog = {
-            **default_catalog,
-            "description": f"Amazon Polly unavailable: {exc}",
-        }
-
-    polly_catalog_cache = catalog
-    polly_catalog_cache_expires_at = time.monotonic() + POLLY_CACHE_TTL_SECONDS
-    return catalog
-
-
-def get_polly_health(force_refresh: bool = False) -> dict[str, Any]:
-    catalog = get_polly_catalog(force_refresh=force_refresh)
-    aws_profile = env_value("AWS_PROFILE")
-    region_label = POLLY_REGION or env_value("AWS_REGION") or "AWS default region"
-
-    health = {
-        "connected": False,
-        "region": region_label,
-        "engine": POLLY_ENGINE,
-        "languageCode": POLLY_LANGUAGE_CODE,
-        "profile": aws_profile,
-        "defaultVoice": catalog.get("defaultVoice"),
-        "voiceCount": len(catalog.get("voices", [])),
-        "accountId": None,
-        "arn": None,
-        "message": catalog["description"],
-    }
-
-    if not catalog["available"]:
-        return health
-
-    try:
-        sts_client = create_aws_client("sts")
-        identity = sts_client.get_caller_identity()
-    except Exception as exc:
-        return {
-            **health,
-            "message": f"Polly voices loaded, but AWS identity lookup failed: {exc}",
-        }
-
-    return {
-        **health,
-        "connected": True,
-        "accountId": identity.get("Account"),
-        "arn": identity.get("Arn"),
-        "message": f"Connected to AWS account {identity.get('Account')} in {region_label}.",
-    }
-
-
 def provider_catalog() -> list[dict[str, Any]]:
-    polly_catalog = get_polly_catalog()
-    neutts_voices = neutts_local_voices_for_model(None)
-    neutts_available = neutts_runtime_configured() and bool(neutts_voices)
-    neutts_default_voice = neutts_voices[0]["id"] if neutts_voices else None
-    neutts_mode = "remote" if neutts_remote_configured() else ("local" if neutts_local_runtime_configured() else "unavailable")
-
     return [
-        {
-            "id": "qwen",
-            "name": "Qwen TTS",
-            "available": bool(env_value("DASHSCOPE_API_KEY")) and dashscope_sdk_available(),
-            "recommended": True,
-            "description": "Instruction-guided narration through DashScope with expressive voices and lower-cost synthesis.",
-            "voices": QWEN_VOICES,
-            "defaultVoice": "Cherry",
-            "models": QWEN_TTS_MODELS,
-            "defaultModel": resolve_qwen_tts_model(None),
-            "voiceMetaNote": "Gender labels for Qwen voices come from Alibaba's voice catalog. Qwen TTS currently does not expose timestamps.",
-        },
-        {
-            "id": "qwen_local",
-            "name": "Qwen3 TTS Local",
-            "available": qwen_local_runtime_configured(),
-            "recommended": False,
-            "description": "Local open-weight Qwen3-TTS CustomVoice synthesis through a separate Python runtime.",
-            "voices": QWEN_LOCAL_VOICES,
-            "defaultVoice": "Ryan",
-            "models": QWEN_LOCAL_TTS_MODELS,
-            "defaultModel": resolve_qwen_local_tts_model(None),
-            "voiceMetaNote": (
-                "Requires QWEN_LOCAL_PYTHON pointing to a Python 3.12 environment with qwen-tts installed. "
-                "Best for full-book jobs; live page playback stays on the hosted providers."
-            ),
-        },
-        {
-            "id": "neutts_local",
-            "name": "NeuTTS",
-            "available": neutts_available,
-            "recommended": False,
-            "mode": neutts_mode,
-            "remoteUrl": NEUTTS_REMOTE_URL or None,
-            "description": (
-                "NeuTTS voice cloning via remote server (production-ready)."
-                if neutts_remote_configured() else
-                "WSL2-based local NeuTTS voice cloning using reference packs stored in voices/neutts."
-            ),
-            "voices": neutts_voices,
-            "defaultVoice": neutts_default_voice,
-            "models": NEUTTS_LOCAL_TTS_MODELS,
-            "defaultModel": resolve_neutts_local_tts_model(None),
-            "voiceMetaNote": (
-                "Set NEUTTS_REMOTE_URL to your deployed NeuTTS server for production. "
-                "Each voice pack needs reference.wav and reference.txt under voices/neutts/<voice_id>."
-            ),
-        },
         {
             "id": "kokoro",
             "name": "Kokoro TTS",
@@ -3904,24 +2899,34 @@ def provider_catalog() -> list[dict[str, Any]]:
             "name": "Google Gemini TTS",
             "available": bool(env_value("GEMINI_API_KEY")),
             "recommended": True,
-            "description": "Preview Gemini audiobook-style TTS with a free tier and promptable delivery.",
+            "description": "Preview Gemini audiobook-style TTS with a free tier and promptable delivery style.",
             "voices": GEMINI_VOICES,
             "defaultVoice": "Kore",
             "models": GEMINI_TTS_MODELS,
             "defaultModel": resolve_google_tts_model(None),
-            "voiceMetaNote": "Gender tags are estimated for Gemini voices. Style labels come from Google's voice catalog.",
+            "voiceMetaNote": "Gender tags are estimated for Gemini voices. Style labels come from Google voice demos.",
         },
         {
-            "id": "polly",
-            "name": "Amazon Polly",
-            "available": polly_catalog["available"],
+            "id": "openai",
+            "name": "OpenAI TTS",
+            "available": bool(env_value("OPENAI_API_KEY")),
             "recommended": False,
-            "description": polly_catalog["description"],
-            "voices": polly_catalog["voices"],
-            "defaultVoice": polly_catalog["defaultVoice"],
+            "description": "OpenAI text-to-speech with natural voices.",
+            "voices": OPENAI_VOICES,
+            "defaultVoice": "nova",
+            "models": OPENAI_TTS_MODELS,
+            "defaultModel": resolve_openai_tts_model(None),
+        },
+        {
+            "id": "piper",
+            "name": "Piper TTS",
+            "available": bool(env_value("PIPER_EXE")),
+            "recommended": False,
+            "description": "Fully offline neural TTS using Piper. Requires PIPER_EXE env var.",
+            "voices": [],
+            "defaultVoice": None,
             "models": [],
             "defaultModel": None,
-            "voiceMetaNote": "Gender labels for Polly come from AWS voice metadata.",
         },
     ]
 
@@ -4196,16 +3201,8 @@ def record_job_progress(
 
 
 def clamp_chunk_size(provider: str, requested: int | None) -> int:
-    if provider == "qwen":
-        return min(max(requested or 560, 200), 600)
-    if provider == "qwen_local":
-        return min(max(requested or 1800, 500), 4000)
-    if provider == "neutts_local":
-        return min(max(requested or 320, 150), 450)
     if provider == "google":
         return min(max(requested or 2200, 500), 4000)
-    if provider == "polly":
-        return min(max(requested or 2200, 500), 2800)
     if provider == "openai":
         return min(max(requested or 1400, 400), 2500)
     return min(max(requested or 900, 300), 1600)
@@ -4224,251 +3221,20 @@ def resolve_google_tts_model(requested_model: str | None) -> str:
     return model_name
 
 
-def resolve_qwen_tts_model(requested_model: str | None) -> str:
-    model_name = requested_model or QWEN_TTS_MODEL
-    if model_name not in QWEN_TTS_MODEL_IDS:
-        if requested_model is None:
-            return QWEN_TTS_MODELS[0]["id"]
-        raise RuntimeError(f"Unsupported Qwen TTS model: {model_name}")
-    return model_name
-
-
-def resolve_qwen_local_tts_model(requested_model: str | None) -> str:
-    model_name = requested_model or QWEN_LOCAL_MODEL
-    if model_name not in QWEN_LOCAL_TTS_MODEL_IDS:
-        if requested_model is None:
-            return QWEN_LOCAL_TTS_MODELS[0]["id"]
-        raise RuntimeError(f"Unsupported local Qwen TTS model: {model_name}")
-    return model_name
-
-
-def resolve_neutts_local_tts_model(requested_model: str | None) -> str:
-    model_name = requested_model or NEUTTS_LOCAL_MODEL
-    if model_name not in NEUTTS_LOCAL_TTS_MODEL_IDS:
-        if requested_model is None:
-            return NEUTTS_LOCAL_TTS_MODELS[0]["id"]
-        raise RuntimeError(f"Unsupported local NeuTTS model: {model_name}")
-    return model_name
-
-
-def qwen_voices_for_model(model_name: str | None) -> list[dict[str, Any]]:
-    if not model_name:
-        return QWEN_VOICES
-    return [voice for voice in QWEN_VOICES if not voice.get("models") or model_name in voice["models"]]
-
-
-def qwen_local_voices_for_model(model_name: str | None) -> list[dict[str, Any]]:
-    return QWEN_LOCAL_VOICES
-
-
-def neutts_local_voices_for_model(model_name: str | None) -> list[dict[str, Any]]:
-    voices = list_neutts_reference_packs()
-    if not model_name:
-        return voices
-    return [voice for voice in voices if not voice.get("models") or model_name in voice["models"]]
-
-
-def resolve_qwen_tts_voice(requested_voice: str | None, model_name: str | None) -> str:
-    voices = qwen_voices_for_model(model_name)
-    if requested_voice:
-        if any(voice["id"] == requested_voice for voice in voices):
-            return requested_voice
-        supported = ", ".join(voice["id"] for voice in voices) or "no voices"
-        raise RuntimeError(f"Voice '{requested_voice}' is not supported by {model_name or 'Qwen TTS'}. Try: {supported}.")
-
-    default_voice = "Cherry"
-    if any(voice["id"] == default_voice for voice in voices):
-        return default_voice
-    if voices:
-        return voices[0]["id"]
-    raise RuntimeError(f"No Qwen voices are available for {model_name or 'the selected model'}.")
-
-
-def resolve_qwen_local_tts_voice(requested_voice: str | None, model_name: str | None) -> str:
-    voices = qwen_local_voices_for_model(model_name)
-    if requested_voice:
-        if any(voice["id"] == requested_voice for voice in voices):
-            return requested_voice
-        supported = ", ".join(voice["id"] for voice in voices) or "no voices"
-        raise RuntimeError(
-            f"Voice '{requested_voice}' is not supported by {model_name or 'Local Qwen TTS'}. Try: {supported}."
-        )
-
-    default_voice = "Ryan"
-    if any(voice["id"] == default_voice for voice in voices):
-        return default_voice
-    if voices:
-        return voices[0]["id"]
-    raise RuntimeError(f"No local Qwen voices are available for {model_name or 'the selected model'}.")
-
-
-def resolve_neutts_local_tts_voice(requested_voice: str | None, model_name: str | None) -> str:
-    voices = neutts_local_voices_for_model(model_name)
-    if requested_voice:
-        if any(voice["id"] == requested_voice for voice in voices):
-            return requested_voice
-        supported = ", ".join(voice["id"] for voice in voices) or "no voices"
-        raise RuntimeError(
-            f"Voice '{requested_voice}' is not supported by {model_name or 'Local NeuTTS'}. Try: {supported}."
-        )
-
-    if voices:
-        return voices[0]["id"]
-    raise RuntimeError("No local NeuTTS reference packs are available. Add one under voices/neutts/<voice_id>.")
-
-
 def resolve_openai_tts_model(requested_model: str | None) -> str:
     return requested_model or OPENAI_TTS_MODEL
 
 
-def qwen_language_type(text: str) -> str:
-    return "Chinese" if re.search(r"[\u4e00-\u9fff]", text) else "English"
-
-
-def qwen_input_units(text: str) -> int:
-    total = 0
-    for char in text:
-        codepoint = ord(char)
-        if (
-            0x3400 <= codepoint <= 0x4DBF
-            or 0x4E00 <= codepoint <= 0x9FFF
-            or 0xF900 <= codepoint <= 0xFAFF
-            or 0x20000 <= codepoint <= 0x2EBEF
-        ):
-            total += 2
-        else:
-            total += 1
-    return total
-
-
-def qwen_split_long_text(text: str, max_units: int) -> list[str]:
-    stripped = text.strip()
-    if not stripped:
-        return []
-    if qwen_input_units(stripped) <= max_units:
-        return [stripped]
-
-    pieces: list[str] = []
-    start = 0
-    while start < len(stripped):
-        end = min(start + max_units, len(stripped))
-        while end > start and qwen_input_units(stripped[start:end]) > max_units:
-            end -= 1
-        if end <= start:
-            end = start + 1
-
-        if end < len(stripped):
-            split_at = max(
-                stripped.rfind(". ", start, end),
-                stripped.rfind("? ", start, end),
-                stripped.rfind("! ", start, end),
-                stripped.rfind("; ", start, end),
-                stripped.rfind(", ", start, end),
-                stripped.rfind(" ", start, end),
-            )
-            if split_at > start:
-                candidate_end = split_at + 1
-                if qwen_input_units(stripped[start:candidate_end]) <= max_units:
-                    end = candidate_end
-
-        chunk = stripped[start:end].strip()
-        if chunk:
-            pieces.append(chunk)
-        start = end
-
-    return pieces
-
-
-def qwen_chunk_text(text: str, max_units: int) -> list[str]:
-    paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
-    chunks: list[str] = []
-    current = ""
-
-    for paragraph in paragraphs:
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", paragraph) if s.strip()]
-        if not sentences:
-            sentences = [paragraph]
-
-        for sentence in sentences:
-            for candidate in qwen_split_long_text(sentence, max_units):
-                if not current:
-                    current = candidate
-                    continue
-
-                combined = f"{current} {candidate}"
-                if qwen_input_units(combined) <= max_units:
-                    current = combined
-                else:
-                    chunks.append(current)
-                    current = candidate
-
-        if current:
-            chunks.append(current)
-            current = ""
-
-    if current:
-        chunks.append(current)
-
-    return chunks
-
-
 def prepare_synthesis_chunks(text: str, provider: str, requested: int | None) -> list[str]:
     chunk_size = clamp_chunk_size(provider, requested)
-    if provider == "qwen":
-        return qwen_chunk_text(text, chunk_size)
     return pdf_to_audio.chunk_text(text, chunk_size)
 
 
 def prepare_live_synthesis_chunks(text: str, provider: str) -> list[str]:
-    if provider == "neutts_local":
-        return prepare_synthesis_chunks(text, provider, 220)
     if provider == "kokoro":
         # Kokoro handles up to ~1000 chars well; larger chunks = fewer round-trips
         return prepare_synthesis_chunks(text, provider, 800)
     return prepare_synthesis_chunks(text, provider, None)
-
-
-def shape_neutts_local_transcript(transcript: str, *, length_scale: float, sentence_silence: float) -> str:
-    normalized = normalize_tts_transcript(transcript)
-    if not normalized:
-        return ""
-
-    sentence_gap = "\n\n" if sentence_silence >= 0.08 or length_scale >= 1.0 else "\n"
-    paragraph_gap = "\n\n\n" if sentence_silence >= 0.18 or length_scale >= 1.05 else "\n\n"
-    clause_gap = "\n" if sentence_silence >= 0.14 or length_scale >= 1.1 else " "
-    comma_gap = "\n" if sentence_silence >= 0.32 or length_scale >= 1.25 else " "
-
-    def add_phrase_breaks(sentence: str) -> str:
-        shaped = re.sub(r"(\.\.\.|…)(?=\s+)", rf"\1{sentence_gap}", sentence)
-        if clause_gap != " ":
-            shaped = re.sub(r"([;:])(?=\s+)", rf"\1{clause_gap}", shaped)
-            shaped = re.sub(r"([—–])(?=\s+)", rf"\1{clause_gap}", shaped)
-        if comma_gap != " ":
-            shaped = re.sub(
-                r",(?=\s+(?:and|but|or|so|yet|for|nor|because|which|who|that|when|while|although|though|however)\b)",
-                rf",{comma_gap}",
-                shaped,
-                flags=re.IGNORECASE,
-            )
-        shaped = re.sub(r"[ \t]+", " ", shaped)
-        shaped = re.sub(r" *\n *", "\n", shaped)
-        return shaped.strip()
-
-    paragraphs: list[str] = []
-    for paragraph in split_tts_paragraphs(normalized):
-        sentence_parts = [add_phrase_breaks(sentence) for sentence in split_tts_sentences(paragraph) if sentence.strip()]
-        if sentence_parts:
-            paragraphs.append(sentence_gap.join(sentence_parts))
-
-    return paragraph_gap.join(paragraphs) or normalized
-
-
-def build_qwen_tts_instructions(narration_style: str, *, length_scale: float, sentence_silence: float) -> str:
-    return (
-        f"{narration_style.strip()}\n"
-        f"Pacing: {describe_tts_pacing(length_scale)}\n"
-        f"Pause guidance: {describe_tts_pauses(sentence_silence)}"
-    ).strip()
 
 
 def gemini_error_detail(response: httpx.Response) -> str:
@@ -4635,58 +3401,6 @@ def build_directed_transcript(narration_style: str, transcript: str, *, length_s
         f"Direction: {narration_style}\n\n"
         f"Transcript:\n{formatted_transcript}"
     )
-
-
-def build_polly_ssml(transcript: str, *, length_scale: float, sentence_silence: float) -> str:
-    def add_phrase_breaks(text: str, *, comma_pause_ms: int, clause_pause_ms: int) -> str:
-        marked = text
-        if comma_pause_ms > 0:
-            marked = re.sub(r",(?=\s)", f",<break time='{comma_pause_ms}ms'/>", marked)
-        if clause_pause_ms > 0:
-            marked = re.sub(r"([;:])(?=\s)", rf"\1<break time='{clause_pause_ms}ms'/>", marked)
-            marked = re.sub(r"([—–])(?=\s)", rf"\1<break time='{clause_pause_ms}ms'/>", marked)
-        return marked
-
-    paragraph_parts: list[str] = []
-    sentence_pause_ms = max(0, int(round(sentence_silence * 1000)))
-    paragraph_pause_ms = max(350, sentence_pause_ms * 2 or 350)
-    comma_pause_ms = max(0, min(110, int(round(sentence_pause_ms * 0.4)) if sentence_pause_ms else 60))
-    clause_pause_ms = max(90, min(220, int(round(sentence_pause_ms * 0.7)) if sentence_pause_ms else 140))
-
-    for paragraph in split_tts_paragraphs(transcript):
-        sentence_parts: list[str] = []
-        for sentence in split_tts_sentences(paragraph):
-            escaped_sentence = escape_html(sentence)
-            escaped_sentence = re.sub(r"\s+", " ", escaped_sentence).strip()
-            if not escaped_sentence:
-                continue
-            escaped_sentence = add_phrase_breaks(
-                escaped_sentence,
-                comma_pause_ms=comma_pause_ms,
-                clause_pause_ms=clause_pause_ms,
-            )
-            if sentence_parts:
-                if sentence_pause_ms > 0:
-                    sentence_parts.append(f"<break time='{sentence_pause_ms}ms'/>")
-                else:
-                    sentence_parts.append("<break strength='medium'/>")
-            sentence_parts.append(f"<s>{escaped_sentence}</s>")
-
-        if not sentence_parts:
-            continue
-
-        if paragraph_parts:
-            paragraph_parts.append(f"<break time='{paragraph_pause_ms}ms'/>")
-        paragraph_parts.append(f"<p>{''.join(sentence_parts)}</p>")
-
-    if paragraph_parts:
-        paragraph_parts.append(f"<break time='{max(sentence_pause_ms or 180, 180)}ms'/>")
-
-    # The existing length-scale slider is slower when the value goes up,
-    # so Polly's speaking rate is inverted to match the rest of the app.
-    rate_percent = max(20, min(200, int(round(100 / max(length_scale, 0.1)))))
-    body = "".join(paragraph_parts) or escape_html(normalize_tts_transcript(transcript))
-    return f'<speak><prosody rate="{rate_percent}%">{body}</prosody></speak>'
 
 
 def trim_text_range(text: str, start: int, end: int) -> tuple[int, int]:
@@ -5650,344 +4364,6 @@ def synthesize_google(
         )
 
 
-def synthesize_qwen(
-    *,
-    chunks: list[str],
-    output_path: Path,
-    chunk_dir: Path | None,
-    model: str | None,
-    voice: str | None,
-    narration_style: str,
-    output_format: str,
-    length_scale: float,
-    sentence_silence: float,
-    job_id: str | None,
-) -> None:
-    api_key = env_value("DASHSCOPE_API_KEY")
-    if not api_key:
-        raise RuntimeError("DASHSCOPE_API_KEY is not configured.")
-
-    dashscope = load_dashscope()
-    ffmpeg_exe = pdf_to_audio.find_binary(
-        None,
-        "FFMPEG_EXE",
-        Path("ffmpeg.exe"),
-        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
-    )
-    chosen_model = resolve_qwen_tts_model(model)
-    chosen_voice = resolve_qwen_tts_voice(voice, chosen_model)
-    use_instructions = "instruct" in chosen_model
-
-    with tempfile.TemporaryDirectory(prefix="storybook_qwen_", dir=str(output_path.parent)) as temp_dir:
-        wav_dir = chunk_dir or Path(temp_dir)
-        wav_dir.mkdir(parents=True, exist_ok=True)
-        wav_paths: list[Path] = []
-        total = len(chunks)
-
-        with httpx.Client(timeout=180.0, follow_redirects=True) as client:
-            for index, chunk in enumerate(chunks, start=1):
-                raise_if_job_cancelled(job_id)
-                request_kwargs: dict[str, Any] = {
-                    "model": chosen_model,
-                    "api_key": api_key,
-                    "text": chunk,
-                    "voice": chosen_voice,
-                    "language_type": qwen_language_type(chunk),
-                    "stream": False,
-                }
-                if use_instructions:
-                    request_kwargs["instructions"] = build_qwen_tts_instructions(
-                        narration_style,
-                        length_scale=length_scale,
-                        sentence_silence=sentence_silence,
-                    )
-                    request_kwargs["optimize_instructions"] = True
-
-                response = dashscope.MultiModalConversation.call(**request_kwargs)
-                if int(getattr(response, "status_code", HTTPStatus.INTERNAL_SERVER_ERROR)) != int(HTTPStatus.OK):
-                    code = getattr(response, "code", None)
-                    message = getattr(response, "message", None)
-                    raise RuntimeError(message or code or "Qwen TTS request failed.")
-
-                audio = getattr(getattr(response, "output", None), "audio", None)
-                wav_path = wav_dir / f"chunk_{index:05d}.wav"
-                if audio is None:
-                    raise RuntimeError("Qwen TTS returned no audio output.")
-                if getattr(audio, "data", None):
-                    wav_path.write_bytes(b64decode(audio.data))
-                elif getattr(audio, "url", None):
-                    download = client.get(audio.url)
-                    download.raise_for_status()
-                    wav_path.write_bytes(download.content)
-                else:
-                    raise RuntimeError("Qwen TTS returned no downloadable audio payload.")
-
-                normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
-                wav_paths.append(wav_path)
-                record_job_progress(
-                    job_id=job_id,
-                    index=index,
-                    total=total,
-                    message=f"Synthesizing audio chunk {index} of {total} with Qwen TTS.",
-                )
-
-        raise_if_job_cancelled(job_id)
-        concat_provider_audio_chunks(
-            wav_paths,
-            ffmpeg_exe=ffmpeg_exe,
-            output_path=output_path,
-            output_format=output_format,
-        )
-
-
-def synthesize_qwen_local(
-    *,
-    chunks: list[str],
-    output_path: Path,
-    chunk_dir: Path | None,
-    model: str | None,
-    voice: str | None,
-    narration_style: str,
-    output_format: str,
-    job_id: str | None,
-) -> None:
-    if not QWEN_LOCAL_HELPER.exists():
-        raise RuntimeError(f"Local Qwen helper script not found: {QWEN_LOCAL_HELPER}")
-
-    ffmpeg_exe = pdf_to_audio.find_binary(
-        None,
-        "FFMPEG_EXE",
-        Path("ffmpeg.exe"),
-        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
-    )
-    chosen_model = resolve_qwen_local_tts_model(model)
-    chosen_voice = resolve_qwen_local_tts_voice(voice, chosen_model)
-    total = len(chunks)
-
-    with tempfile.TemporaryDirectory(prefix="storybook_qwen_local_", dir=str(output_path.parent)) as temp_dir:
-        temp_path = Path(temp_dir)
-        wav_dir = chunk_dir or temp_path / "chunks"
-        wav_dir.mkdir(parents=True, exist_ok=True)
-
-        request_payload: dict[str, Any] = {
-            "action": "synthesize",
-            "model": chosen_model,
-            "voice": chosen_voice,
-            "narration_style": narration_style,
-            "chunks": chunks,
-            "output_dir": str(wav_dir),
-            "device": QWEN_LOCAL_DEVICE,
-            "dtype": QWEN_LOCAL_DTYPE,
-            "attn_implementation": QWEN_LOCAL_ATTN_IMPLEMENTATION,
-            "batch_size": QWEN_LOCAL_BATCH_SIZE,
-            "sox_dir": QWEN_LOCAL_SOX_DIR,
-        }
-
-        record_job_progress(
-            job_id=job_id,
-            index=0,
-            total=total,
-            message=(
-                "Loading the local Qwen3-TTS runtime and generating audio. "
-                "The first run can take a while while weights warm up."
-            ),
-        )
-        manifest = run_qwen_helper_request(
-            request_payload,
-            timeout_seconds=QWEN_LOCAL_TIMEOUT_SECONDS,
-            prefer_daemon=True,
-        )
-
-        file_items = manifest.get("files")
-        if not isinstance(file_items, list) or not file_items:
-            raise RuntimeError("Local Qwen synthesis returned no audio chunk files.")
-
-        wav_paths: list[Path] = []
-        for index, file_item in enumerate(file_items, start=1):
-            raise_if_job_cancelled(job_id)
-            wav_path = Path(str(file_item))
-            if not wav_path.exists():
-                raise RuntimeError(f"Local Qwen synthesis reported a missing chunk file: {wav_path}")
-            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
-            wav_paths.append(wav_path)
-            record_job_progress(
-                job_id=job_id,
-                index=index,
-                total=total,
-                message=f"Preparing local Qwen audio chunk {index} of {total}.",
-            )
-
-        raise_if_job_cancelled(job_id)
-        concat_provider_audio_chunks(
-            wav_paths,
-            ffmpeg_exe=ffmpeg_exe,
-            output_path=output_path,
-            output_format=output_format,
-        )
-
-
-def synthesize_neutts_local(
-    *,
-    chunks: list[str],
-    output_path: Path,
-    chunk_dir: Path | None,
-    model: str | None,
-    voice: str | None,
-    narration_style: str,
-    output_format: str,
-    length_scale: float,
-    sentence_silence: float,
-    job_id: str | None,
-) -> None:
-    if not NEUTTS_LOCAL_HELPER.exists():
-        raise RuntimeError(f"NeuTTS WSL helper script not found: {NEUTTS_LOCAL_HELPER}")
-
-    ffmpeg_exe = pdf_to_audio.find_binary(
-        None,
-        "FFMPEG_EXE",
-        Path("ffmpeg.exe"),
-        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
-    )
-    chosen_model = resolve_neutts_local_tts_model(model)
-    chosen_voice = resolve_neutts_local_tts_voice(voice, chosen_model)
-    reference_dir = neutts_reference_pack_path(chosen_voice)
-    prepared_chunks = [
-        shape_neutts_local_transcript(chunk, length_scale=length_scale, sentence_silence=sentence_silence)
-        for chunk in chunks
-    ]
-    prepared_chunks = [chunk for chunk in prepared_chunks if chunk.strip()]
-    if not prepared_chunks:
-        raise RuntimeError("Local NeuTTS synthesis received no usable text after punctuation shaping.")
-    total = len(chunks)
-
-    with tempfile.TemporaryDirectory(prefix="storybook_neutts_local_", dir=str(output_path.parent)) as temp_dir:
-        temp_path = Path(temp_dir)
-        wav_dir = chunk_dir or temp_path / "chunks"
-        wav_dir.mkdir(parents=True, exist_ok=True)
-
-        request_payload: dict[str, Any] = {
-            "action": "synthesize",
-            "model": chosen_model,
-            "codec": NEUTTS_LOCAL_CODEC,
-            "reference_dir": windows_path_to_wsl(reference_dir),
-            "output_dir": windows_path_to_wsl(wav_dir),
-            "chunks": prepared_chunks,
-            "narration_style": narration_style,
-            "length_scale": length_scale,
-            "sentence_silence": sentence_silence,
-        }
-        if NEUTTS_WSL_HF_HOME:
-            request_payload["hf_home"] = NEUTTS_WSL_HF_HOME
-
-        record_job_progress(
-            job_id=job_id,
-            index=0,
-            total=total,
-            message=(
-                "Loading the WSL NeuTTS runtime and generating audio. "
-                "The first run can take a while while the model and codec warm up."
-            ),
-        )
-        manifest = run_neutts_helper_request(
-            request_payload,
-            timeout_seconds=NEUTTS_LOCAL_TIMEOUT_SECONDS,
-            prefer_daemon=True,
-        )
-
-        file_items = manifest.get("files")
-        if not isinstance(file_items, list) or not file_items:
-            raise RuntimeError("Local NeuTTS synthesis returned no audio chunk files.")
-
-        wav_paths: list[Path] = []
-        for index, file_item in enumerate(file_items, start=1):
-            raise_if_job_cancelled(job_id)
-            wav_path = wsl_path_to_windows(str(file_item))
-            if not wav_path.exists():
-                raise RuntimeError(f"Local NeuTTS synthesis reported a missing chunk file: {wav_path}")
-            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
-            wav_paths.append(wav_path)
-            record_job_progress(
-                job_id=job_id,
-                index=index,
-                total=total,
-                message=f"Preparing local NeuTTS audio chunk {index} of {total}.",
-            )
-
-        raise_if_job_cancelled(job_id)
-        concat_provider_audio_chunks(
-            wav_paths,
-            ffmpeg_exe=ffmpeg_exe,
-            output_path=output_path,
-            output_format=output_format,
-        )
-
-
-def synthesize_polly(
-    *,
-    chunks: list[str],
-    output_path: Path,
-    chunk_dir: Path | None,
-    voice: str | None,
-    output_format: str,
-    length_scale: float,
-    sentence_silence: float,
-    job_id: str | None,
-) -> None:
-    client = create_polly_client()
-    ffmpeg_exe = pdf_to_audio.find_binary(
-        None,
-        "FFMPEG_EXE",
-        Path("ffmpeg.exe"),
-        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
-    )
-    chosen_voice = voice or POLLY_VOICE_ID
-
-    with tempfile.TemporaryDirectory(prefix="storybook_polly_", dir=str(output_path.parent)) as temp_dir:
-        wav_dir = chunk_dir or Path(temp_dir)
-        wav_dir.mkdir(parents=True, exist_ok=True)
-        wav_paths: list[Path] = []
-        total = len(chunks)
-
-        for index, chunk in enumerate(chunks, start=1):
-            raise_if_job_cancelled(job_id)
-            response = client.synthesize_speech(
-                Text=build_polly_ssml(chunk, length_scale=length_scale, sentence_silence=sentence_silence),
-                TextType="ssml",
-                Engine=POLLY_ENGINE,
-                VoiceId=chosen_voice,
-                OutputFormat="pcm",
-                SampleRate=POLLY_PCM_SAMPLE_RATE,
-                LanguageCode=POLLY_LANGUAGE_CODE,
-            )
-            audio_stream = response.get("AudioStream")
-            if audio_stream is None:
-                raise RuntimeError("Amazon Polly returned no audio stream.")
-
-            try:
-                pcm_bytes = audio_stream.read()
-            finally:
-                audio_stream.close()
-
-            wav_path = wav_dir / f"chunk_{index:05d}.wav"
-            pcm_to_wav(pcm_bytes, wav_path, rate=int(POLLY_PCM_SAMPLE_RATE))
-            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
-            wav_paths.append(wav_path)
-            record_job_progress(
-                job_id=job_id,
-                index=index,
-                total=total,
-                message=f"Synthesizing audio chunk {index} of {total} with Amazon Polly.",
-            )
-
-        raise_if_job_cancelled(job_id)
-        concat_provider_audio_chunks(
-            wav_paths,
-            ffmpeg_exe=ffmpeg_exe,
-            output_path=output_path,
-            output_format=output_format,
-        )
-
-
 def synthesize_provider_audio(
     *,
     provider_id: TTSProviderId,
@@ -6041,71 +4417,6 @@ def synthesize_provider_audio(
             output_format=output_format,
             job_id=job_id,
         )
-    elif provider_id == "polly":
-        synthesize_polly(
-            chunks=chunks,
-            output_path=output_path,
-            chunk_dir=chunk_dir,
-            voice=voice,
-            output_format=output_format,
-            length_scale=length_scale,
-            sentence_silence=sentence_silence,
-            job_id=job_id,
-        )
-    elif provider_id == "qwen":
-        chosen_model = resolve_qwen_tts_model(model)
-        synthesize_qwen(
-            chunks=chunks,
-            output_path=output_path,
-            chunk_dir=chunk_dir,
-            model=chosen_model,
-            voice=voice,
-            narration_style=narration_style,
-            output_format=output_format,
-            length_scale=length_scale,
-            sentence_silence=sentence_silence,
-            job_id=job_id,
-        )
-    elif provider_id == "qwen_local":
-        chosen_model = resolve_qwen_local_tts_model(model)
-        synthesize_qwen_local(
-            chunks=chunks,
-            output_path=output_path,
-            chunk_dir=chunk_dir,
-            model=chosen_model,
-            voice=voice,
-            narration_style=narration_style,
-            output_format=output_format,
-            job_id=job_id,
-        )
-    elif provider_id == "neutts_local":
-        chosen_model = resolve_neutts_local_tts_model(model)
-        chosen_voice_for_remote = resolve_neutts_local_tts_voice(voice, chosen_model)
-        prepared_chunks = [
-            shape_neutts_local_transcript(chunk, length_scale=length_scale, sentence_silence=sentence_silence)
-            for chunk in chunks
-        ]
-        prepared_chunks = [c for c in prepared_chunks if c.strip()]
-        if not prepared_chunks:
-            raise RuntimeError("NeuTTS synthesis received no usable text after punctuation shaping.")
-
-        if neutts_remote_configured():
-            # Production path: call the remote NeuTTS server (works on Vercel)
-            synthesize_neutts_remote(prepared_chunks, chosen_voice_for_remote, chosen_model, output_path)
-        else:
-            # Local path: use WSL2 daemon (development only)
-            synthesize_neutts_local(
-                chunks=chunks,
-                output_path=output_path,
-                chunk_dir=chunk_dir,
-                model=chosen_model,
-                voice=voice,
-                narration_style=narration_style,
-                output_format=output_format,
-                length_scale=length_scale,
-                sentence_silence=sentence_silence,
-                job_id=job_id,
-            )
     elif provider_id == "kokoro":
         if not kokoro_configured():
             raise RuntimeError("Kokoro remote server is not configured (set KOKORO_REMOTE_URL).")
@@ -6151,15 +4462,6 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
     chosen_voice = request.voice or provider.get("defaultVoice")
     if request.provider == "google":
         chosen_model = resolve_google_tts_model(request.model)
-    elif request.provider == "qwen":
-        chosen_model = resolve_qwen_tts_model(request.model)
-        chosen_voice = resolve_qwen_tts_voice(chosen_voice, chosen_model)
-    elif request.provider == "qwen_local":
-        chosen_model = resolve_qwen_local_tts_model(request.model)
-        chosen_voice = resolve_qwen_local_tts_voice(chosen_voice, chosen_model)
-    elif request.provider == "neutts_local":
-        chosen_model = resolve_neutts_local_tts_model(request.model)
-        chosen_voice = resolve_neutts_local_tts_voice(chosen_voice, chosen_model)
     elif request.provider == "kokoro":
         chosen_voice = chosen_voice or "af_heart"
     elif request.provider == "openai":
@@ -6420,8 +4722,6 @@ def cancel_generation_job(job_id: str) -> dict[str, Any]:
 
 
 def provider_test_snippet(provider_id: str) -> str:
-    if provider_id in {"qwen_local", "neutts_local"}:
-        return PROVIDER_TEST_LOCAL_SNIPPET
     return PROVIDER_TEST_SNIPPET
 
 
@@ -6461,15 +4761,6 @@ def run_provider_test(request: ProviderTestRequest) -> dict[str, Any]:
     chosen_voice = request.voice or provider.get("defaultVoice")
     if request.provider == "google":
         chosen_model = resolve_google_tts_model(request.model)
-    elif request.provider == "qwen":
-        chosen_model = resolve_qwen_tts_model(request.model)
-        chosen_voice = resolve_qwen_tts_voice(chosen_voice, chosen_model)
-    elif request.provider == "qwen_local":
-        chosen_model = resolve_qwen_local_tts_model(request.model)
-        chosen_voice = resolve_qwen_local_tts_voice(chosen_voice, chosen_model)
-    elif request.provider == "neutts_local":
-        chosen_model = resolve_neutts_local_tts_model(request.model)
-        chosen_voice = resolve_neutts_local_tts_voice(chosen_voice, chosen_model)
     elif request.provider == "openai":
         chosen_model = resolve_openai_tts_model(request.model)
 
@@ -6546,35 +4837,7 @@ def run_provider_test(request: ProviderTestRequest) -> dict[str, Any]:
 
 
 def run_provider_warmup(request: ProviderWarmupRequest) -> dict[str, Any]:
-    provider = provider_details(request.provider)
-    if not provider["available"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{provider['name']} is not configured yet.",
-        )
-
-    if request.provider == "neutts_local":
-        chosen_model = resolve_neutts_local_tts_model(request.model)
-        chosen_voice = resolve_neutts_local_tts_voice(request.voice or provider.get("defaultVoice"), chosen_model)
-        result = warmup_neutts_local_runtime(chosen_model, chosen_voice)
-    elif request.provider == "qwen_local":
-        chosen_model = resolve_qwen_local_tts_model(request.model)
-        chosen_voice = resolve_qwen_local_tts_voice(request.voice or provider.get("defaultVoice"), chosen_model)
-        result = warmup_qwen_local_runtime(chosen_model, chosen_voice)
-    else:
-        raise HTTPException(status_code=400, detail=f"Warmup is unsupported for provider {request.provider}.")
-
-    return {
-        "provider": request.provider,
-        "voice": chosen_voice,
-        "model": chosen_model,
-        "warmed": bool(result.get("warmed")),
-        "message": (
-            f"{provider['name']} warmed {chosen_voice}."
-            if result.get("warmed")
-            else f"{provider['name']} prepared {chosen_voice}, but the resident runtime is not ready yet."
-        ),
-    }
+    raise HTTPException(status_code=400, detail=f"Warmup is unsupported for provider {request.provider}.")
 
 
 class ChatMessage(BaseModel):
@@ -7026,11 +5289,7 @@ def health() -> dict[str, Any]:
     # --- Configured TTS providers (key-presence only, no live API call) ---
     providers_configured = {
         "gemini": bool(env_value("GEMINI_API_KEY")),
-        "qwen": bool(env_value("DASHSCOPE_API_KEY")),
-        "qwen_local": qwen_local_runtime_configured(),
-        "neutts_local": neutts_runtime_configured(),
         "kokoro": kokoro_configured(),
-        "polly": bool(POLLY_REGION and (env_value("AWS_ACCESS_KEY_ID") or env_value("AWS_PROFILE"))),
         "openai": bool(env_value("OPENAI_API_KEY")),
         "piper": bool(env_value("PIPER_EXE")),
     }
@@ -7054,10 +5313,6 @@ def providers() -> dict[str, Any]:
         "providers": provider_catalog(),
     }
 
-
-@app.get("/api/providers/polly/health")
-def polly_health() -> dict[str, Any]:
-    return get_polly_health(force_refresh=True)
 
 
 @app.post("/api/providers/test")

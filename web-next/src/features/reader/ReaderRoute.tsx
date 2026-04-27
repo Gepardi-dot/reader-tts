@@ -166,25 +166,17 @@ const TTS_PROVIDERS = [
 // Streaming-style playback: keep the first request small so audio can start quickly,
 // then synthesize larger follow-up chunks while the first chunk is playing.
 const FIRST_AUDIO_CHARS: Record<string, number> = {
-  google:       240,
-  openai:       180,
-  polly:        220,
-  qwen:         160,
-  qwen_local:   140,
-  neutts_local: 140,
-  kokoro:        65,
-  piper:        220,
+  google: 240,
+  openai: 180,
+  kokoro:  65,
+  piper:  220,
 }
 
 const CHUNK_CHARS: Record<string, number> = {
-  google:       420,
-  openai:       800,
-  polly:        900,
-  qwen:         650,
-  qwen_local:   420,
-  neutts_local: 420,
-  kokoro:       420,
-  piper:        900,
+  google: 420,
+  openai: 800,
+  kokoro: 420,
+  piper:  900,
 }
 
 const DEFAULT_FIRST_AUDIO_CHARS = 180
@@ -202,8 +194,6 @@ const PROVIDER_PREVIEW_TEXT = (
 const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
   google: 2,
   openai: 2,
-  polly: 2,
-  qwen: 2,
   kokoro: 8,
 }
 
