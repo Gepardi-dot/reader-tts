@@ -163,7 +163,7 @@ const FIRST_AUDIO_CHARS: Record<string, number> = {
   qwen:         160,
   qwen_local:   140,
   neutts_local: 140,
-  kokoro:       180,
+  kokoro:       110,
   piper:        220,
 }
 
@@ -174,7 +174,7 @@ const CHUNK_CHARS: Record<string, number> = {
   qwen:         650,
   qwen_local:   420,
   neutts_local: 420,
-  kokoro:       300,
+  kokoro:       420,
   piper:        900,
 }
 
@@ -188,17 +188,27 @@ const PROVIDER_PREVIEW_TEXT = (
   + 'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
 )
 
+// How many chunks to fire in parallel right when playback begins.
+// The first chunk we'll await before starting audio; the rest stream in the background.
 const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
   google: 2,
   openai: 2,
   polly: 2,
   qwen: 2,
-  kokoro: 2,
+  kokoro: 4,
 }
 
+// How many ready chunks we wait for before pressing play. Set to 1 everywhere
+// so audio starts the instant the first slice is decoded.
 const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
-  kokoro: 2,
+  kokoro: 1,
 }
+
+// Rolling window of chunks we keep in flight ahead of the cursor while playing.
+const PREFETCH_AHEAD_TARGET: Record<string, number> = {
+  kokoro: 3,
+}
+const DEFAULT_PREFETCH_AHEAD = 2
 
 const liveAudioMemoryCache = new Map<string, { expiresAt: number; promise: Promise<LiveAudioResult> }>()
 
@@ -2372,20 +2382,17 @@ function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVo
   }
 
   function prefetchAhead(fromIdx: number, currentChunks: AudioChunk[], signal: AbortSignal) {
-    const nextIdx = fromIdx + 1
-    const nextChunk = currentChunks[nextIdx]
-    if (!nextChunk) return
-
-    if (!nextChunk.url && nextChunk.status === 'idle') {
-      void fetchChunk(nextIdx, nextChunk, signal)
-      return
+    if (signal.aborted) return
+    const target = PREFETCH_AHEAD_TARGET[provider] ?? DEFAULT_PREFETCH_AHEAD
+    for (let offset = 1; offset <= target; offset += 1) {
+      const idx = fromIdx + offset
+      const chunk = currentChunks[idx]
+      if (!chunk) break
+      if (chunk.url || chunk.status === 'fetching') continue
+      if (chunk.status === 'idle') {
+        void fetchChunk(idx, chunk, signal)
+      }
     }
-
-    const afterNextIdx = nextIdx + 1
-    const afterNextChunk = currentChunks[afterNextIdx]
-    if (!afterNextChunk || !nextChunk.url) return
-    if (afterNextChunk.url || afterNextChunk.status === 'fetching') return
-    void fetchChunk(afterNextIdx, afterNextChunk, signal)
   }
 
   async function continuePlayback(nextIdx: number, ctrl: AbortController) {
@@ -2938,28 +2945,23 @@ export function ReaderRoute() {
       ).slice(0, PREFETCH_CHUNK_LIMIT)
       if (chunkDefs.length === 0) return
 
-      // Prefetch all chunks sequentially — by the time the user hits play most are cached
-      ;(async () => {
-        for (const chunk of chunkDefs) {
-          if (ctrl.signal.aborted) return
-          try {
-            await requestLiveAudio(bookId, {
-              provider: effectiveTtsProvider,
-              voice: effectiveTtsVoice,
-              model: null,
-              output_format: 'mp3',
-              narration_style: '',
-              length_scale: lengthScale,
-              sentence_silence: sentenceSilence,
-              pageNumber: 1,
-              start: chunk.start,
-              end: chunk.end,
-              text: chunk.text,
-            })
-          } catch { /* silent */ }
-        }
-      })()
-    }, 2000)  // 2 s after last scroll event
+      // Prefetch chunks in parallel — by the time the user hits play they're all cached
+      void Promise.all(chunkDefs.map((chunk) =>
+        requestLiveAudio(bookId, {
+          provider: effectiveTtsProvider,
+          voice: effectiveTtsVoice,
+          model: null,
+          output_format: 'mp3',
+          narration_style: '',
+          length_scale: lengthScale,
+          sentence_silence: sentenceSilence,
+          pageNumber: 1,
+          start: chunk.start,
+          end: chunk.end,
+          text: chunk.text,
+        }).catch(() => null)
+      ))
+    }, 1200)  // 1.2 s after last scroll event — quicker warm-up
 
     return () => {
       if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
@@ -3211,20 +3213,18 @@ export function ReaderRoute() {
   }
 
   function prefetchWordAudioAhead(fromIdx: number, currentChunks: AudioChunk[], signal: AbortSignal) {
-    const nextIdx = fromIdx + 1
-    const nextChunk = currentChunks[nextIdx]
-    if (!nextChunk) return
-
-    if (!nextChunk.url && nextChunk.status === 'idle') {
-      void fetchWordAudioChunk(nextIdx, nextChunk, signal)
-      return
+    if (signal.aborted) return
+    const target = PREFETCH_AHEAD_TARGET[effectiveTtsProvider] ?? DEFAULT_PREFETCH_AHEAD
+    // Fire any idle chunks within the target rolling window in parallel
+    for (let offset = 1; offset <= target; offset += 1) {
+      const idx = fromIdx + offset
+      const chunk = currentChunks[idx]
+      if (!chunk) break
+      if (chunk.url || chunk.status === 'fetching') continue
+      if (chunk.status === 'idle') {
+        void fetchWordAudioChunk(idx, chunk, signal)
+      }
     }
-
-    const afterNextIdx = nextIdx + 1
-    const afterNextChunk = currentChunks[afterNextIdx]
-    if (!afterNextChunk || !nextChunk.url) return
-    if (afterNextChunk.url || afterNextChunk.status === 'fetching') return
-    void fetchWordAudioChunk(afterNextIdx, afterNextChunk, signal)
   }
 
   function stopWordAudio() {
