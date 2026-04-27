@@ -6460,6 +6460,428 @@ def run_provider_warmup(request: ProviderWarmupRequest) -> dict[str, Any]:
     }
 
 
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class AskAIRequest(BaseModel):
+    text: str                                          # highlighted passage
+    context: str | None = None                         # surrounding book text
+    messages: list[ChatMessage] = []                   # conversation history (explain mode)
+    mode: Literal["explain", "translate"] = "explain"  # panel mode
+    target_language: str | None = None                 # translate mode only
+
+
+@app.post("/api/ai/ask")
+async def ask_ai(req: AskAIRequest):
+    """
+    Stream a Gemma 4 answer from the NVIDIA API.
+    mode=explain: explain/discuss the passage (chat-capable).
+    mode=translate: translate the passage into target_language.
+    Returns text/event-stream: data: {"delta": "..."}  …  data: [DONE]
+    """
+    api_key = env_value("NVIDIA_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured.")
+
+    # ── Translate mode ────────────────────────────────────────────────────────
+    if req.mode == "translate":
+        lang = req.target_language or "Spanish"
+        messages: list[dict] = [
+            {
+                "role": "system",
+                "content": (
+                    f"You are a literary translator. Translate the given text into {lang}. "
+                    "Output only the translation — no explanation, no preamble, no quotation marks."
+                ),
+            },
+            {"role": "user", "content": req.text},
+        ]
+    # ── Explain mode ──────────────────────────────────────────────────────────
+    else:
+        system_prompt = (
+            "You are a reading assistant embedded in a book reader app. "
+            "The reader has highlighted a passage and you are having a conversation about it. "
+            "Be concise, insightful, and literary. "
+            "Keep replies focused — 2-4 sentences unless the question clearly needs more."
+        )
+        passage_intro = f'The reader highlighted:\n\n"{req.text}"'
+        if req.context:
+            passage_intro += f"\n\nSurrounding text:\n{req.context}"
+
+        if req.messages:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": passage_intro + "\n\nExplain this passage clearly and concisely."},
+            ]
+            for m in req.messages:
+                messages.append({"role": m.role, "content": m.content})
+        else:
+            # First turn: explain the passage
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": passage_intro + "\n\nExplain this passage clearly and concisely."},
+            ]
+
+    async def generate():
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                async with client.stream(
+                    "POST",
+                    "https://integrate.api.nvidia.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                    json={
+                        "model": "google/gemma-4-31b-it",
+                        "messages": messages,
+                        "max_tokens": 512,
+                        "temperature": 0.7,
+                        "stream": True,
+                    },
+                ) as resp:
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        raw = line[6:]
+                        if raw == "[DONE]":
+                            yield "data: [DONE]\n\n"
+                            break
+                        try:
+                            chunk = json.loads(raw)
+                            delta = chunk["choices"][0]["delta"].get("content", "")
+                            if delta:
+                                yield f"data: {json.dumps({'delta': delta})}\n\n"
+                        except Exception:
+                            pass
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class AssistantChatRequest(BaseModel):
+    book_title: str
+    page_context: str                  # ~2 000-char window of current page text
+    messages: list[ChatMessage] = []   # full conversation history
+
+
+@app.post("/api/ai/chat")
+async def assistant_chat(req: AssistantChatRequest):
+    """
+    Reading assistant: persistent chat about the book being read.
+    Streams text/event-stream: data: {"delta": "..."} … data: [DONE]
+    """
+    api_key = env_value("NVIDIA_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured.")
+
+    system = (
+        f'You are a reading assistant helping someone read "{req.book_title}". '
+        "Answer questions about the text, themes, characters, vocabulary, and ideas. "
+        "Be concise — 2-4 sentences unless more depth is clearly needed. "
+        "If the question is unrelated to reading or the book, gently redirect."
+    )
+
+    messages: list[dict] = [{"role": "system", "content": system}]
+
+    if req.page_context.strip():
+        messages.append({
+            "role": "user",
+            "content": f"Here is the passage I'm currently reading:\n\n{req.page_context}",
+        })
+        messages.append({
+            "role": "assistant",
+            "content": "Got it — I can see the passage you're reading. What would you like to know?",
+        })
+
+    for m in req.messages:
+        messages.append({"role": m.role, "content": m.content})
+
+    async def generate():
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                async with client.stream(
+                    "POST",
+                    "https://integrate.api.nvidia.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                    json={
+                        "model": "google/gemma-4-31b-it",
+                        "messages": messages,
+                        "max_tokens": 512,
+                        "temperature": 0.7,
+                        "stream": True,
+                    },
+                ) as resp:
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        raw = line[6:]
+                        if raw == "[DONE]":
+                            yield "data: [DONE]\n\n"
+                            break
+                        try:
+                            chunk = json.loads(raw)
+                            delta = chunk["choices"][0]["delta"].get("content", "")
+                            if delta:
+                                yield f"data: {json.dumps({'delta': delta})}\n\n"
+                        except Exception:
+                            pass
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class VocabCheckRequest(BaseModel):
+    mode: Literal["sentence", "definition", "mnemonic"]
+    word: str
+    definition: str
+    user_input: str
+    book_sentence: str | None = None
+
+
+@app.post("/api/ai/vocab-check")
+async def vocab_check(req: VocabCheckRequest):
+    """
+    AI evaluates a free-text vocabulary practice answer.
+    - sentence:   did the user's sentence correctly use the word?
+    - definition: how well does the user's definition match the actual one?
+    - mnemonic:   is the user's memory hook vivid and tied to the meaning?
+    Returns JSON: {"verdict": "correct"|"partial"|"incorrect", "feedback": str, "suggestion"?: str}
+    """
+    api_key = env_value("NVIDIA_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured.")
+
+    word = req.word.strip()
+    definition = (req.definition or "").strip()
+    user_input = req.user_input.strip()
+
+    if not word or not user_input:
+        return {"verdict": "incorrect", "feedback": "Empty input.", "suggestion": None}
+
+    if req.mode == "sentence":
+        system = (
+            "You are a strict but encouraging vocabulary tutor evaluating whether a learner's sentence "
+            "correctly uses a target word. Reply ONLY with valid JSON in this exact shape: "
+            '{"verdict":"correct"|"partial"|"incorrect","feedback":"<one sentence, max 22 words>"}. '
+            "Verdict 'correct' = word used grammatically AND with a meaning consistent with the definition. "
+            "Verdict 'partial' = word used but with slightly off meaning, awkward grammar, or unclear context. "
+            "Verdict 'incorrect' = word missing, used wrong, or applied to the wrong concept. "
+            "Be specific in feedback — name what worked or what to fix."
+        )
+        ctx = f'Original book sentence: "{req.book_sentence}"\n\n' if req.book_sentence else ""
+        user_msg = (
+            f'{ctx}'
+            f'Target word: "{word}"\n'
+            f'Definition: {definition}\n'
+            f'Learner wrote: "{user_input}"'
+        )
+    elif req.mode == "definition":
+        system = (
+            "You are a strict but encouraging vocabulary tutor evaluating how closely a learner's "
+            "definition matches the actual meaning of a word. Reply ONLY with valid JSON in this exact shape: "
+            '{"verdict":"correct"|"partial"|"incorrect","feedback":"<one sentence, max 22 words>"}. '
+            "Verdict 'correct' = captured the core meaning even if worded differently. "
+            "Verdict 'partial' = right general area but missing nuance, or partly off. "
+            "Verdict 'incorrect' = wrong meaning entirely. "
+            "Be specific in feedback — name what was right or what to add."
+        )
+        user_msg = (
+            f'Word: "{word}"\n'
+            f'Actual definition: {definition}\n'
+            f'Learner wrote: "{user_input}"'
+        )
+    else:  # mnemonic
+        system = (
+            "You are a vocabulary tutor evaluating a learner's mnemonic (memory hook). "
+            "A great mnemonic links the word's sound or look to its meaning via a vivid image, "
+            "sound association, or mini-story — using desirable difficulty and elaborative encoding. "
+            "Reply ONLY with valid JSON in this exact shape: "
+            '{"verdict":"correct"|"partial"|"incorrect","feedback":"<one sentence, max 22 words>","suggestion":"<optional improved mnemonic, max 28 words>"}. '
+            "Verdict 'correct' = vivid AND clearly tied to the meaning. "
+            "Verdict 'partial' = on the right track but could be more memorable. "
+            "Verdict 'incorrect' = doesn't connect sound/look to meaning. "
+            "Always include 'suggestion' for partial/incorrect; omit or use null for correct."
+        )
+        user_msg = (
+            f'Word: "{word}"\n'
+            f'Definition: {definition}\n'
+            f'Learner\'s memory hook: "{user_input}"'
+        )
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user_msg},
+    ]
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://integrate.api.nvidia.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "google/gemma-4-31b-it",
+                    "messages": messages,
+                    "max_tokens": 220,
+                    "temperature": 0.2,
+                    "stream": False,
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            raw = (payload.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"AI check failed: {exc}")
+
+    # Strip markdown fences if Gemma wraps the JSON
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        raw = "\n".join(line for line in lines if not line.strip().startswith("```"))
+
+    # Slice to the JSON object
+    start = raw.find("{")
+    end   = raw.rfind("}")
+    json_text = raw[start:end + 1] if start >= 0 and end > start else raw
+
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = json.loads(json_text)
+    except json.JSONDecodeError:
+        low = raw.lower()
+        if "incorrect" in low or "wrong" in low:
+            verdict = "incorrect"
+        elif "partial" in low or "close" in low or "almost" in low:
+            verdict = "partial"
+        elif "correct" in low or "right" in low or "good" in low:
+            verdict = "correct"
+        else:
+            verdict = "partial"
+        return {"verdict": verdict, "feedback": raw[:160] or "Could not parse AI response.", "suggestion": None}
+
+    verdict = str(parsed.get("verdict", "partial")).lower()
+    if verdict not in ("correct", "partial", "incorrect"):
+        verdict = "partial"
+
+    feedback   = str(parsed.get("feedback") or "").strip()[:240]
+    suggestion = parsed.get("suggestion")
+    if suggestion is not None:
+        suggestion = str(suggestion).strip()[:240] or None
+
+    return {"verdict": verdict, "feedback": feedback, "suggestion": suggestion}
+
+
+class DefineWordRequest(BaseModel):
+    word: str
+    book_sentence: str | None = None
+
+
+@app.post("/api/ai/define-word")
+async def define_word(req: DefineWordRequest):
+    """
+    Generate a clean dictionary-style definition for a single word.
+    Used by Studio at practice-start time when the saved note has no real definition.
+    Optionally uses the original book sentence to disambiguate the sense.
+    Returns: {"definition": str, "partOfSpeech"?: str, "example"?: str}
+    """
+    api_key = env_value("NVIDIA_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured.")
+
+    word = req.word.strip()
+    if not word:
+        raise HTTPException(status_code=400, detail="Empty word.")
+
+    system = (
+        "You are a precise dictionary lexicographer. Given a single word "
+        "(and optionally the sentence it appeared in for context), produce a "
+        "concise dictionary-style definition. Reply ONLY with valid JSON in this exact shape: "
+        '{"definition":"<one sentence, max 22 words>",'
+        '"partOfSpeech":"<noun|verb|adjective|adverb|other>",'
+        '"example":"<brief example sentence using the word naturally, max 18 words>"}. '
+        "If the word has multiple senses and a book sentence is provided, "
+        "choose the sense that fits that sentence. "
+        "Definition must be self-contained — never say 'see X' or 'used to'."
+    )
+
+    user_msg = f'Word: "{word}"'
+    if req.book_sentence:
+        user_msg += f'\nIt appeared in this sentence: "{req.book_sentence}"'
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user_msg},
+    ]
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://integrate.api.nvidia.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "google/gemma-4-31b-it",
+                    "messages": messages,
+                    "max_tokens": 240,
+                    "temperature": 0.2,
+                    "stream": False,
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            raw = (payload.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"AI define failed: {exc}")
+
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        raw = "\n".join(line for line in lines if not line.strip().startswith("```"))
+
+    start = raw.find("{")
+    end   = raw.rfind("}")
+    json_text = raw[start:end + 1] if start >= 0 and end > start else raw
+
+    try:
+        parsed = json.loads(json_text)
+    except json.JSONDecodeError:
+        return {
+            "definition": (raw[:240].strip() or "Definition unavailable."),
+            "partOfSpeech": None,
+            "example": None,
+        }
+
+    pos = str(parsed.get("partOfSpeech") or "").strip().lower()
+    if pos and pos not in ("noun", "verb", "adjective", "adverb", "other"):
+        pos = "other"
+
+    return {
+        "definition":   (str(parsed.get("definition") or "").strip()[:280] or "Definition unavailable."),
+        "partOfSpeech": (pos or None),
+        "example":      (str(parsed.get("example") or "").strip()[:280] or None),
+    }
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     """

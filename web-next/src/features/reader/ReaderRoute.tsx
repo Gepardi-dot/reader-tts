@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-  ArrowLeft, Settings2, Volume2, X,
+  ArrowLeft, ArrowRight, Languages, MessageSquare, Settings2, Type, Volume2, X,
   Play, Pause, SkipBack, SkipForward,
   Minus, Plus, AlignLeft, AlignCenter, AlignJustify,
   Copy, BookMarked, Globe, BookOpen, Mic, NotebookPen, Sparkles, Search,
@@ -126,6 +126,7 @@ type SecondaryPanel =
   | { kind: 'dictionary'; word: string }
   | { kind: 'notes'; text: string; start: number; end: number }
   | { kind: 'askai'; text: string }
+  | { kind: 'translate'; text: string }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -581,9 +582,10 @@ const WORD_ACTIONS = [
 ] as const
 
 const SENTENCE_ACTIONS = [
-  { id: 'copy',  Icon: Copy,        label: 'Copy'    },
-  { id: 'notes', Icon: NotebookPen, label: 'Notes'   },
-  { id: 'askai', Icon: Sparkles,    label: 'Ask AI'  },
+  { id: 'copy',      Icon: Copy,        label: 'Copy'      },
+  { id: 'notes',     Icon: NotebookPen, label: 'Notes'     },
+  { id: 'askai',     Icon: Sparkles,    label: 'Ask AI'    },
+  { id: 'translate', Icon: Languages,   label: 'Translate' },
 ] as const
 
 interface SelectionMenuProps {
@@ -605,7 +607,7 @@ function SelectionMenu({
   const [busyColor,  setBusyColor]  = useState<string | null>(null)
   const queryClient = useQueryClient()
 
-  const menuW = sel.mode === 'word' ? 300 : 210
+  const menuW = sel.mode === 'word' ? 300 : 268
   const cx = Math.min(
     Math.max(sel.viewportX, menuW / 2 + 10),
     window.innerWidth - menuW / 2 - 10,
@@ -639,6 +641,11 @@ function SelectionMenu({
         onPlayWord(sel.text, sel.startOffset)
         break
       case 'vocabulary': {
+        if (sel.text.trim().split(/\s+/).length > 1) {
+          onToast('Select a single word to save')
+          onClose()
+          break
+        }
         setBusyAction('vocabulary')
         try {
           const deckId = await getOrCreateDeck()
@@ -696,6 +703,10 @@ function SelectionMenu({
         break
       case 'askai':
         onOpenPanel({ kind: 'askai', text: sel.text })
+        onClose()
+        break
+      case 'translate':
+        onOpenPanel({ kind: 'translate', text: sel.text })
         onClose()
         break
     }
@@ -823,6 +834,8 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
   const [lookupWord, setLookupWord] = useState(initialWord)
   const [inputValue, setInputValue] = useState(initialWord)
   const [speaking,   setSpeaking]   = useState(false)
+  const [vocabState, setVocabState] = useState<'idle' | 'busy' | 'saved'>('idle')
+  const queryClient = useQueryClient()
 
   // 1. Offline dictionary (backend)
   const { data: offlineData, isLoading: offlineLoading } = useQuery({
@@ -919,6 +932,31 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
     if (!t) return
     setLookupWord(t)
     setInputValue(t)
+    setVocabState('idle')
+  }
+
+  async function saveToVocab() {
+    if (vocabState !== 'idle') return
+    setVocabState('busy')
+    try {
+      const deckId = await getOrCreateDeck()
+      if (!deckId) { setVocabState('idle'); return }
+      const firstDef = displayData?.entries?.[0]?.definitions?.[0]?.definition ?? null
+      await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
+        noteType: 'basic',
+        front: displayData?.term ?? lookupWord,
+        back: firstDef,
+        topic: 'Reading',
+        tags: ['reader'],
+        sourceRef: `reader-vocab:${(displayData?.term ?? lookupWord).trim().toLowerCase()}`,
+        metadata: { source: 'dictionary' },
+      })
+      queryClient.invalidateQueries({ queryKey: ['decks'] })
+      queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
+      setVocabState('saved')
+    } catch {
+      setVocabState('idle')
+    }
   }
 
   return (
@@ -985,10 +1023,30 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
                 <Volume2 size={20} strokeWidth={1.8} style={{ color: speaking ? '#fff' : '#4285f4' }} />
               </button>
               <div className="flex-1 pt-0.5 min-w-0">
-                <h2 className="text-[28px] font-normal leading-tight break-words"
-                  style={{ fontFamily: 'Lora, Georgia, serif', color: colors.text }}>
-                  {displayData.term}
-                </h2>
+                <div className="flex items-start justify-between gap-2">
+                  <h2 className="text-[28px] font-normal leading-tight break-words"
+                    style={{ fontFamily: 'Lora, Georgia, serif', color: colors.text }}>
+                    {displayData.term}
+                  </h2>
+                  <button
+                    onClick={() => void saveToVocab()}
+                    aria-label="Save to vocabulary"
+                    disabled={vocabState === 'busy'}
+                    className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-all active:scale-90 mt-0.5"
+                    style={{
+                      backgroundColor: vocabState === 'saved' ? '#22c55e20' : `${colors.text}10`,
+                      color: vocabState === 'saved' ? '#22c55e' : `${colors.text}55`,
+                    }}
+                  >
+                    {vocabState === 'busy' ? (
+                      <div className="w-3.5 h-3.5 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                    ) : vocabState === 'saved' ? (
+                      <span className="text-sm font-medium">✓</span>
+                    ) : (
+                      <Type size={14} />
+                    )}
+                  </button>
+                </div>
                 {displayData.pronunciation && (
                   <p className="text-sm mt-1" style={{ color: `${colors.text}50` }}>
                     {displayData.pronunciation}
@@ -1201,107 +1259,696 @@ function NotesPanel({ text, start, end, bookId, onClose, colors }: {
 
 // ── Ask AI Panel ──────────────────────────────────────────────────────────────
 
+interface AIChatMessage { role: 'user' | 'assistant'; content: string }
+
+async function streamAskAI(
+  text: string,
+  messages: AIChatMessage[],
+  onDelta: (d: string) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const { supabase } = await import('@/lib/supabase')
+  const { data }     = await supabase.auth.getSession()
+  const token        = data.session?.access_token ?? ''
+  const base         = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
+
+  const res = await fetch(`${base}/api/ai/ask`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ text, messages }),
+    signal,
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Request failed' }))
+    throw new Error((err as { detail?: string }).detail ?? 'Request failed')
+  }
+
+  const reader  = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let   buf     = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const raw = line.slice(6)
+      if (raw === '[DONE]') return
+      const chunk = JSON.parse(raw) as { delta?: string; error?: string }
+      if (chunk.error) throw new Error(chunk.error)
+      if (chunk.delta) onDelta(chunk.delta)
+    }
+  }
+}
+
 function AskAIPanel({ text, onClose, colors }: {
   text: string; onClose: () => void; colors: typeof THEMES['paper']
 }) {
-  const [status, setStatus] = useState<'loading' | 'done' | 'error'>('loading')
-  const [result, setResult] = useState<{
-    contextTitle?: string; contextParagraph?: string; definition?: string
-    usageFocus?: string[]; practicePrompts?: string[]
-  } | null>(null)
-  const [errMsg, setErrMsg] = useState('')
+  const [messages,  setMessages]  = useState<AIChatMessage[]>([])
+  const [streaming, setStreaming] = useState(true)   // true while AI is typing
+  const [input,     setInput]     = useState('')
+  const [errMsg,    setErrMsg]    = useState('')
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const inputRef  = useRef<HTMLInputElement>(null)
 
+  // scroll to bottom whenever messages change or AI is streaming
   useEffect(() => {
-    let cancelled = false
-    async function run() {
-      try {
-        const deckId = await getOrCreateDeck()
-        if (!deckId) { setErrMsg('No vocabulary deck available.'); setStatus('error'); return }
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
-        const noteRes = await api.post<{ note: { cards: Array<{ id: string }> } }>(
-          `/api/vocabulary/decks/${deckId}/notes`,
-          { noteType: 'basic', front: text.slice(0, 500), back: null, topic: 'AI Context' },
-        )
-        const cardId = noteRes.note?.cards?.[0]?.id
-        if (!cardId) { setErrMsg('Could not create context card.'); setStatus('error'); return }
+  // kick off the first explanation automatically
+  useEffect(() => {
+    const ac = new AbortController()
+    let assistantContent = ''
+    // placeholder for the streaming assistant message
+    setMessages([{ role: 'assistant', content: '' }])
+    setStreaming(true)
 
-        const ctx = await api.post<{
-          contextTitle?: string; contextParagraph?: string; definition?: string
-          usageFocus?: string[]; practicePrompts?: string[]
-        }>(`/api/vocabulary/cards/${cardId}/context`, {})
-
-        if (!cancelled) { setResult(ctx); setStatus('done') }
-      } catch (e: unknown) {
-        if (!cancelled) {
-          setErrMsg((e instanceof Error ? e.message : null) ?? 'AI context is not configured on this server.')
-          setStatus('error')
+    streamAskAI(text, [], (delta) => {
+      assistantContent += delta
+      setMessages([{ role: 'assistant', content: assistantContent }])
+    }, ac.signal)
+      .catch((e: unknown) => {
+        if ((e as { name?: string }).name !== 'AbortError') {
+          setErrMsg((e instanceof Error ? e.message : null) ?? 'AI is not available.')
         }
-      }
-    }
-    run()
-    return () => { cancelled = true }
+      })
+      .finally(() => setStreaming(false))
+
+    return () => ac.abort()
   }, [text])
 
+  async function sendMessage() {
+    const q = input.trim()
+    if (!q || streaming) return
+    setInput('')
+
+    // append user message + empty assistant placeholder
+    const history = [...messages, { role: 'user' as const, content: q }]
+    setMessages([...history, { role: 'assistant', content: '' }])
+    setStreaming(true)
+    setErrMsg('')
+
+    const ac = new AbortController()
+    let assistantContent = ''
+
+    streamAskAI(text, history, (delta) => {
+      assistantContent += delta
+      setMessages([...history, { role: 'assistant', content: assistantContent }])
+    }, ac.signal)
+      .catch((e: unknown) => {
+        if ((e as { name?: string }).name !== 'AbortError') {
+          setErrMsg((e instanceof Error ? e.message : null) ?? 'Something went wrong.')
+        }
+      })
+      .finally(() => {
+        setStreaming(false)
+        setTimeout(() => inputRef.current?.focus(), 50)
+      })
+  }
+
   return (
-    <div style={{ color: colors.text, paddingBottom: 'max(env(safe-area-inset-bottom,0px),24px)' }}>
-      <div className="flex items-center justify-between px-4 pt-1 pb-3">
-        <span className="text-sm font-semibold uppercase tracking-wide opacity-55">Ask AI</span>
+    <div
+      className="flex flex-col"
+      style={{ color: colors.text, height: '72vh', paddingBottom: 'env(safe-area-inset-bottom,0px)' }}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 pt-1 pb-3 shrink-0">
+        <div className="flex items-center gap-2 opacity-55">
+          <Sparkles size={13} />
+          <span className="text-sm font-semibold uppercase tracking-wide">Ask AI</span>
+        </div>
         <button onClick={onClose} className="p-1 opacity-40 hover:opacity-80 transition-opacity">
           <X size={16} />
         </button>
       </div>
 
-      <div className="px-4 space-y-4">
-        {/* Selected text */}
-        <div className="px-3.5 py-2.5 rounded-xl" style={{ backgroundColor: `${colors.text}07` }}>
-          <p className="text-sm leading-relaxed line-clamp-3 opacity-75" style={{ fontFamily: 'Lora, Georgia, serif' }}>
+      {/* Highlighted passage */}
+      <div className="px-4 shrink-0">
+        <div className="px-3.5 py-2.5 rounded-xl mb-3" style={{ backgroundColor: `${colors.text}07` }}>
+          <p
+            className="text-[13px] leading-relaxed line-clamp-2 opacity-60"
+            style={{ fontFamily: 'Lora, Georgia, serif' }}
+          >
             "{text}"
           </p>
         </div>
+      </div>
 
-        <div className="max-h-[45vh] overflow-y-auto">
-          {status === 'loading' && (
-            <div className="flex items-center gap-3 py-6">
-              <div className="w-5 h-5 rounded-full border-2 border-current border-t-transparent animate-spin opacity-40" />
-              <span className="text-sm opacity-45">Generating context…</span>
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-4 space-y-4 pb-3">
+        {messages.map((m, i) => {
+          const isLast = i === messages.length - 1
+          return (
+            <div key={i} className={cn('flex', m.role === 'user' ? 'justify-end' : 'justify-start')}>
+              {m.role === 'user' ? (
+                <div
+                  className="max-w-[80%] px-3.5 py-2 rounded-2xl rounded-tr-sm text-sm leading-relaxed"
+                  style={{ backgroundColor: `${colors.text}12` }}
+                >
+                  {m.content}
+                </div>
+              ) : (
+                <div className="max-w-[92%] text-sm leading-relaxed opacity-85 whitespace-pre-wrap">
+                  {m.content || (streaming && isLast && (
+                    <div className="flex items-center gap-2 py-1">
+                      <div className="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin opacity-35" />
+                      <span className="opacity-40">Thinking…</span>
+                    </div>
+                  ))}
+                  {m.content && streaming && isLast && (
+                    <span
+                      className="inline-block w-[2px] h-[0.85em] ml-0.5 align-middle animate-pulse"
+                      style={{ backgroundColor: colors.text, opacity: 0.45 }}
+                    />
+                  )}
+                </div>
+              )}
             </div>
-          )}
+          )
+        })}
+        {errMsg && <p className="text-xs opacity-50">{errMsg}</p>}
+        <div ref={bottomRef} />
+      </div>
 
-          {status === 'error' && (
-            <p className="text-sm opacity-50 py-2">{errMsg}</p>
-          )}
+      {/* Input */}
+      <div className="px-4 pb-3 pt-2 shrink-0 border-t" style={{ borderColor: `${colors.text}12` }}>
+        <form
+          onSubmit={(e) => { e.preventDefault(); void sendMessage() }}
+          className="flex items-center gap-2"
+        >
+          <input
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Ask a follow-up…"
+            disabled={streaming}
+            className={cn(
+              'flex-1 bg-transparent text-sm outline-none placeholder:opacity-30',
+              'border-b pb-0.5 transition-opacity',
+              streaming ? 'opacity-40 cursor-not-allowed' : 'opacity-100',
+            )}
+            style={{ borderColor: `${colors.text}20` }}
+          />
+          <button
+            type="submit"
+            disabled={!input.trim() || streaming}
+            className="opacity-40 hover:opacity-80 disabled:opacity-20 transition-opacity"
+          >
+            <ArrowRight size={16} />
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
 
-          {status === 'done' && result && (
-            <div className="space-y-4 pb-2">
-              {result.contextTitle && (
-                <p className="text-base font-semibold leading-snug">{result.contextTitle}</p>
+// ── Translate Panel ───────────────────────────────────────────────────────────
+
+const LANGUAGES = [
+  'Spanish', 'French', 'German', 'Italian', 'Portuguese',
+  'Dutch', 'Russian', 'Japanese', 'Chinese', 'Korean', 'Arabic', 'Hindi',
+]
+
+function detectDefaultLanguage(): string {
+  const tag = navigator.language?.split('-')[0] ?? 'en'
+  const map: Record<string, string> = {
+    es: 'Spanish', fr: 'French', de: 'German', it: 'Italian',
+    pt: 'Portuguese', nl: 'Dutch', ru: 'Russian', ja: 'Japanese',
+    zh: 'Chinese', ko: 'Korean', ar: 'Arabic', hi: 'Hindi',
+  }
+  return map[tag] ?? 'Spanish'
+}
+
+function TranslatePanel({ text, onClose, colors }: {
+  text: string; onClose: () => void; colors: typeof THEMES['paper']
+}) {
+  const [lang,       setLang]       = useState(detectDefaultLanguage)
+  const [result,     setResult]     = useState('')
+  const [streaming,  setStreaming]  = useState(false)
+  const [errMsg,     setErrMsg]     = useState('')
+  const abortRef = useRef<AbortController | null>(null)
+
+  async function translate(targetLang: string) {
+    abortRef.current?.abort()
+    const ac = new AbortController()
+    abortRef.current = ac
+    setResult('')
+    setErrMsg('')
+    setStreaming(true)
+
+    try {
+      const { supabase } = await import('@/lib/supabase')
+      const { data }     = await supabase.auth.getSession()
+      const token        = data.session?.access_token ?? ''
+      const base         = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
+
+      const res = await fetch(`${base}/api/ai/ask`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ text, mode: 'translate', target_language: targetLang }),
+        signal: ac.signal,
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Request failed' }))
+        throw new Error((err as { detail?: string }).detail ?? 'Request failed')
+      }
+
+      const reader  = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let   buf     = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6)
+          if (raw === '[DONE]') return
+          const chunk = JSON.parse(raw) as { delta?: string; error?: string }
+          if (chunk.error) throw new Error(chunk.error)
+          if (chunk.delta) setResult(prev => prev + chunk.delta)
+        }
+      }
+    } catch (e: unknown) {
+      if ((e as { name?: string }).name !== 'AbortError') {
+        setErrMsg((e instanceof Error ? e.message : null) ?? 'Translation failed.')
+      }
+    } finally {
+      setStreaming(false)
+    }
+  }
+
+  // auto-translate on open
+  useEffect(() => {
+    void translate(lang)
+    return () => abortRef.current?.abort()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function handleLangChange(newLang: string) {
+    setLang(newLang)
+    void translate(newLang)
+  }
+
+  return (
+    <div style={{ color: colors.text, paddingBottom: 'max(env(safe-area-inset-bottom,0px),24px)' }}>
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 pt-1 pb-3">
+        <div className="flex items-center gap-2 opacity-55">
+          <Languages size={13} />
+          <span className="text-sm font-semibold uppercase tracking-wide">Translate</span>
+        </div>
+        <button onClick={onClose} className="p-1 opacity-40 hover:opacity-80 transition-opacity">
+          <X size={16} />
+        </button>
+      </div>
+
+      <div className="px-4 space-y-3">
+        {/* Original text */}
+        <div className="px-3.5 py-2.5 rounded-xl" style={{ backgroundColor: `${colors.text}07` }}>
+          <p className="text-[13px] leading-relaxed line-clamp-3 opacity-60"
+            style={{ fontFamily: 'Lora, Georgia, serif' }}>
+            {text}
+          </p>
+        </div>
+
+        {/* Language picker */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {LANGUAGES.map(l => (
+            <button
+              key={l}
+              onClick={() => handleLangChange(l)}
+              disabled={streaming}
+              className={cn(
+                'px-2.5 py-1 rounded-full text-[11.5px] border transition-colors',
+                lang === l
+                  ? 'border-current opacity-80 font-medium'
+                  : 'opacity-30 border-current/30 hover:opacity-55',
+                streaming && 'cursor-not-allowed',
               )}
-              {result.contextParagraph && (
-                <p className="text-sm leading-relaxed opacity-80">{result.contextParagraph}</p>
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+
+        {/* Translation result */}
+        <div className="min-h-[60px] pb-2">
+          {errMsg ? (
+            <p className="text-sm opacity-50">{errMsg}</p>
+          ) : !result && streaming ? (
+            <div className="flex items-center gap-2 py-3">
+              <div className="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin opacity-35" />
+              <span className="text-sm opacity-40">Translating…</span>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-sm leading-relaxed opacity-85" style={{ fontFamily: 'Lora, Georgia, serif' }}>
+                {result}
+                {streaming && (
+                  <span className="inline-block w-[2px] h-[0.85em] ml-0.5 align-middle animate-pulse"
+                    style={{ backgroundColor: colors.text, opacity: 0.45 }} />
+                )}
+              </p>
+              {result && !streaming && (
+                <button
+                  onClick={() => { navigator.clipboard.writeText(result).catch(() => {}) }}
+                  className="flex items-center gap-1.5 text-[11px] opacity-35 hover:opacity-60 transition-opacity"
+                >
+                  <Copy size={11} /> Copy translation
+                </button>
               )}
-              {result.definition && (
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 mb-1.5">Definition</p>
-                  <p className="text-sm leading-relaxed">{result.definition}</p>
-                </div>
-              )}
-              {result.usageFocus && result.usageFocus.length > 0 && (
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 mb-2">Key Points</p>
-                  <ul className="space-y-1.5">
-                    {result.usageFocus.map((f, i) => (
-                      <li key={i} className="text-sm flex gap-2 opacity-80">
-                        <span className="opacity-40 shrink-0 mt-0.5">·</span>
-                        {f}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              <p className="text-[11px] opacity-35 pt-1">Saved to Vocabulary</p>
             </div>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Assistant Chat ────────────────────────────────────────────────────────────
+
+function AssistantChat({ bookTitle, pageContext, onClose, colors }: {
+  bookTitle: string
+  pageContext: string
+  onClose: () => void
+  colors: typeof THEMES['paper']
+}) {
+  const [messages,  setMessages]  = useState<AIChatMessage[]>([])
+  const [input,     setInput]     = useState('')
+  const [streaming, setStreaming] = useState(false)
+  const [errMsg,    setErrMsg]    = useState('')
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const inputRef  = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  async function send() {
+    const q = input.trim()
+    if (!q || streaming) return
+    setInput('')
+    setErrMsg('')
+
+    const history: AIChatMessage[] = [...messages, { role: 'user', content: q }]
+    setMessages([...history, { role: 'assistant', content: '' }])
+    setStreaming(true)
+
+    const ac = new AbortController()
+    let assistantContent = ''
+
+    try {
+      const { supabase } = await import('@/lib/supabase')
+      const { data }     = await supabase.auth.getSession()
+      const token        = data.session?.access_token ?? ''
+      const base         = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
+
+      const res = await fetch(`${base}/api/ai/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          book_title:   bookTitle,
+          page_context: pageContext,
+          messages:     history,
+        }),
+        signal: ac.signal,
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Request failed' }))
+        throw new Error((err as { detail?: string }).detail ?? 'Request failed')
+      }
+
+      const reader  = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let   buf     = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6)
+          if (raw === '[DONE]') return
+          const chunk = JSON.parse(raw) as { delta?: string; error?: string }
+          if (chunk.error) throw new Error(chunk.error)
+          if (chunk.delta) {
+            assistantContent += chunk.delta
+            setMessages([...history, { role: 'assistant', content: assistantContent }])
+          }
+        }
+      }
+    } catch (e: unknown) {
+      if ((e as { name?: string }).name !== 'AbortError') {
+        setErrMsg((e instanceof Error ? e.message : null) ?? 'Something went wrong.')
+        setMessages(history)
+      }
+    } finally {
+      setStreaming(false)
+      setTimeout(() => inputRef.current?.focus(), 50)
+    }
+
+    return () => ac.abort()
+  }
+
+  const empty = messages.length === 0
+
+  const SUGGESTIONS = [
+    'What are the main themes?',
+    'Summarize what I just read',
+    'Who are the key characters?',
+    'Explain the context of this passage',
+  ]
+
+  function sendSuggestion(text: string) {
+    setInput(text)
+    setTimeout(() => {
+      setInput('')
+      const history: AIChatMessage[] = [{ role: 'user', content: text }]
+      setMessages([...history, { role: 'assistant', content: '' }])
+      setStreaming(true)
+      setErrMsg('')
+
+      ;(async () => {
+        const ac = new AbortController()
+        let assistantContent = ''
+        try {
+          const { supabase } = await import('@/lib/supabase')
+          const { data }     = await supabase.auth.getSession()
+          const token        = data.session?.access_token ?? ''
+          const base         = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
+          const res = await fetch(`${base}/api/ai/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+            body: JSON.stringify({ book_title: bookTitle, page_context: pageContext, messages: history }),
+            signal: ac.signal,
+          })
+          if (!res.ok) { const err = await res.json().catch(() => ({ detail: 'Request failed' })); throw new Error((err as { detail?: string }).detail ?? 'Request failed') }
+          const reader  = res.body!.getReader()
+          const decoder = new TextDecoder()
+          let   buf     = ''
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buf += decoder.decode(value, { stream: true })
+            const lines = buf.split('\n'); buf = lines.pop() ?? ''
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue
+              const raw = line.slice(6)
+              if (raw === '[DONE]') return
+              const chunk = JSON.parse(raw) as { delta?: string; error?: string }
+              if (chunk.error) throw new Error(chunk.error)
+              if (chunk.delta) { assistantContent += chunk.delta; setMessages([...history, { role: 'assistant', content: assistantContent }]) }
+            }
+          }
+        } catch (e: unknown) {
+          if ((e as { name?: string }).name !== 'AbortError') {
+            setErrMsg((e instanceof Error ? e.message : null) ?? 'Something went wrong.')
+            setMessages(history)
+          }
+        } finally {
+          setStreaming(false)
+          setTimeout(() => inputRef.current?.focus(), 50)
+        }
+      })()
+    }, 0)
+  }
+
+  const isDark = colors.bg === '#1a1a18'
+  const bubbleBg   = isDark ? 'rgba(255,255,255,0.08)' : `${colors.text}0d`
+  const aiBg       = isDark ? 'rgba(255,255,255,0.04)' : `${colors.text}06`
+  const chipBg     = isDark ? 'rgba(255,255,255,0.06)' : `${colors.text}08`
+  const chipBorder = isDark ? 'rgba(255,255,255,0.10)' : `${colors.text}14`
+
+  return (
+    <div
+      className="flex flex-col"
+      style={{ color: colors.text, height: '72vh', paddingBottom: 'env(safe-area-inset-bottom,0px)' }}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 pt-1 pb-3 shrink-0">
+        <div className="flex flex-col gap-0.5">
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-full bg-[#2383e2]" />
+            <span className="text-[11px] font-semibold uppercase tracking-widest" style={{ opacity: 0.45 }}>Assistant</span>
+          </div>
+          <p
+            className="text-[12.5px] font-medium pl-3.5 line-clamp-1 max-w-[220px]"
+            style={{ opacity: 0.55, fontFamily: 'Lora, Georgia, serif', fontStyle: 'italic' }}
+          >
+            {bookTitle}
+          </p>
+        </div>
+        <button onClick={onClose} className="p-1.5 rounded-md transition-opacity" style={{ opacity: 0.35 }}
+          onMouseEnter={e => (e.currentTarget.style.opacity = '0.7')}
+          onMouseLeave={e => (e.currentTarget.style.opacity = '0.35')}
+        >
+          <X size={15} />
+        </button>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3">
+        {empty ? (
+          <div className="flex flex-col items-center pt-6 pb-2 gap-5">
+            {/* Greeting */}
+            <div className="text-center space-y-1 select-none">
+              <p className="text-[13px] font-medium" style={{ opacity: 0.7 }}>What would you like to know?</p>
+              <p className="text-[11.5px]" style={{ opacity: 0.35 }}>About this book or your current page</p>
+            </div>
+
+            {/* Suggestion chips */}
+            <div className="flex flex-col gap-2 w-full">
+              {SUGGESTIONS.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => sendSuggestion(s)}
+                  className="text-left px-3.5 py-2.5 rounded-xl text-[12.5px] leading-snug transition-all"
+                  style={{
+                    backgroundColor: chipBg,
+                    border: `1px solid ${chipBorder}`,
+                    color: colors.text,
+                    opacity: 0.8,
+                  }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLElement).style.opacity = '0.8' }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          messages.map((m, i) => {
+            const isLast = i === messages.length - 1
+            if (m.role === 'user') {
+              return (
+                <div key={i} className="flex justify-end">
+                  <div
+                    className="max-w-[82%] px-3.5 py-2.5 rounded-2xl rounded-br-sm text-[13px] leading-relaxed"
+                    style={{ backgroundColor: bubbleBg }}
+                  >
+                    {m.content}
+                  </div>
+                </div>
+              )
+            }
+            return (
+              <div key={i} className="flex justify-start gap-2.5">
+                {/* AI dot */}
+                <div className="mt-[5px] shrink-0 w-5 h-5 rounded-full bg-[#2383e2]/15 flex items-center justify-center">
+                  <div className="w-1.5 h-1.5 rounded-full bg-[#2383e2]" />
+                </div>
+                <div
+                  className="flex-1 min-w-0 px-3 py-2.5 rounded-2xl rounded-bl-sm text-[13px] leading-relaxed whitespace-pre-wrap"
+                  style={{ backgroundColor: aiBg }}
+                >
+                  {!m.content && streaming && isLast ? (
+                    <div className="flex items-center gap-1 py-0.5">
+                      {[0, 1, 2].map((d) => (
+                        <div
+                          key={d}
+                          className="w-1.5 h-1.5 rounded-full bg-[#2383e2] animate-bounce"
+                          style={{ animationDelay: `${d * 120}ms`, opacity: 0.6 }}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <>
+                      {m.content}
+                      {streaming && isLast && (
+                        <span
+                          className="inline-block w-[2px] h-[0.85em] ml-0.5 align-middle rounded-full animate-pulse bg-[#2383e2]"
+                          style={{ opacity: 0.6 }}
+                        />
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            )
+          })
+        )}
+        {errMsg && (
+          <p className="text-[11.5px] px-2 py-1.5 rounded-lg text-center" style={{ opacity: 0.5, backgroundColor: `${colors.text}08` }}>
+            {errMsg}
+          </p>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input */}
+      <div className="px-4 pb-4 pt-2 shrink-0">
+        <form
+          onSubmit={(e) => { e.preventDefault(); void send() }}
+          className="flex items-center gap-2 rounded-2xl px-3.5 py-2.5"
+          style={{ backgroundColor: chipBg, border: `1px solid ${chipBorder}` }}
+        >
+          <input
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={empty ? 'Ask anything…' : 'Ask a follow-up…'}
+            disabled={streaming}
+            autoFocus
+            className="flex-1 bg-transparent text-[13px] outline-none"
+            style={{
+              color: colors.text,
+              opacity: streaming ? 0.4 : 1,
+              cursor: streaming ? 'not-allowed' : 'text',
+            }}
+          />
+          <button
+            type="submit"
+            disabled={!input.trim() || streaming}
+            className="shrink-0 w-6 h-6 rounded-full bg-[#2383e2] flex items-center justify-center transition-opacity disabled:opacity-20"
+            style={{ opacity: input.trim() && !streaming ? 1 : undefined }}
+          >
+            <ArrowRight size={12} strokeWidth={2.5} color="white" />
+          </button>
+        </form>
       </div>
     </div>
   )
@@ -2033,7 +2680,7 @@ export function ReaderRoute() {
   const queryClient = useQueryClient()
 
   const [appearance,    setAppearance]    = useState<Appearance>(loadAppearance)
-  const [sheet,         setSheet]         = useState<'none' | 'appearance' | 'audio'>('none')
+  const [sheet,         setSheet]         = useState<'none' | 'appearance' | 'audio' | 'chat'>('none')
   const [scrollPct,     setScrollPct]     = useState(0)
   const [barVisible,    setBarVisible]    = useState(true)
   const [selection,     setSelection]     = useState<SelectionState | null>(null)
@@ -2687,6 +3334,14 @@ export function ReaderRoute() {
 
         <div className="flex items-center shrink-0">
           <button
+            onClick={() => setSheet(s => s === 'chat' ? 'none' : 'chat')}
+            className="flex items-center justify-center w-9 h-9 rounded-lg hover:opacity-55 transition-opacity"
+            style={{ color: sheet === 'chat' ? '#2383e2' : colors.text }}
+            aria-label="Assistant"
+          >
+            <MessageSquare size={16} />
+          </button>
+          <button
             onClick={() => setSheet(s => s === 'audio' ? 'none' : 'audio')}
             className="flex items-center justify-center w-9 h-9 rounded-lg hover:opacity-55 transition-opacity"
             style={{ color: colors.text }}
@@ -2848,9 +3503,31 @@ export function ReaderRoute() {
           if (p.kind === 'askai') return (
             <AskAIPanel text={p.text} onClose={closePanel} colors={colors} />
           )
+          if (p.kind === 'translate') return (
+            <TranslatePanel text={p.text} onClose={closePanel} colors={colors} />
+          )
           return null
         })()}
       </BottomSheet>
+
+      {/* ── Assistant chat sheet ─────────────────────────────────────── */}
+      {sheet === 'chat' && (() => {
+        const ft = payload?.text ?? ''
+        const mid = Math.floor(scrollPct * ft.length)
+        const lo  = Math.max(0, mid - 1000)
+        const hi  = Math.min(ft.length, mid + 1000)
+        const ctx = ft.slice(lo, hi)
+        return (
+          <BottomSheet open onClose={() => setSheet('none')} bg={colors.bg}>
+            <AssistantChat
+              bookTitle={payload?.book.title ?? 'this book'}
+              pageContext={ctx}
+              onClose={() => setSheet('none')}
+              colors={colors}
+            />
+          </BottomSheet>
+        )
+      })()}
 
       {/* ── Appearance sheet ──────────────────────────────────────────── */}
       <BottomSheet open={sheet === 'appearance'} onClose={() => setSheet('none')} bg={colors.bg}>

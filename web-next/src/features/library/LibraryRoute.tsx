@@ -57,6 +57,7 @@ function WordParticles() {
     let w = 0, h = 0
 
     function resize() {
+      if (!canvas) return
       w = canvas.offsetWidth
       h = canvas.offsetHeight
       canvas.width  = w

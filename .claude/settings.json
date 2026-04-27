@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cd * && npm run typecheck*)",
+      "PowerShell(cd * && npm run typecheck 2>&1)",
+      "PowerShell(Start-Process powershell*)",
+      "PowerShell(Get-NetTCPConnection*)",
+      "Bash(npm run typecheck*)",
+      "Bash(npm run build*)",
+      "Bash(npm run lint*)",
+      "Bash(npm run test*)",
+      "Bash(npm --prefix * run typecheck*)",
+      "Bash(npm --prefix * run build*)",
+      "Bash(npm --prefix * run lint*)",
+      "Bash(python -m py_compile*)",
+      "Bash(curl -s *)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr list*)",
+      "Bash(gh pr diff*)",
+      "Bash(gh pr checks*)",
+      "Bash(gh run list*)",
+      "Bash(gh run view*)",
+      "Bash(gh issue list*)",
+      "Bash(gh issue view*)"
+    ]
+  }
+}

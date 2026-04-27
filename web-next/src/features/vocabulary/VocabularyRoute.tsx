@@ -44,7 +44,9 @@ export function VocabularyRoute() {
   })
 
   const isLoading = decksLoading || (Boolean(deck) && dashLoading)
-  const words = dashboard?.notes ?? []
+  const words = (dashboard?.notes ?? []).filter(
+    (n) => n.front.trim().split(/\s+/).length === 1,
+  )
 
   return (
     <div className="min-h-svh bg-background pb-24 md:pb-6">
@@ -95,11 +97,13 @@ export function VocabularyRoute() {
               >
                 {word.front}
               </p>
-              <p className="text-xs text-muted-foreground leading-snug line-clamp-3">
-                {word.back ?? word.explanation ?? word.extra ?? '—'}
-              </p>
+              {(word.back ?? word.explanation ?? word.extra) && (
+                <p className="text-xs text-muted-foreground leading-snug line-clamp-3">
+                  {word.back ?? word.explanation ?? word.extra}
+                </p>
+              )}
               {word.topic && (
-                <p className="text-[10px] text-muted-foreground/60 mt-auto">{word.topic}</p>
+                <p className="text-[10px] text-muted-foreground/50 mt-auto pt-1">{word.topic}</p>
               )}
             </div>
           ))}
