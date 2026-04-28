@@ -3198,13 +3198,22 @@ export function ReaderRoute() {
     }
   }, [])
 
-  const handleTouchEnd = useCallback((_ev: React.TouchEvent<HTMLDivElement>) => {
+  const handleTouchEnd = useCallback((ev: React.TouchEvent<HTMLDivElement>) => {
     const r = dragRef.current
     if (r.mode === 'selecting') {
       // Selection state is already up-to-date from the last touchmove.
       // Mark so the trailing click event doesn't reset it.
       justShowedMenu.current = true
       setIsDragSelecting(false)
+    } else if (r.mode === 'scrolling') {
+      // Vertical scroll — suppress the trailing synthetic click that some browsers fire
+      justShowedMenu.current = true
+    } else if (r.mode === 'deciding' && ev.changedTouches.length > 0) {
+      // Touch ended before onMove could classify it — if it moved at all, it was a scroll
+      const t = ev.changedTouches[0]
+      if (Math.hypot(t.clientX - r.startX, t.clientY - r.startY) > 5) {
+        justShowedMenu.current = true
+      }
     }
     dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
   }, [])
@@ -3226,7 +3235,7 @@ export function ReaderRoute() {
         const dist = Math.hypot(dx, dy)
         if (dist < 8) return
         // If the gesture is mostly vertical, defer to scroll
-        if (Math.abs(dy) > Math.abs(dx) * 1.4 && Math.abs(dy) > 12) {
+        if (Math.abs(dy) > Math.abs(dx) * 1.4 && Math.abs(dy) > 8) {
           r.mode = 'scrolling'
           return
         }
