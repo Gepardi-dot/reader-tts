@@ -194,7 +194,7 @@ const PROVIDER_PREVIEW_TEXT = (
 const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
   google: 2,
   openai: 2,
-  kokoro: 8,
+  kokoro: 2,
 }
 
 // How many ready chunks we wait for before pressing play. Set to 1 everywhere
@@ -205,7 +205,7 @@ const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
 const PREFETCH_AHEAD_TARGET: Record<string, number> = {
-  kokoro: 6,
+  kokoro: 3,
 }
 const DEFAULT_PREFETCH_AHEAD = 2
 
@@ -2903,19 +2903,53 @@ export function ReaderRoute() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveTtsProvider, effectiveTtsVoice, Boolean(payload?.text)])
 
+  // Compute the 420-char presynthesis grid client-side the moment book text is available.
+  // This mirrors the backend _chunk_text_for_presynth() algorithm exactly so grid chunk
+  // start/end positions always match the presynthesis cache keys — even before the
+  // presynthesis POST response arrives.
+  useEffect(() => {
+    if (!payload?.text || effectiveTtsProvider !== 'kokoro') {
+      presynthGridRef.current = null
+      return
+    }
+    const text = payload.text
+    const GRID_SIZE = 420
+    const grid: Array<{ start: number; end: number }> = []
+    let pos = 0
+    while (pos < text.length) {
+      let end = Math.min(pos + GRID_SIZE, text.length)
+      if (end < text.length && !/\s/.test(text[end])) {
+        const wsIdx = text.lastIndexOf(' ', end)
+        if (wsIdx > pos) end = wsIdx + 1
+      }
+      if (text.slice(pos, end).trim()) grid.push({ start: pos, end })
+      pos = Math.max(end, pos + 1)
+    }
+    presynthGridRef.current = grid
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payload?.text, effectiveTtsProvider])
+
   // Kokoro presynthesis — pre-generate the entire book's audio in the background
   // so that tapping any word is an instant cache hit. Re-triggers when voice changes.
   useEffect(() => {
     if (effectiveTtsProvider !== 'kokoro' || !bookId || !payload?.text) return
 
-    presynthGridRef.current = null
     if (presynthPollRef.current) clearTimeout(presynthPollRef.current)
 
     const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
+    const startFrom = Math.round(scrollPct * (payload.text.length))
     api.post<{ jobId: string; total: number; chunks: Array<{ start: number; end: number }>; alreadyDone?: boolean }>(
       `/api/books/${bookId}/presynthesize`,
-      { provider: 'kokoro', voice: effectiveTtsVoice ?? null, length_scale: lengthScale, sentence_silence: sentenceSilence },
+      {
+        provider: 'kokoro',
+        voice: effectiveTtsVoice ?? null,
+        narration_style: '',
+        length_scale: lengthScale,
+        sentence_silence: sentenceSilence,
+        start_from: startFrom,
+      },
     ).then((res) => {
+      // Grid was already computed client-side; server confirms the same grid
       presynthGridRef.current = res.chunks
       if (res.alreadyDone) {
         setPresynthProgress({ completed: res.total, total: res.total })

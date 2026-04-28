@@ -194,7 +194,7 @@ SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json" if SUPABASE_
 BOOK_STORAGE_ENDPOINT = env_value("BOOK_STORAGE_ENDPOINT")
 BOOK_STORAGE_ADDRESSING_STYLE = (env_value("BOOK_STORAGE_ADDRESSING_STYLE") or "virtual").lower()
 LOCAL_DEV_USER_ID = "00000000-0000-0000-0000-000000000001"
-LIVE_AUDIO_CACHE_VERSION = 5
+LIVE_AUDIO_CACHE_VERSION = 6
 PROVIDER_TEST_CACHE_VERSION = 2
 TTSProviderId = Literal["piper", "google", "openai", "kokoro"]
 GEMINI_MAX_RETRY_ATTEMPTS = 3
@@ -565,9 +565,10 @@ class ProviderWarmupRequest(BaseModel):
 class PresynthesizeRequest(BaseModel):
     provider: TTSProviderId = "kokoro"
     voice: str | None = None
-    narration_style: str = Field(default=DEFAULT_NARRATION_STYLE, max_length=1500)
+    narration_style: str = Field(default="", max_length=1500)
     length_scale: float = Field(default=1.0, ge=0.6, le=1.5)
     sentence_silence: float = Field(default=0.2, ge=0.0, le=1.0)
+    start_from: int = Field(default=0, ge=0)
 
 
 class HighlightCreateRequest(BaseModel):
@@ -4543,8 +4544,10 @@ def synthesize_provider_audio(
             raise RuntimeError("Kokoro remote server is not configured (set KOKORO_REMOTE_URL).")
         full_text = " ".join(chunk.strip() for chunk in chunks if chunk.strip())
         speed = max(0.5, min(2.0, length_scale if length_scale else 1.0))
-        sil = sentence_silence if sentence_silence is not None else 0.3
-        _synthesize_kokoro_parallel_sentences(full_text, voice or "af_heart", speed, output_path, sentence_silence=sil)
+        # Preprocess text for naturalness (abbreviations, em-dashes, unicode cleanup)
+        # then send as a single request — fastest path, avoids server queue buildup.
+        preprocessed = preprocess_kokoro_text(full_text)
+        synthesize_kokoro_remote(preprocessed, voice or "af_heart", speed, output_path)
     else:
         raise RuntimeError(f"Unsupported provider: {provider_id}")
 
@@ -4597,7 +4600,9 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         "voice": chosen_voice,
         "model": chosen_model or request.model,
         "outputFormat": playback_format,
-        "narrationStyle": request.narration_style,
+        # Kokoro and Piper are ONNX/local models that ignore narration_style; normalize
+        # to "" so cache keys are provider-agnostic with respect to this field.
+        "narrationStyle": "" if request.provider in ("kokoro", "piper") else request.narration_style,
         "lengthScale": request.length_scale,
         "sentenceSilence": request.sentence_silence,
         "start": request.start,
@@ -4984,40 +4989,59 @@ def _run_presynth_job(
     tok = _current_user_id.set(uid)
     total = len(chunks)
     _MAX_RETRIES = 3
-    try:
-        _presynth_jobs[job_id] = {"status": "running", "completed": 0, "total": total}
-        for i, chunk in enumerate(chunks):
-            if _presynth_jobs.get(job_id, {}).get("status") == "cancelled":
+    _WORKERS = 4  # parallel chunk synthesis — keeps Kokoro server load sane
+
+    _presynth_jobs[job_id] = {"status": "running", "completed": 0, "total": total}
+    completed_count = [0]
+    completed_lock = threading.Lock()
+
+    def synth_chunk(chunk: dict[str, Any]) -> None:
+        if _presynth_jobs.get(job_id, {}).get("status") == "cancelled":
+            return
+        live_req = LiveAudioRequest(
+            provider=request.provider,
+            voice=request.voice,
+            model=None,
+            output_format="mp3",
+            narration_style="",  # normalized — Kokoro/Piper ignore this field
+            length_scale=request.length_scale,
+            sentence_silence=request.sentence_silence,
+            pageNumber=1,
+            start=chunk["start"],
+            end=chunk["end"],
+            text=chunk["text"],
+        )
+        for attempt in range(_MAX_RETRIES):
+            try:
+                build_live_audio_payload(book_id, live_req)
                 break
-            live_req = LiveAudioRequest(
-                provider=request.provider,
-                voice=request.voice,
-                model=None,
-                output_format="mp3",
-                narration_style=request.narration_style,
-                length_scale=request.length_scale,
-                sentence_silence=request.sentence_silence,
-                pageNumber=1,
-                start=chunk["start"],
-                end=chunk["end"],
-                text=chunk["text"],
-            )
-            for attempt in range(_MAX_RETRIES):
-                try:
-                    build_live_audio_payload(book_id, live_req)
+            except Exception:
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(1.0)
+        with completed_lock:
+            completed_count[0] += 1
+            _presynth_jobs[job_id]["completed"] = completed_count[0]
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_WORKERS) as pool:
+            futs = {pool.submit(synth_chunk, c): c for c in chunks}
+            for fut in concurrent.futures.as_completed(futs):
+                if _presynth_jobs.get(job_id, {}).get("status") == "cancelled":
+                    for f in futs:
+                        f.cancel()
                     break
+                try:
+                    fut.result()
                 except Exception:
-                    if attempt < _MAX_RETRIES - 1:
-                        time.sleep(1.0)
-            _presynth_jobs[job_id]["completed"] = i + 1
+                    pass
         _presynth_jobs[job_id]["status"] = "done"
-        # Write a persistent marker so the status endpoint can answer after server restarts
         marker_path = book_live_audio_dir(book_id) / ".presynth-done.json"
         try:
             write_json(marker_path, {
                 "jobId": job_id,
                 "provider": request.provider,
                 "voice": request.voice,
+                "cacheVersion": LIVE_AUDIO_CACHE_VERSION,
                 "completedAt": datetime.now(timezone.utc).isoformat(),
             })
         except Exception:
@@ -5639,16 +5663,23 @@ def presynthesize_book(book_id: str, request: PresynthesizeRequest) -> dict[str,
     if marker_path.exists():
         try:
             marker = read_json(marker_path)
-            if marker.get("provider") == request.provider and marker.get("voice") == request.voice:
+            if (marker.get("provider") == request.provider
+                    and marker.get("voice") == request.voice
+                    and marker.get("cacheVersion") == LIVE_AUDIO_CACHE_VERSION):
                 return {"jobId": f"done-{book_id}", "total": len(chunks), "chunks": chunk_grid, "alreadyDone": True}
         except Exception:
             pass
+    # Start presynthesis from the user's current reading position so that nearby
+    # chunks are cached first — the rest of the book follows in background.
+    start_from = max(0, min(request.start_from, len(text)))
+    start_idx = next((i for i, c in enumerate(chunks) if c["end"] > start_from), 0)
+    prioritized = chunks[start_idx:] + chunks[:start_idx]
     job_id = uuid.uuid4().hex
     uid = _current_user_id.get()
     _presynth_jobs[job_id] = {"status": "queued", "completed": 0, "total": len(chunks)}
     threading.Thread(
         target=_run_presynth_job,
-        args=(job_id, book_id, request, chunks, uid),
+        args=(job_id, book_id, request, prioritized, uid),
         name=f"presynth-{job_id[:8]}",
         daemon=True,
     ).start()
@@ -5662,7 +5693,12 @@ def presynthesize_status(book_id: str, jobId: str) -> dict[str, Any]:
         # Check for a persistent marker (server may have restarted)
         marker_path = book_live_audio_dir(book_id) / ".presynth-done.json"
         if marker_path.exists():
-            return {"status": "done", "completed": 0, "total": 0, "percent": 100}
+            try:
+                m = read_json(marker_path)
+                if m.get("cacheVersion") == LIVE_AUDIO_CACHE_VERSION:
+                    return {"status": "done", "completed": 0, "total": 0, "percent": 100}
+            except Exception:
+                pass
         return {"status": "not_found", "completed": 0, "total": 0, "percent": 0}
     total = job.get("total", 0)
     completed = job.get("completed", 0)
