@@ -254,7 +254,7 @@ function audioSliceStart(textLength: number, scrollPct: number) {
 
 // Provider-tuned pacing
 function pacingFor(provider: string): { lengthScale: number; sentenceSilence: number } {
-  if (provider === 'neutts_local') return { lengthScale: 1.1, sentenceSilence: 0.38 }
+  if (provider === 'kokoro') return { lengthScale: 0.93, sentenceSilence: 0.38 }
   return { lengthScale: 1.0, sentenceSilence: 0.20 }
 }
 
@@ -2912,11 +2912,15 @@ export function ReaderRoute() {
     if (presynthPollRef.current) clearTimeout(presynthPollRef.current)
 
     const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
-    api.post<{ jobId: string; total: number; chunks: Array<{ start: number; end: number }> }>(
+    api.post<{ jobId: string; total: number; chunks: Array<{ start: number; end: number }>; alreadyDone?: boolean }>(
       `/api/books/${bookId}/presynthesize`,
       { provider: 'kokoro', voice: effectiveTtsVoice ?? null, length_scale: lengthScale, sentence_silence: sentenceSilence },
     ).then((res) => {
       presynthGridRef.current = res.chunks
+      if (res.alreadyDone) {
+        setPresynthProgress({ completed: res.total, total: res.total })
+        return
+      }
       setPresynthJobId(res.jobId)
       setPresynthProgress({ completed: 0, total: res.total })
     }).catch(() => { /* silent — presynthesis is best-effort */ })
@@ -2931,7 +2935,7 @@ export function ReaderRoute() {
         `/api/books/${bookId}/presynthesize/status?jobId=${presynthJobId}`,
       ).then((res) => {
         setPresynthProgress({ completed: res.completed, total: res.total })
-        if (res.status !== 'done' && res.status !== 'error') {
+        if (res.status !== 'done' && res.status !== 'error' && res.status !== 'not_found') {
           presynthPollRef.current = setTimeout(poll, 3000)
         }
       }).catch(() => { /* silent */ })

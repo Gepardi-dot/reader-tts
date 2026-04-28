@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -2779,6 +2780,94 @@ def kokoro_configured() -> bool:
     return bool(KOKORO_REMOTE_URL)
 
 
+_KOKORO_ABBREVS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r'\bMr\.(?=\s)', re.IGNORECASE), 'Mister'),
+    (re.compile(r'\bMrs\.(?=\s)', re.IGNORECASE), 'Misses'),
+    (re.compile(r'\bMs\.(?=\s)', re.IGNORECASE), 'Miss'),
+    (re.compile(r'\bDr\.(?=\s)', re.IGNORECASE), 'Doctor'),
+    (re.compile(r'\bProf\.(?=\s)', re.IGNORECASE), 'Professor'),
+    (re.compile(r'\bSt\.(?=\s)', re.IGNORECASE), 'Saint'),
+    (re.compile(r'\bvs\.', re.IGNORECASE), 'versus'),
+    (re.compile(r'\betc\.', re.IGNORECASE), 'et cetera'),
+    (re.compile(r'\be\.g\.', re.IGNORECASE), 'for example'),
+    (re.compile(r'\bi\.e\.', re.IGNORECASE), 'that is'),
+]
+
+
+def preprocess_kokoro_text(text: str) -> str:
+    """Expand abbreviations and normalize punctuation for more natural Kokoro output."""
+    for pattern, replacement in _KOKORO_ABBREVS:
+        text = pattern.sub(replacement, text)
+    # Em-dash / en-dash → natural comma pause
+    text = re.sub(r'\s*[—–]\s*', ', ', text)
+    # Ellipsis → single comma (preserves pace without an abrupt stop)
+    text = re.sub(r'\.{2,}', ',', text)
+    # Curly quotes → ASCII quotes
+    text = text.replace('“', '"').replace('”', '"')
+    text = text.replace('‘', "'").replace('’', "'")
+    # Miscellaneous unicode bullets / middle-dots → period
+    text = text.replace('·', '.').replace('•', '.').replace('…', ',')
+    return text
+
+
+def _concat_wavs(wav_paths: list[Path], output_path: Path, *, silence_seconds: float = 0.3) -> None:
+    """Concatenate WAV files into output_path, inserting silence_seconds between each."""
+    if not wav_paths:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(wav_paths[0]), 'rb') as ref:
+        params = ref.getparams()
+        nchannels = ref.getnchannels()
+        sampwidth = ref.getsampwidth()
+        framerate = ref.getframerate()
+    silence_frames = b'\x00' * int(silence_seconds * framerate * nchannels * sampwidth)
+    with wave.open(str(output_path), 'wb') as out:
+        out.setparams(params)
+        for i, path in enumerate(wav_paths):
+            with wave.open(str(path), 'rb') as w:
+                out.writeframes(w.readframes(w.getnframes()))
+            if i < len(wav_paths) - 1:
+                out.writeframes(silence_frames)
+
+
+def _synthesize_kokoro_parallel_sentences(
+    text: str,
+    voice: str,
+    speed: float,
+    output_path: Path,
+    *,
+    sentence_silence: float = 0.3,
+) -> None:
+    """Split text into sentences, synthesize each in parallel, concatenate with silence."""
+    preprocessed = preprocess_kokoro_text(text)
+    sentences: list[str] = []
+    for para in split_tts_paragraphs(preprocessed):
+        sentences.extend(split_tts_sentences(para))
+    sentences = [s for s in sentences if s.strip()]
+    if not sentences:
+        sentences = [preprocessed.strip()]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = output_path.parent / f".{output_path.stem}-sentences"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        wav_paths = [tmp_dir / f"s{i:04d}.wav" for i in range(len(sentences))]
+
+        def _synth_one(args: tuple[str, Path]) -> None:
+            sentence_text, path = args
+            synthesize_kokoro_remote(sentence_text, voice, speed, path)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            list(pool.map(_synth_one, list(zip(sentences, wav_paths))))
+
+        existing = [p for p in wav_paths if p.exists() and p.stat().st_size > 0]
+        if not existing:
+            raise RuntimeError("All Kokoro sentence synthesis attempts failed.")
+        _concat_wavs(existing, output_path, silence_seconds=sentence_silence)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def synthesize_kokoro_remote(
     text: str,
     voice: str,
@@ -4452,10 +4541,10 @@ def synthesize_provider_audio(
     elif provider_id == "kokoro":
         if not kokoro_configured():
             raise RuntimeError("Kokoro remote server is not configured (set KOKORO_REMOTE_URL).")
-        # Kokoro takes the full text in one call per chunk — join then send
         full_text = " ".join(chunk.strip() for chunk in chunks if chunk.strip())
         speed = max(0.5, min(2.0, length_scale if length_scale else 1.0))
-        synthesize_kokoro_remote(full_text, voice or "af_heart", speed, output_path)
+        sil = sentence_silence if sentence_silence is not None else 0.3
+        _synthesize_kokoro_parallel_sentences(full_text, voice or "af_heart", speed, output_path, sentence_silence=sil)
     else:
         raise RuntimeError(f"Unsupported provider: {provider_id}")
 
@@ -4894,30 +4983,45 @@ def _run_presynth_job(
 ) -> None:
     tok = _current_user_id.set(uid)
     total = len(chunks)
+    _MAX_RETRIES = 3
     try:
         _presynth_jobs[job_id] = {"status": "running", "completed": 0, "total": total}
         for i, chunk in enumerate(chunks):
             if _presynth_jobs.get(job_id, {}).get("status") == "cancelled":
                 break
-            try:
-                live_req = LiveAudioRequest(
-                    provider=request.provider,
-                    voice=request.voice,
-                    model=None,
-                    output_format="mp3",
-                    narration_style=request.narration_style,
-                    length_scale=request.length_scale,
-                    sentence_silence=request.sentence_silence,
-                    pageNumber=1,
-                    start=chunk["start"],
-                    end=chunk["end"],
-                    text=chunk["text"],
-                )
-                build_live_audio_payload(book_id, live_req)
-            except Exception:
-                pass
+            live_req = LiveAudioRequest(
+                provider=request.provider,
+                voice=request.voice,
+                model=None,
+                output_format="mp3",
+                narration_style=request.narration_style,
+                length_scale=request.length_scale,
+                sentence_silence=request.sentence_silence,
+                pageNumber=1,
+                start=chunk["start"],
+                end=chunk["end"],
+                text=chunk["text"],
+            )
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    build_live_audio_payload(book_id, live_req)
+                    break
+                except Exception:
+                    if attempt < _MAX_RETRIES - 1:
+                        time.sleep(1.0)
             _presynth_jobs[job_id]["completed"] = i + 1
         _presynth_jobs[job_id]["status"] = "done"
+        # Write a persistent marker so the status endpoint can answer after server restarts
+        marker_path = book_live_audio_dir(book_id) / ".presynth-done.json"
+        try:
+            write_json(marker_path, {
+                "jobId": job_id,
+                "provider": request.provider,
+                "voice": request.voice,
+                "completedAt": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
     except Exception as exc:
         _presynth_jobs[job_id] = {"status": "error", "completed": 0, "total": total, "error": str(exc)}
     finally:
@@ -5529,6 +5633,16 @@ def presynthesize_book(book_id: str, request: PresynthesizeRequest) -> dict[str,
     chunks = _chunk_text_for_presynth(text, 420)
     if not chunks:
         raise HTTPException(status_code=400, detail="Book has no synthesizable text.")
+    chunk_grid = [{"start": c["start"], "end": c["end"]} for c in chunks]
+    # If already presynthesized with the same provider+voice, skip the job
+    marker_path = book_live_audio_dir(book_id) / ".presynth-done.json"
+    if marker_path.exists():
+        try:
+            marker = read_json(marker_path)
+            if marker.get("provider") == request.provider and marker.get("voice") == request.voice:
+                return {"jobId": f"done-{book_id}", "total": len(chunks), "chunks": chunk_grid, "alreadyDone": True}
+        except Exception:
+            pass
     job_id = uuid.uuid4().hex
     uid = _current_user_id.get()
     _presynth_jobs[job_id] = {"status": "queued", "completed": 0, "total": len(chunks)}
@@ -5538,7 +5652,6 @@ def presynthesize_book(book_id: str, request: PresynthesizeRequest) -> dict[str,
         name=f"presynth-{job_id[:8]}",
         daemon=True,
     ).start()
-    chunk_grid = [{"start": c["start"], "end": c["end"]} for c in chunks]
     return {"jobId": job_id, "total": len(chunks), "chunks": chunk_grid}
 
 
@@ -5546,7 +5659,11 @@ def presynthesize_book(book_id: str, request: PresynthesizeRequest) -> dict[str,
 def presynthesize_status(book_id: str, jobId: str) -> dict[str, Any]:
     job = _presynth_jobs.get(jobId)
     if not job:
-        raise HTTPException(status_code=404, detail="Presynthesis job not found.")
+        # Check for a persistent marker (server may have restarted)
+        marker_path = book_live_audio_dir(book_id) / ".presynth-done.json"
+        if marker_path.exists():
+            return {"status": "done", "completed": 0, "total": 0, "percent": 100}
+        return {"status": "not_found", "completed": 0, "total": 0, "percent": 0}
     total = job.get("total", 0)
     completed = job.get("completed", 0)
     return {
