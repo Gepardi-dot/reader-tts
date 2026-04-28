@@ -130,9 +130,17 @@
     @apply border-border outline-ring/50;
     box-sizing: border-box;
   }
+  /* Lock the page to viewport width so content overflow never triggers
+     the browser's auto-zoom-out behaviour on mobile. */
+  html {
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
   body {
     @apply bg-background text-foreground;
     margin: 0;
+    overflow-x: hidden;
+    max-width: 100vw;
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -140,6 +148,8 @@
   }
   #root {
     min-height: 100svh;
+    max-width: 100vw;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
   }

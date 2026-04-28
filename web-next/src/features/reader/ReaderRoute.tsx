@@ -3776,7 +3776,7 @@ export function ReaderRoute() {
   return (
     <div
       className="min-h-svh"
-      style={{ backgroundColor: colors.bg, color: colors.text }}
+      style={{ backgroundColor: colors.bg, color: colors.text, overflowX: 'hidden', maxWidth: '100vw' }}
     >
       {/* ── Top bar (floating pill) ───────────────────────────────── */}
       <header
@@ -3897,7 +3897,7 @@ export function ReaderRoute() {
             ))}
           </div>
         ) : (
-          <div ref={readerTextRef} style={{ fontFamily, fontSize: `${appearance.fontSize}px`, lineHeight: appearance.lineHeight, textAlign: appearance.align, color: colors.text }}>
+          <div ref={readerTextRef} style={{ fontFamily, fontSize: `${appearance.fontSize}px`, lineHeight: appearance.lineHeight, textAlign: appearance.align, color: colors.text, overflowWrap: 'break-word', wordBreak: 'break-word' }}>
             {paragraphs.map((p, i) => (
               <p
                 key={`${p.startOffset}-${i}`}
