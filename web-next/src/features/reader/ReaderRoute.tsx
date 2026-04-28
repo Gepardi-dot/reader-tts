@@ -2221,6 +2221,19 @@ interface AudioChunk {
   buffer: AudioBuffer | null
   status: ChunkStatus
   cues?: LiveAudioCue[]
+  tapOffset?: number  // char offset to seek to on first chunk (grid-aligned playback)
+}
+
+// Binary search: find the grid chunk whose range contains `offset`.
+function findGridChunk(grid: Array<{ start: number; end: number }>, offset: number): number {
+  let lo = 0
+  let hi = grid.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (grid[mid].end <= offset) lo = mid + 1
+    else hi = mid
+  }
+  return lo
 }
 
 export interface AudioHandle {
@@ -2763,6 +2776,8 @@ export function ReaderRoute() {
   const [wordAudioCurIdx, setWordAudioCurIdx] = useState(0)
   const [wordAudioTotal,  setWordAudioTotal]  = useState(0)
   const [audioFollowRects, setAudioFollowRects] = useState<SelectionRect[]>([])
+  const [presynthJobId,    setPresynthJobId]    = useState<string | null>(null)
+  const [presynthProgress, setPresynthProgress] = useState<{ completed: number; total: number } | null>(null)
   const [ttsProvider,   setTtsProvider]   = useState(() => loadAudioPrefs().provider)
   const [ttsVoice,      setTtsVoice]      = useState<string | null>(() => loadAudioPrefs().voice)
 
@@ -2786,6 +2801,9 @@ export function ReaderRoute() {
   const wordAudioRafRef           = useRef<number | null>(null)
   const activeAudioCueKeyRef    = useRef<string | null>(null)
   const activeAudioCueRangeRef  = useRef<{ start: number; end: number } | null>(null)
+  const presynthGridRef         = useRef<Array<{ start: number; end: number }> | null>(null)
+  const wordAudioChunkSeekRef   = useRef<number>(0)
+  const presynthPollRef         = useRef<ReturnType<typeof setTimeout> | null>(null)
   const readerTextRef         = useRef<HTMLDivElement | null>(null)
   const panelSnapshotRef      = useRef<SecondaryPanel | null>(null)
   const openPanel = useCallback((nextPanel: SecondaryPanel) => {
@@ -2884,6 +2902,43 @@ export function ReaderRoute() {
       .catch(() => { /* silent — warmup is best-effort */ })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveTtsProvider, effectiveTtsVoice, Boolean(payload?.text)])
+
+  // Kokoro presynthesis — pre-generate the entire book's audio in the background
+  // so that tapping any word is an instant cache hit. Re-triggers when voice changes.
+  useEffect(() => {
+    if (effectiveTtsProvider !== 'kokoro' || !bookId || !payload?.text) return
+
+    presynthGridRef.current = null
+    if (presynthPollRef.current) clearTimeout(presynthPollRef.current)
+
+    const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
+    api.post<{ jobId: string; total: number; chunks: Array<{ start: number; end: number }> }>(
+      `/api/books/${bookId}/presynthesize`,
+      { provider: 'kokoro', voice: effectiveTtsVoice ?? null, length_scale: lengthScale, sentence_silence: sentenceSilence },
+    ).then((res) => {
+      presynthGridRef.current = res.chunks
+      setPresynthJobId(res.jobId)
+      setPresynthProgress({ completed: 0, total: res.total })
+    }).catch(() => { /* silent — presynthesis is best-effort */ })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveTtsProvider, effectiveTtsVoice, bookId, Boolean(payload?.text)])
+
+  // Poll presynthesis progress until done
+  useEffect(() => {
+    if (!presynthJobId || !bookId) return
+    const poll = () => {
+      api.get<{ status: string; completed: number; total: number }>(
+        `/api/books/${bookId}/presynthesize/status?jobId=${presynthJobId}`,
+      ).then((res) => {
+        setPresynthProgress({ completed: res.completed, total: res.total })
+        if (res.status !== 'done' && res.status !== 'error') {
+          presynthPollRef.current = setTimeout(poll, 3000)
+        }
+      }).catch(() => { /* silent */ })
+    }
+    presynthPollRef.current = setTimeout(poll, 3000)
+    return () => { if (presynthPollRef.current) clearTimeout(presynthPollRef.current) }
+  }, [presynthJobId, bookId])
 
   // Read-ahead prefetch — fires chunk-aligned live-audio requests after the user stops
   // scrolling (2 s debounce). Cache keys match exactly what the player will request,
@@ -3234,10 +3289,11 @@ export function ReaderRoute() {
     if (!ctx) return
     const chunkStart = wordAudioChunkStartRef.current
     const curIdx = wordAudioCurIdxRef.current
+    const seekOffset = wordAudioChunkSeekRef.current
     const tick = () => {
       if (wordAudioAbortRef.current?.signal.aborted) return
       const chunk = wordAudioChunksRef.current[curIdx]
-      if (chunk) syncAudioFollowCue(chunk, Math.max(0, ctx.currentTime - chunkStart), false)
+      if (chunk) syncAudioFollowCue(chunk, Math.max(0, ctx.currentTime - chunkStart) + seekOffset, false)
       wordAudioRafRef.current = requestAnimationFrame(tick)
     }
     wordAudioRafRef.current = requestAnimationFrame(tick)
@@ -3407,6 +3463,7 @@ export function ReaderRoute() {
     wordAudioSourceRef.current = null
     wordAudioScheduledEndRef.current = 0
     wordAudioChunkStartRef.current = 0
+    wordAudioChunkSeekRef.current = 0
     if (wordAudioCtxRef.current?.state === 'suspended') void wordAudioCtxRef.current.resume()
     wordAudioRef.current?.pause()
     wordAudioRef.current = null
@@ -3473,12 +3530,20 @@ export function ReaderRoute() {
       source.connect(ctx.destination)
       wordAudioSourceRef.current = source
 
+      // Seek into first chunk when playing from a grid chunk that starts before the tap word
+      let seekSec = 0
+      if (chunk.tapOffset != null && chunk.tapOffset > chunk.start && chunk.cues?.length) {
+        const seekCue = chunk.cues.find(c => c.start >= chunk.tapOffset!)
+        if (seekCue) seekSec = seekCue.timeStart
+      }
+      wordAudioChunkSeekRef.current = seekSec
+
       const now = ctx.currentTime
       const startAt = Math.max(now + 0.002, wordAudioScheduledEndRef.current)
-      source.start(startAt)
-      wordAudioScheduledEndRef.current = startAt + chunk.buffer.duration
+      source.start(startAt, seekSec > 0 ? seekSec : undefined)
+      wordAudioScheduledEndRef.current = startAt + chunk.buffer.duration - seekSec
       wordAudioChunkStartRef.current = startAt
-      syncAudioFollowCue(chunk, 0, true)
+      syncAudioFollowCue(chunk, seekSec, true)
       startWordAudioCueRAF()
 
       source.onended = () => {
@@ -3523,18 +3588,37 @@ export function ReaderRoute() {
     setWordAudio({ word, status: 'loading' })
     const fullText = payload?.text ?? ''
     const start = Math.max(0, Math.min(startOffset, fullText.length))
-    const end = Math.min(fullText.length, start + AUDIO_SLICE_CHARS)
-    const snippet = fullText.slice(start, end)
-    if (!snippet.trim()) {
-      setWordAudio(null)
-      showToast('There is no readable text at this position.')
-      return
-    }
 
-    const chunkSize = CHUNK_CHARS[effectiveTtsProvider] ?? DEFAULT_AUDIO_CHARS
-    const firstChunkSize = FIRST_AUDIO_CHARS[effectiveTtsProvider] ?? DEFAULT_FIRST_AUDIO_CHARS
-    const raw = buildAudioChunks(snippet, start, chunkSize, firstChunkSize)
-    const initial: AudioChunk[] = raw.map((chunk) => ({ ...chunk, url: null, buffer: null, status: 'idle' }))
+    let initial: AudioChunk[]
+    const grid = effectiveTtsProvider === 'kokoro' ? presynthGridRef.current : null
+    if (grid && grid.length > 0) {
+      // Use the pre-computed word-boundary grid so every chunk is a cache hit
+      const chunkIdx = findGridChunk(grid, start)
+      // Load up to 50 grid chunks (covers ~21 KB of text) so playback never stalls
+      const window_ = grid.slice(chunkIdx, chunkIdx + 50)
+      initial = window_.map((g, i) => ({
+        start: g.start,
+        end: g.end,
+        text: fullText.slice(g.start, g.end),
+        url: null,
+        buffer: null,
+        status: 'idle' as ChunkStatus,
+        // First chunk may start before the tap word; store tap position for seek
+        tapOffset: i === 0 && g.start < start ? start : undefined,
+      }))
+    } else {
+      const end = Math.min(fullText.length, start + AUDIO_SLICE_CHARS)
+      const snippet = fullText.slice(start, end)
+      if (!snippet.trim()) {
+        setWordAudio(null)
+        showToast('There is no readable text at this position.')
+        return
+      }
+      const chunkSize = CHUNK_CHARS[effectiveTtsProvider] ?? DEFAULT_AUDIO_CHARS
+      const firstChunkSize = FIRST_AUDIO_CHARS[effectiveTtsProvider] ?? DEFAULT_FIRST_AUDIO_CHARS
+      const raw = buildAudioChunks(snippet, start, chunkSize, firstChunkSize)
+      initial = raw.map((chunk) => ({ ...chunk, url: null, buffer: null, status: 'idle' as ChunkStatus }))
+    }
     if (!initial.length) {
       setWordAudio(null)
       showToast('There is no readable text at this position.')
@@ -3920,6 +4004,19 @@ export function ReaderRoute() {
           onError={showToast}
         />
       </BottomSheet>
+
+      {/* ── Presynthesis progress (subtle, disappears when done) ─────── */}
+      {presynthProgress && presynthProgress.completed < presynthProgress.total && (
+        <div
+          style={{
+            position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)',
+            fontSize: 11, color: colors.text, opacity: 0.45, pointerEvents: 'none',
+            zIndex: 40, whiteSpace: 'nowrap',
+          }}
+        >
+          Preparing audio… {Math.round(presynthProgress.completed / presynthProgress.total * 100)}%
+        </div>
+      )}
 
       {/* ── Play bar (visible while audio is active) ──────────────────── */}
       <AnimatePresence>

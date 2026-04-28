@@ -513,6 +513,8 @@ _supabase_jwk_client_lock = threading.Lock()
 _current_user_id: ContextVar[str | None] = ContextVar("user_id", default=None)
 progress_store_lock = threading.Lock()
 progress_store_ready = False
+# In-memory presynthesis job tracking { job_id -> {status, completed, total} }
+_presynth_jobs: dict[str, dict[str, Any]] = {}
 
 
 class JobCancelledError(RuntimeError):
@@ -557,6 +559,14 @@ class ProviderWarmupRequest(BaseModel):
     provider: str
     voice: str | None = None
     model: str | None = None
+
+
+class PresynthesizeRequest(BaseModel):
+    provider: TTSProviderId = "kokoro"
+    voice: str | None = None
+    narration_style: str = Field(default=DEFAULT_NARRATION_STYLE, max_length=1500)
+    length_scale: float = Field(default=1.0, ge=0.6, le=1.5)
+    sentence_silence: float = Field(default=0.2, ge=0.0, le=1.0)
 
 
 class HighlightCreateRequest(BaseModel):
@@ -3237,6 +3247,28 @@ def prepare_live_synthesis_chunks(text: str, provider: str) -> list[str]:
     return prepare_synthesis_chunks(text, provider, None)
 
 
+def _chunk_text_for_presynth(text: str, chunk_size: int = 420) -> list[dict[str, Any]]:
+    """Split full book text into word-boundary-aligned chunks for background presynthesis.
+
+    Mirrors the word-boundary alignment used by the frontend grid chunker so that
+    cache keys produced here are identical to those the player will send.
+    """
+    chunks: list[dict[str, Any]] = []
+    pos = 0
+    text_len = len(text)
+    while pos < text_len:
+        end = min(pos + chunk_size, text_len)
+        if end < text_len and not text[end].isspace():
+            ws = text.rfind(" ", pos, end)
+            if ws > pos:
+                end = ws + 1
+        chunk_text = text[pos:end]
+        if chunk_text.strip():
+            chunks.append({"start": pos, "end": end, "text": chunk_text})
+        pos = max(end, pos + 1)
+    return [c for c in chunks if c["text"].strip()]
+
+
 def gemini_error_detail(response: httpx.Response) -> str:
     try:
         payload = response.json()
@@ -4837,7 +4869,59 @@ def run_provider_test(request: ProviderTestRequest) -> dict[str, Any]:
 
 
 def run_provider_warmup(request: ProviderWarmupRequest) -> dict[str, Any]:
+    if request.provider == "kokoro":
+        if not KOKORO_REMOTE_URL:
+            raise HTTPException(status_code=400, detail="Kokoro remote server is not configured.")
+        warmup_url = f"{KOKORO_REMOTE_URL}/v1/synthesize"
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if KOKORO_REMOTE_API_KEY:
+            headers["X-Api-Key"] = KOKORO_REMOTE_API_KEY
+        voice = request.voice or "af_heart"
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(warmup_url, json={"text": "Hi.", "voice": voice, "speed": 1.0}, headers=headers)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=503, detail="Kokoro warmup request failed.")
+        return {"ok": True, "provider": "kokoro"}
     raise HTTPException(status_code=400, detail=f"Warmup is unsupported for provider {request.provider}.")
+
+
+def _run_presynth_job(
+    job_id: str,
+    book_id: str,
+    request: PresynthesizeRequest,
+    chunks: list[dict[str, Any]],
+    uid: str | None,
+) -> None:
+    tok = _current_user_id.set(uid)
+    total = len(chunks)
+    try:
+        _presynth_jobs[job_id] = {"status": "running", "completed": 0, "total": total}
+        for i, chunk in enumerate(chunks):
+            if _presynth_jobs.get(job_id, {}).get("status") == "cancelled":
+                break
+            try:
+                live_req = LiveAudioRequest(
+                    provider=request.provider,
+                    voice=request.voice,
+                    model=None,
+                    output_format="mp3",
+                    narration_style=request.narration_style,
+                    length_scale=request.length_scale,
+                    sentence_silence=request.sentence_silence,
+                    pageNumber=1,
+                    start=chunk["start"],
+                    end=chunk["end"],
+                    text=chunk["text"],
+                )
+                build_live_audio_payload(book_id, live_req)
+            except Exception:
+                pass
+            _presynth_jobs[job_id]["completed"] = i + 1
+        _presynth_jobs[job_id]["status"] = "done"
+    except Exception as exc:
+        _presynth_jobs[job_id] = {"status": "error", "completed": 0, "total": total, "error": str(exc)}
+    finally:
+        _current_user_id.reset(tok)
 
 
 class ChatMessage(BaseModel):
@@ -5433,6 +5517,44 @@ def create_live_audio(book_id: str, request: LiveAudioRequest) -> dict[str, Any]
         raise HTTPException(status_code=400, detail=detail or str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/books/{book_id}/presynthesize")
+def presynthesize_book(book_id: str, request: PresynthesizeRequest) -> dict[str, Any]:
+    load_book_or_404(book_id)
+    prov = provider_details(request.provider)
+    if not prov["available"]:
+        raise HTTPException(status_code=400, detail=f"{prov['name']} is not available.")
+    text = read_book_text(book_id)
+    chunks = _chunk_text_for_presynth(text, 420)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Book has no synthesizable text.")
+    job_id = uuid.uuid4().hex
+    uid = _current_user_id.get()
+    _presynth_jobs[job_id] = {"status": "queued", "completed": 0, "total": len(chunks)}
+    threading.Thread(
+        target=_run_presynth_job,
+        args=(job_id, book_id, request, chunks, uid),
+        name=f"presynth-{job_id[:8]}",
+        daemon=True,
+    ).start()
+    chunk_grid = [{"start": c["start"], "end": c["end"]} for c in chunks]
+    return {"jobId": job_id, "total": len(chunks), "chunks": chunk_grid}
+
+
+@app.get("/api/books/{book_id}/presynthesize/status")
+def presynthesize_status(book_id: str, jobId: str) -> dict[str, Any]:
+    job = _presynth_jobs.get(jobId)
+    if not job:
+        raise HTTPException(status_code=404, detail="Presynthesis job not found.")
+    total = job.get("total", 0)
+    completed = job.get("completed", 0)
+    return {
+        "status": job.get("status", "unknown"),
+        "completed": completed,
+        "total": total,
+        "percent": round(completed / total * 100) if total > 0 else 100,
+    }
 
 
 @app.get("/api/books/{book_id}/progress")
