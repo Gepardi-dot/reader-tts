@@ -160,7 +160,64 @@ def collect_inputs(input_paths: list[str]) -> list[Path]:
     return unique
 
 
-def extract_pdf_text(path: Path) -> str:
+def _looks_extracted_correctly(text: str) -> bool:
+    """Heuristic: did extraction produce reasonable word boundaries?
+
+    pypdf-style mangled output has long runs of letters with no spaces
+    ("nowtheattentionofstudentsisdirected…"). Real prose almost never has
+    tokens >18 chars in any meaningful density.
+    """
+    if len(text) < 200:
+        return False
+    words = text.split()
+    if not words:
+        return False
+    long_tokens = sum(1 for w in words if len(w) > 18)
+    if long_tokens / len(words) > 0.08:
+        return False
+    # Also flag suspiciously low whitespace density (signals run-on text)
+    space_chars = sum(1 for c in text if c == " ")
+    return (space_chars / len(text)) > 0.10
+
+
+def _extract_pdf_text_pymupdf(path: Path) -> str:
+    """Primary: PyMuPDF (fitz). Tracks glyph X positions, inserts missing
+    spaces, preserves ligatures. Handles ~95% of digital PDFs cleanly.
+    """
+    import pymupdf  # local import: keeps startup light if unused
+    flags = pymupdf.TEXT_PRESERVE_LIGATURES | pymupdf.TEXT_PRESERVE_WHITESPACE
+    pages: list[str] = []
+    with pymupdf.open(str(path)) as doc:
+        for page in doc:
+            try:
+                pages.append(page.get_text("text", sort=True, flags=flags) or "")
+            except Exception:
+                pages.append("")
+    return "\n\n".join(pages)
+
+
+def _extract_pdf_text_pdfplumber(path: Path) -> str:
+    """Fallback: pdfplumber. Better for multi-column / unusual layouts.
+    Slower than PyMuPDF but handles edge cases (academic two-column papers,
+    forms) where PyMuPDF's read order can fail.
+    """
+    import pdfplumber
+    pages: list[str] = []
+    with pdfplumber.open(str(path)) as pdf:
+        for page in pdf.pages:
+            try:
+                pages.append(page.extract_text(x_tolerance=2, y_tolerance=3) or "")
+            except Exception:
+                pages.append("")
+    return "\n\n".join(pages)
+
+
+def _extract_pdf_text_pypdf(path: Path) -> str:
+    """Last-resort: pypdf. Pure-Python, no native deps, but produces the
+    "mingled words" output we're trying to escape. Kept so a corrupt PDF
+    that crashes the C-backed extractors still has a chance of yielding
+    something readable.
+    """
     try:
         reader = PdfReader(str(path), strict=False)
     except Exception as exc:
@@ -184,6 +241,46 @@ def extract_pdf_text(path: Path) -> str:
         except Exception:
             pages.append("")
     return "\n\n".join(pages)
+
+
+def extract_pdf_text(path: Path) -> str:
+    """Three-tier extraction. Try the best engine first, fall back if the
+    output looks mangled or extraction fails outright.
+
+    1. PyMuPDF — handles missing-space and ligature problems by default
+    2. pdfplumber — kicks in when tier 1 looks broken (column-aware)
+    3. pypdf — last resort if the C-backed engines crash on a malformed PDF
+    """
+    last_error: Exception | None = None
+    candidates: list[str] = []
+
+    for tier in (_extract_pdf_text_pymupdf, _extract_pdf_text_pdfplumber):
+        try:
+            text = tier(path)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if not text.strip():
+            continue
+        if _looks_extracted_correctly(text):
+            return text
+        candidates.append(text)
+
+    try:
+        text = _extract_pdf_text_pypdf(path)
+        if text.strip():
+            candidates.append(text)
+    except Exception as exc:
+        last_error = exc
+
+    if candidates:
+        # Pick the candidate with the highest space density — best proxy for
+        # "least mangled" when none passed the strict heuristic.
+        return max(candidates, key=lambda t: t.count(" ") / max(len(t), 1))
+
+    if last_error is not None:
+        raise ValueError(f"Invalid or unsupported PDF file: {path.name}") from last_error
+    return ""
 
 
 def _html_to_reading_text(markup: bytes | str) -> str:

@@ -3150,17 +3150,14 @@ def invalidate_books_cache(user_id: str | None = None) -> None:
 
 
 def list_books() -> list[dict[str, Any]]:
-    uid = current_user_id()
-    now = time.monotonic()
-    with _books_cache_lock:
-        cached = _books_cache.get(uid)
-        if cached is not None and now < cached[1]:
-            return list(cached[0])
+    # No in-process cache: on Vercel each lambda is its own process, so a
+    # cache hit on lambda A wouldn't be invalidated by an upload that ran on
+    # lambda B — newly uploaded books would be invisible for up to one TTL.
+    # The DB-backed listing is a single indexed SELECT, cheap enough.
+    current_user_id()  # keep auth-required behavior
     books = [serialize_book(meta) for meta in list_book_meta_payloads()]
     books.sort(key=lambda item: item["uploadedAt"], reverse=True)
-    with _books_cache_lock:
-        _books_cache[uid] = (books, now + BOOKS_CACHE_TTL)
-    return list(books)
+    return books
 
 
 def parse_iso_timestamp(value: str | None) -> datetime | None:

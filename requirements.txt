@@ -10,6 +10,8 @@ nltk
 python-dotenv
 python-multipart
 pypdf
+pymupdf
+pdfplumber
 psycopg[binary]>=3.2,<4
 # sentry-sdk[fastapi]>=2.0,<3  — excluded: Vercel Lambda is at the 245 MB size limit.
 # To enable Sentry on Vercel, add it via Vercel's native Sentry integration instead
