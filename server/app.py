@@ -4436,15 +4436,12 @@ def synthesize_google(
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
-    ffmpeg_exe = pdf_to_audio.find_binary(
-        None,
-        "FFMPEG_EXE",
-        Path("ffmpeg.exe"),
-        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
-    )
     chosen_model = resolve_google_tts_model(model)
     chosen_voice = voice or "Kore"
 
+    # Gemini returns 24 kHz mono 16-bit PCM — already matches CANONICAL_WAV_SAMPLE_RATE,
+    # so we skip ffmpeg normalization/concat and write/concat WAVs in pure Python.
+    # ffmpeg isn't available on Vercel Lambda anyway.
     with tempfile.TemporaryDirectory(prefix="storybook_google_", dir=str(output_path.parent)) as temp_dir:
         wav_dir = chunk_dir or Path(temp_dir)
         wav_dir.mkdir(parents=True, exist_ok=True)
@@ -4468,7 +4465,6 @@ def synthesize_google(
                 encoded_audio = payload["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
                 wav_path = wav_dir / f"chunk_{index:05d}.wav"
                 pcm_to_wav(b64decode(encoded_audio), wav_path)
-                normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
                 wav_paths.append(wav_path)
                 record_job_progress(
                     job_id=job_id,
@@ -4478,12 +4474,13 @@ def synthesize_google(
                 )
 
         raise_if_job_cancelled(job_id)
-        concat_provider_audio_chunks(
-            wav_paths,
-            ffmpeg_exe=ffmpeg_exe,
-            output_path=output_path,
-            output_format=output_format,
-        )
+        if not wav_paths:
+            raise RuntimeError("Gemini produced no audio chunks.")
+        if len(wav_paths) == 1:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(wav_paths[0], output_path)
+        else:
+            _concat_wavs(wav_paths, output_path, silence_seconds=sentence_silence)
 
 
 def synthesize_provider_audio(
