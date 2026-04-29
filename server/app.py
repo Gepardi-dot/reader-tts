@@ -194,7 +194,7 @@ SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json" if SUPABASE_
 BOOK_STORAGE_ENDPOINT = env_value("BOOK_STORAGE_ENDPOINT")
 BOOK_STORAGE_ADDRESSING_STYLE = (env_value("BOOK_STORAGE_ADDRESSING_STYLE") or "virtual").lower()
 LOCAL_DEV_USER_ID = "00000000-0000-0000-0000-000000000001"
-LIVE_AUDIO_CACHE_VERSION = 6
+LIVE_AUDIO_CACHE_VERSION = 7
 PROVIDER_TEST_CACHE_VERSION = 2
 TTSProviderId = Literal["piper", "google", "openai", "kokoro"]
 GEMINI_MAX_RETRY_ATTEMPTS = 3
@@ -3338,20 +3338,40 @@ def prepare_live_synthesis_chunks(text: str, provider: str) -> list[str]:
 
 
 def _chunk_text_for_presynth(text: str, chunk_size: int = 420) -> list[dict[str, Any]]:
-    """Split full book text into word-boundary-aligned chunks for background presynthesis.
+    """Split full book text into sentence-aware grid chunks for background presynthesis.
 
-    Mirrors the word-boundary alignment used by the frontend grid chunker so that
-    cache keys produced here are identical to those the player will send.
+    Prefers ending each chunk at a real sentence boundary (.!? followed by whitespace)
+    within ±40% of the target size, so the TTS engine doesn't add end-of-utterance
+    prosody at chunk seams that fall mid-sentence. Falls back to a word boundary,
+    then to a hard cut. Must stay byte-for-byte identical to the frontend grid
+    chunker (web-next/src/features/reader/ReaderRoute.tsx) so cache keys line up.
     """
     chunks: list[dict[str, Any]] = []
-    pos = 0
     text_len = len(text)
+    min_size = max(1, int(chunk_size * 0.5))
+    max_size = int(chunk_size * 1.4)
+    pos = 0
     while pos < text_len:
         end = min(pos + chunk_size, text_len)
-        if end < text_len and not text[end].isspace():
-            ws = text.rfind(" ", pos, end)
-            if ws > pos:
-                end = ws + 1
+        if end < text_len:
+            search_start = pos + min_size
+            search_end = min(pos + max_size, text_len)
+            boundary = -1
+            i = search_end - 1
+            while i >= search_start:
+                ch = text[i]
+                if ch in ".!?":
+                    nxt = text[i + 1] if i + 1 < text_len else " "
+                    if nxt.isspace():
+                        boundary = i + 2
+                        break
+                i -= 1
+            if 0 < boundary <= text_len:
+                end = boundary
+            elif not text[end].isspace():
+                ws = text.rfind(" ", pos, end)
+                if ws > pos:
+                    end = ws + 1
         chunk_text = text[pos:end]
         if chunk_text.strip():
             chunks.append({"start": pos, "end": end, "text": chunk_text})
@@ -3972,6 +3992,12 @@ def import_book_source(
             except Exception:
                 logger.exception("Failed to roll back book metadata for %s after import error", book_id)
         raise
+
+    try:
+        kickoff_auto_presynth(book_id)
+    except Exception:
+        logger.exception("Auto-presynth kickoff failed for book %s", book_id)
+
     return serialize_book(meta)
 
 
@@ -5047,6 +5073,78 @@ def _run_presynth_job(
         _presynth_jobs[job_id] = {"status": "error", "completed": 0, "total": total, "error": str(exc)}
     finally:
         _current_user_id.reset(tok)
+
+
+# Providers eligible for upload-time auto-presynth. Restricted to ones with a
+# stable default voice and a cache-friendly synthesis path. OpenAI and Piper
+# could be added later but are usually not the user's default for narration.
+_AUTO_PRESYNTH_PROVIDERS: tuple[str, ...] = ("kokoro", "google")
+
+
+def kickoff_auto_presynth(book_id: str) -> None:
+    """Best-effort: warm the live-audio cache for newly imported books.
+
+    Spawns one presynth job per configured provider in `_AUTO_PRESYNTH_PROVIDERS`,
+    using each provider's default voice. Skips providers that already have a
+    completion marker for that voice. On Vercel the daemon thread dies with the
+    request, but any chunks completed before that still land in S3.
+    """
+    try:
+        text = read_book_text(book_id)
+    except Exception:
+        return
+    if not text.strip():
+        return
+
+    chunks = _chunk_text_for_presynth(text, 420)
+    if not chunks:
+        return
+
+    uid = _current_user_id.get()
+    catalog = {p["id"]: p for p in provider_catalog()}
+    audio_dir = book_live_audio_dir(book_id)
+    marker_path = audio_dir / ".presynth-done.json"
+
+    existing_marker: dict[str, Any] | None = None
+    if marker_path.exists():
+        try:
+            existing_marker = read_json(marker_path)
+        except Exception:
+            existing_marker = None
+
+    for provider_id in _AUTO_PRESYNTH_PROVIDERS:
+        prov = catalog.get(provider_id)
+        if not prov or not prov.get("available"):
+            continue
+        voice = prov.get("defaultVoice")
+        if not voice and provider_id == "kokoro":
+            voice = "af_heart"
+        if not voice:
+            continue
+        if (
+            existing_marker
+            and existing_marker.get("provider") == provider_id
+            and existing_marker.get("voice") == voice
+            and existing_marker.get("cacheVersion") == LIVE_AUDIO_CACHE_VERSION
+        ):
+            continue
+
+        request = PresynthesizeRequest(
+            provider=provider_id,
+            voice=voice,
+            narration_style="",
+            length_scale=1.0,
+            sentence_silence=0.2 if provider_id != "kokoro" else 0.38,
+            start_from=0,
+        )
+        job_id = uuid.uuid4().hex
+        _presynth_jobs[job_id] = {"status": "queued", "completed": 0, "total": len(chunks)}
+        threading.Thread(
+            target=_run_presynth_job,
+            args=(job_id, book_id, request, list(chunks), uid),
+            name=f"auto-presynth-{provider_id}-{job_id[:8]}",
+            daemon=True,
+        ).start()
 
 
 class ChatMessage(BaseModel):

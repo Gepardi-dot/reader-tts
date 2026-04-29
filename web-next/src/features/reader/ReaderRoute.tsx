@@ -2903,10 +2903,11 @@ export function ReaderRoute() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveTtsProvider, effectiveTtsVoice, Boolean(payload?.text)])
 
-  // Compute the 420-char presynthesis grid client-side the moment book text is available.
-  // This mirrors the backend _chunk_text_for_presynth() algorithm exactly so grid chunk
-  // start/end positions always match the presynthesis cache keys — even before the
-  // presynthesis POST response arrives.
+  // Compute the presynthesis grid client-side the moment book text is available.
+  // Prefers ending each chunk at a real sentence boundary (.!? + whitespace) within
+  // ±40% of the target so the TTS engine doesn't render end-of-utterance prosody
+  // mid-sentence. Must stay byte-for-byte identical to the backend
+  // _chunk_text_for_presynth() in server/app.py so cache keys match exactly.
   useEffect(() => {
     if (!payload?.text || effectiveTtsProvider !== 'kokoro') {
       presynthGridRef.current = null
@@ -2914,13 +2915,32 @@ export function ReaderRoute() {
     }
     const text = payload.text
     const GRID_SIZE = 420
+    const minSize = Math.max(1, Math.floor(GRID_SIZE * 0.5))
+    const maxSize = Math.floor(GRID_SIZE * 1.4)
     const grid: Array<{ start: number; end: number }> = []
     let pos = 0
     while (pos < text.length) {
       let end = Math.min(pos + GRID_SIZE, text.length)
-      if (end < text.length && !/\s/.test(text[end])) {
-        const wsIdx = text.lastIndexOf(' ', end)
-        if (wsIdx > pos) end = wsIdx + 1
+      if (end < text.length) {
+        const searchStart = pos + minSize
+        const searchEnd = Math.min(pos + maxSize, text.length)
+        let boundary = -1
+        for (let i = searchEnd - 1; i >= searchStart; i -= 1) {
+          const ch = text[i]
+          if (ch === '.' || ch === '!' || ch === '?') {
+            const nxt = i + 1 < text.length ? text[i + 1] : ' '
+            if (/\s/.test(nxt)) {
+              boundary = i + 2
+              break
+            }
+          }
+        }
+        if (boundary > 0 && boundary <= text.length) {
+          end = boundary
+        } else if (!/\s/.test(text[end])) {
+          const wsIdx = text.lastIndexOf(' ', end)
+          if (wsIdx > pos) end = wsIdx + 1
+        }
       }
       if (text.slice(pos, end).trim()) grid.push({ start: pos, end })
       pos = Math.max(end, pos + 1)
