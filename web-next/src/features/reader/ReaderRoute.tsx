@@ -635,7 +635,7 @@ function BottomSheet({ open, onClose, children, bg = '#ffffff' }: {
   return (
     <AnimatePresence>
       {open && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center">
+        <div className="fixed inset-0 z-[65] flex items-end justify-center">
           <motion.div
             className="absolute inset-0 bg-black/30"
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
