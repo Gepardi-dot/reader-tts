@@ -82,3 +82,32 @@ Real TTS testing requires `VITE_USE_MOCKS` unset and live API keys.
 - `threading.Thread` daemon dies on lambda return. Auto-presynth on upload won't complete server-side on Vercel. The frontend's `useEffect` presynth call DOES still work because it returns a `jobId` and the work runs in the same lambda invocation that handles each `live-audio` chunk request — but only chunks the user actually scrolls past will get cached.
 - For true server-side presynth in production: deploy a separate worker (Fly machine, Cloud Run job, or a Vercel Cron that walks pending books).
 - `BOOK_STORAGE_BUCKET` + AWS creds must be set in Vercel **production** env (not just preview/dev). Without S3 the cache is local to one lambda invocation and lost.
+
+## Regression watchpoints (added 2026-04-30)
+
+Real bugs that landed previously when "fixing" things in or near the audio path:
+
+- **In-process caches are broken on Vercel.** Any module-global `dict`/`set` (e.g. the old `_books_cache` in `server/app.py`) only persists within one lambda invocation. On Vercel, each request can hit a fresh container — making just-uploaded books invisible for 30–60 s. **Rule:** if you find or add a process-local cache anywhere on the request path, ask whether it's keyed correctly across instances. Default to no in-process caching unless there's a measured perf reason.
+- **Marker file is single-provider.** `library/<bookId>/live_audio/.presynth-done.json` records ONE provider+voice. If kokoro and google both auto-presynth (`_AUTO_PRESYNTH_PROVIDERS`), whichever finishes last wins the marker. The earlier-finished provider then gets re-run on next visit because the marker no longer matches its provider/voice. Known limitation; if user reports "kokoro re-warming when google was already cached", it's this.
+- **Cache key shape mutations orphan S3.** Any field added/removed in the SHA-1 input for `build_live_audio_payload` must be paired with a `LIVE_AUDIO_CACHE_VERSION` bump (current: 7). Otherwise every existing audio file in S3 is unreachable.
+- **Web Audio AudioContext suspension on iOS.** If you change the unlock path (gesture → `ctx.resume()`), test on iOS Safari — the gapless scheduling silently no-ops if the context is suspended.
+- **Don't `npm run build` the legacy `web-rewrite/` dir.** It exists but isn't deployed; production is `web-next/`. Mistaking the dirs has bricked deploys before.
+
+## Z-index ladder (current, 2026-04-30)
+
+Bumping any one of these without checking the others has caused real bugs. Order from bottom to top:
+
+| z-index | Element | Notes |
+|--------:|---------|-------|
+| `z-[54]` | Audio-follow highlight | `pointer-events-none` |
+| `z-[55]` | Selection overlay | `pointer-events-none` |
+| `z-[60]` | Selection action menu | The vocab/dictionary/play popup |
+| `z-[65]` | BottomSheet (audio + appearance) | Container + backdrop |
+| `z-[70]` | Toast | `pointer-events-none` |
+| `z-[80]` | shadcn `Select` dropdown portal | Set in `components/ui/select.tsx`. MUST stay above sheet so voice/provider dropdowns are clickable inside it. |
+
+If you add a new element with `z-[6x]` or higher, document it here AND verify it doesn't interact with the sheet/dropdown layering.
+
+## Pointers to the worklog
+
+`C:\Users\miroa\storybook-reader\WORKLOG.md` records what was changed in each recent commit and what specifically might regress. Read the most recent entries before editing this area.

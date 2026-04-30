@@ -19,14 +19,16 @@ decisions, and improvement tracking. Update it as the codebase evolves.
 | Node | ✅ Available | 24.x | Vite/React build works fine |
 
 **Vercel deployment:** Vercel auto-deploys on push to `main` via GitHub integration. No manual CLI deploy needed.
-**Deployed app:** `web-rewrite/` — React Router v7, TanStack Query, Zustand, feature-based structure.
-**Legacy app:** `web/` — kept for reference during migration, not deployed.
+**Deployed app:** `web-next/` — React Router v7, TanStack Query, Zustand, feature-based structure.
+**Legacy apps:** `web/` and `web-rewrite/` — kept for reference, NOT deployed. Don't edit them.
+
+**Worklog & skills:** Before editing hot files, read `WORKLOG.md` (running journal of recent changes + regression risks) and the relevant skill in `.claude/skills/` (currently: `seamless-tts/`, `pdf-extraction/`).
 
 ---
 
 ## Architecture Notes
 
-### Backend (`server/app.py` — ~4200 lines)
+### Backend (`server/app.py` — ~5900 lines)
 
 - Single-file FastAPI app, intentionally monolithic for Vercel deployment ease.
 - On Vercel: runs as a serverless function (no persistent workers, no ffmpeg jobs).
@@ -41,7 +43,7 @@ decisions, and improvement tracking. Update it as the codebase evolves.
 - Auth: `APP_SECRET_KEY` env var enables Bearer token auth on all `/api/` and `/library/` routes.
 - Sentry: opt-in via `SENTRY_DSN` (try/except ImportError guard; not in requirements.txt due to Lambda size).
 
-### Frontend — `web-rewrite/` (PRIMARY, deployed)
+### Frontend — `web-next/` (PRIMARY, deployed)
 
 - **Router:** React Router v7 with `createBrowserRouter`
 - **Data:** TanStack Query (staleTime 30s, no window-focus refetch)
@@ -89,14 +91,10 @@ PIPER_EXE / PIPER_ESPEAK_DATA          → local offline TTS
 Run before any commit touching reader, audio, or storage:
 
 ```powershell
-# Primary frontend (web-rewrite)
-npm --prefix web-rewrite run lint
-npm --prefix web-rewrite run build
-npm --prefix web-rewrite run test        # vitest unit tests
-
-# Legacy frontend (web)
-npm --prefix web run lint
-npm --prefix web run build
+# Primary frontend (web-next)
+npm --prefix web-next run lint
+npm --prefix web-next run build
+npm --prefix web-next run test        # vitest unit tests
 
 # Backend syntax
 python -m py_compile server/app.py pdf_to_audio.py
@@ -104,6 +102,11 @@ python -m py_compile server/app.py pdf_to_audio.py
 # Env validation
 python scripts/validate_env.py
 ```
+
+**Manual sanity checks** (do these — type-check passing is NOT enough):
+- Upload a PDF → confirm it appears in the library list immediately (catches in-process-cache regressions on Vercel).
+- Open the reader → press play → audio starts within 1–2 s on a warm Kokoro cache.
+- Open audio settings sheet while audio plays → blue highlight should NOT bleed into the sheet (z-index ladder).
 
 ---
 
@@ -118,15 +121,16 @@ python scripts/validate_env.py
 - **Phase 4** — Audio: MM:SS time, playback rate, mobile-safe AudioDock positioning
 - **Phase 5** — PWA: service worker (Workbox), web manifest, `viewport-fit=cover` for notched phones
 
-### Still in web/ only (not yet migrated)
+### Still in legacy `web/` only (not yet migrated to `web-next/`)
 - Background audio generation job system (full-book narration)
 - Advanced live audio pre-fetching (segment queue, fallback provider)
 - Dictionary lookup UI
 - Chapter navigation
 
 ### Known limitations / Future work
-- [ ] Icons (`icon-192.png`, `icon-512.png`) need to be created and placed in `web-rewrite/public/`
+- [ ] Icons (`icon-192.png`, `icon-512.png`) need to be created and placed in `web-next/public/`
 - [ ] Sentry excluded from requirements.txt due to Vercel 245 MB Lambda limit — use Vercel's native integration instead
-- [ ] Background audio job system not in web-rewrite yet
+- [ ] Background audio job system not in web-next yet
 - [ ] Direct-to-S3 upload flow needs CORS setup on the S3 bucket
 - [ ] Mobile: reader side column hidden below 1100px (highlights/progress not visible on tablet)
+- [ ] Auto-presynth on upload doesn't complete on Vercel (daemon thread killed) — needs separate worker for production guarantee. See `.claude/skills/seamless-tts/`.

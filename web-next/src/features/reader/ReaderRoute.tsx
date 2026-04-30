@@ -11,7 +11,7 @@ import {
 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { api, request, requestBlob } from '@/shared/api/client'
+import { api, request, requestBlob, AuthError } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -768,7 +768,15 @@ function SelectionMenu({
           queryClient.invalidateQueries({ queryKey: ['decks'] })
           queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
           onToast('Saved to Vocabulary ✓')
-        } catch { onToast('Could not save') }
+        } catch (err) {
+          console.error('Vocabulary save failed', err)
+          if (err instanceof AuthError) {
+            onToast('Sign in to save')
+          } else {
+            const msg = err instanceof Error ? err.message : String(err)
+            onToast(`Could not save: ${msg.slice(0, 60)}`)
+          }
+        }
         setBusyAction(null)
         onClose()
         break
