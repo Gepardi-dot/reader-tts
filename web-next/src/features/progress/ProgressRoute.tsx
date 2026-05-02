@@ -71,7 +71,7 @@ export function ProgressRoute() {
     [dashboard],
   )
   const booksInProgress = books.filter((b) => b.readingProgress !== null)
-  const heatmap = useMemo(buildHeatmap, [])
+  const heatmap = useMemo(() => buildHeatmap(), [])
 
   return (
     <div className="min-h-svh bg-background pb-24 md:pb-6">

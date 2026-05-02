@@ -169,13 +169,9 @@ function BookCard({ book, progress, index, onDelete }: {
 }) {
   const pct = readPct(progress)
   const coverBg = COVER_COLORS[index % COVER_COLORS.length]
-  const [coverFailed, setCoverFailed] = useState(false)
+  const [failedCoverUrl, setFailedCoverUrl] = useState<string | null>(null)
   const { data: coverUrl } = useBookCover(book.title, book.fileName)
-  const showCover = coverUrl && !coverFailed
-
-  useEffect(() => {
-    setCoverFailed(false)
-  }, [coverUrl])
+  const showCover = coverUrl && failedCoverUrl !== coverUrl
 
   return (
     <div className="group relative">
@@ -190,7 +186,7 @@ function BookCard({ book, progress, index, onDelete }: {
               src={coverUrl}
               alt={book.title}
               className="w-full h-full object-cover"
-              onError={() => setCoverFailed(true)}
+              onError={() => setFailedCoverUrl(coverUrl)}
             />
           ) : (
             <div

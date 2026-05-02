@@ -3060,7 +3060,6 @@ export function ReaderRoute() {
       pos = Math.max(end, pos + 1)
     }
     presynthGridRef.current = grid
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text, effectiveTtsProvider])
 
   // Kokoro presynthesis — pre-generate the entire book's audio in the background
