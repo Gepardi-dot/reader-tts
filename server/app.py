@@ -4406,8 +4406,10 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         "sentenceSilence": request.sentence_silence,
         "start": request.start,
         "end": request.end,
+        "textHash": hashlib.sha256(canonical_text.encode("utf-8")).hexdigest(),
     }
     digest = hashlib.sha1(json.dumps(cache_key, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    client_cache_key = f"live-audio:v{LIVE_AUDIO_CACHE_VERSION}:{digest}"
     output_dir = book_live_audio_dir(book_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{request.provider}-{digest}.{playback_format}"
@@ -4478,6 +4480,10 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         "model": resolved_model or None,
         "format": playback_format,
         "url": response_url,
+        "cacheKey": client_cache_key,
+        "cacheVersion": LIVE_AUDIO_CACHE_VERSION,
+        "contentType": "audio/wav",
+        "byteLength": output_path.stat().st_size if output_path.exists() else None,
         "start": request.start,
         "end": request.end,
         "pageNumber": request.pageNumber,

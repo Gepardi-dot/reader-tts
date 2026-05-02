@@ -85,7 +85,7 @@ function NoteGrid({ entry, index }: { entry: Entry; index: number }) {
   return (
     <Link
       to={`/book/${entry.book.id}?offset=${entry.start}`}
-      className="rounded-[10px] overflow-hidden border border-[#e9e9e7] bg-white hover:shadow-md transition-shadow block"
+      className="mb-3 inline-block w-full break-inside-avoid rounded-[10px] overflow-hidden border border-[#e9e9e7] bg-white hover:shadow-md transition-shadow"
       style={{ animationDelay: `${index * 35}ms` }}
     >
       <div className="h-1" style={{ background: strip }} />
@@ -298,7 +298,7 @@ export function NotesRoute() {
             </p>
           </div>
         ) : layout === 'grid' ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+          <div className="columns-1 sm:columns-2 gap-3">
             {filtered.map((e, i) => <NoteGrid key={e.id} entry={e} index={i} />)}
           </div>
         ) : layout === 'timeline' ? (

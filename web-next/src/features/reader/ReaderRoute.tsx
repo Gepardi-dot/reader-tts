@@ -12,6 +12,8 @@ import {
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { api, request, requestBlob, AuthError } from '@/shared/api/client'
+import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
+import { getCachedDictionary, lookupStaticDictionary, putCachedDictionary } from '@/shared/storage/dictionaryCache'
 import { cn } from '@/lib/utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -89,6 +91,10 @@ interface LiveAudioResult {
   url: string
   duration?: number | null
   cues?: LiveAudioCue[]
+  cacheKey?: string
+  cacheVersion?: number
+  contentType?: string
+  byteLength?: number | null
 }
 
 interface ProviderTestResult {
@@ -232,6 +238,44 @@ function requestLiveAudio(bookId: string, payload: LiveAudioPayload) {
 
   liveAudioMemoryCache.set(key, { expiresAt: now + LIVE_AUDIO_MEMORY_TTL_MS, promise })
   return promise
+}
+
+function isCacheableLiveAudio(result: LiveAudioResult): result is LiveAudioResult & { cacheKey: string; cacheVersion: number } {
+  return Boolean(result.cacheKey && typeof result.cacheVersion === 'number')
+}
+
+async function fetchAndCacheLiveAudioBlob(result: LiveAudioResult, signal?: AbortSignal) {
+  const blob = needsAuthenticatedAudioFetch(result.url)
+    ? await requestBlob(result.url, { signal })
+    : await fetch(result.url, { signal }).then((response) => {
+      if (!response.ok) throw new Error(`Audio fetch failed (${response.status})`)
+      return response.blob()
+    })
+
+  if (isCacheableLiveAudio(result)) {
+    await putCachedAudio({
+      cacheKey: result.cacheKey,
+      cacheVersion: result.cacheVersion,
+      blob,
+      cues: result.cues ?? [],
+      duration: result.duration ?? null,
+      contentType: result.contentType ?? (blob.type || 'audio/wav'),
+      byteLength: result.byteLength ?? blob.size,
+    }).catch(() => {})
+  }
+
+  return blob
+}
+
+async function loadLiveAudioBlob(result: LiveAudioResult, signal?: AbortSignal) {
+  const cachedAudio = isCacheableLiveAudio(result)
+    ? await getCachedAudio(result.cacheKey, result.cacheVersion).catch(() => null)
+    : null
+
+  return {
+    blob: cachedAudio?.blob ?? await fetchAndCacheLiveAudioBlob(result, signal),
+    cues: (cachedAudio?.cues ?? result.cues ?? []) as LiveAudioCue[],
+  }
 }
 
 function audioSliceStart(textLength: number, scrollPct: number) {
@@ -940,6 +984,25 @@ function fetchOfflineDictionary(word: string) {
   return api.get<DictResponse>(`/api/dictionary/lookup?term=${encodeURIComponent(normalizeLookupWord(word))}`)
 }
 
+function dictionaryHasDefinitions(payload: DictResponse | null) {
+  return Boolean(payload?.entries?.some((entry) => (entry.definitions?.length ?? 0) > 0))
+}
+
+async function fetchClientDictionary(word: string) {
+  const normalized = normalizeLookupWord(word)
+  const seeded = await lookupStaticDictionary(normalized)
+  if (dictionaryHasDefinitions(seeded)) return seeded as DictResponse
+
+  const learned = await getCachedDictionary(normalized).catch(() => null)
+  if (dictionaryHasDefinitions(learned)) return learned as DictResponse
+
+  const backend = await fetchOfflineDictionary(normalized)
+  if (dictionaryHasDefinitions(backend)) {
+    await putCachedDictionary(normalized, backend).catch(() => {})
+  }
+  return backend
+}
+
 // ── Dictionary Panel ──────────────────────────────────────────────────────────
 
 function DictionaryPanel({ word: initialWord, onClose, colors }: {
@@ -954,12 +1017,11 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
   // 1. Offline dictionary (backend)
   const { data: offlineData, isLoading: offlineLoading } = useQuery({
     queryKey: dictionaryQueryKey(lookupWord),
-    queryFn: () => fetchOfflineDictionary(lookupWord),
+    queryFn: () => fetchClientDictionary(lookupWord),
     staleTime: DICTIONARY_STALE_TIME_MS,
   })
 
-  const hasOfflineDefs = !offlineLoading && (offlineData?.entries ?? [])
-    .some(e => (e.definitions?.length ?? 0) > 0)
+  const hasOfflineDefs = !offlineLoading && dictionaryHasDefinitions(offlineData ?? null)
 
   // 2. Free Dictionary API fallback — fires only when offline dict has no definitions
   const { data: freeRaw, isLoading: freeLoading } = useQuery({
@@ -3078,7 +3140,7 @@ export function ReaderRoute() {
       ).slice(0, PREFETCH_CHUNK_LIMIT)
       if (chunkDefs.length === 0) return
 
-      // Prefetch chunks in parallel — by the time the user hits play they're all cached
+      // Prefetch chunks in parallel - by the time the user hits play they're persisted locally.
       void Promise.all(chunkDefs.map((chunk) =>
         requestLiveAudio(bookId, {
           provider: effectiveTtsProvider,
@@ -3092,7 +3154,10 @@ export function ReaderRoute() {
           start: chunk.start,
           end: chunk.end,
           text: chunk.text,
-        }).catch(() => null)
+        })
+          .then((result) => loadLiveAudioBlob(result))
+          .then(() => null)
+          .catch(() => null)
       ))
     }, 1200)  // 1.2 s after last scroll event — quicker warm-up
 
@@ -3500,7 +3565,7 @@ export function ReaderRoute() {
     const fetchPromise = (async () => {
       try {
         const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
-        const { url, cues } = await requestLiveAudio(bookId!, {
+        const liveAudio = await requestLiveAudio(bookId!, {
           provider: effectiveTtsProvider,
           voice: effectiveTtsVoice,
           model: null,
@@ -3515,10 +3580,8 @@ export function ReaderRoute() {
         })
         if (signal.aborted) return null
 
-        // Download bytes once, create blob URL + decode for Web Audio gapless playback
-        const blob = needsAuthenticatedAudioFetch(url)
-          ? await requestBlob(url, { signal })
-          : await fetch(url, { signal }).then(r => r.blob())
+        // Download bytes once, persist them for reloads, then create a blob URL + decode for gapless playback.
+        const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
         if (signal.aborted) return null
 
         const blobUrl = URL.createObjectURL(blob)
@@ -3533,7 +3596,12 @@ export function ReaderRoute() {
         } catch { /* decode failure: fallback to HTMLAudio */ }
 
         if (signal.aborted) return null
-        updateWordAudioChunk(idx, { status: 'ready', url: blobUrl, buffer, cues: cues ?? [] })
+        updateWordAudioChunk(idx, {
+          status: 'ready',
+          url: blobUrl,
+          buffer,
+          cues,
+        })
         prefetchWordAudioAhead(wordAudioCurIdxRef.current, wordAudioChunksRef.current, signal)
         return blobUrl
       } catch (error) {

@@ -13,6 +13,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { api } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
+import { findBookCover } from './coverLookup'
 
 interface Book {
   id: string
@@ -29,35 +30,13 @@ interface Book {
 
 interface ReadingProgress { pageNumber: number; totalPages: number; updatedAt?: string }
 
-// Warm cover tints cycling across books (fallback when no cover image found)
+// Warm cover tints cycling across books (fallback when no internet match is found)
 const COVER_COLORS = ['#fef6ee', '#eef4fb', '#f0efe9', '#f8eef0']
 
-function cleanTitleForSearch(raw: string): string {
-  return raw
-    .replace(/\[[\d\s]*\]/g, '')   // remove [1], [2], etc.
-    .replace(/_+/g, ' ')            // underscores → spaces
-    .replace(/\s*-\s*/g, ' ')       // " - " → space
-    .replace(/^\d{4}\s*/g, '')      // strip leading year (e.g. "1908kybalion")
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function useBookCover(title: string) {
+function useBookCover(title: string, fileName?: string) {
   return useQuery({
-    queryKey: ['book-cover', title],
-    queryFn: async () => {
-      const q = cleanTitleForSearch(title)
-      if (q.length < 2) return null
-      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=1&fields=items(volumeInfo/imageLinks)`
-      const res = await fetch(url)
-      if (!res.ok) return null
-      const data = await res.json() as { items?: { volumeInfo?: { imageLinks?: { thumbnail?: string; smallThumbnail?: string } } }[] }
-      const links = data?.items?.[0]?.volumeInfo?.imageLinks
-      const raw = links?.thumbnail ?? links?.smallThumbnail ?? null
-      if (!raw) return null
-      // Upgrade to https, remove curl effect, request a slightly larger size
-      return raw.replace('http://', 'https://').replace('&edge=curl', '').replace('zoom=1', 'zoom=2')
-    },
+    queryKey: ['book-cover', title, fileName],
+    queryFn: () => findBookCover(title, fileName),
     staleTime: Infinity,
     gcTime: 24 * 60 * 60 * 1000,
     retry: false,
@@ -190,7 +169,13 @@ function BookCard({ book, progress, index, onDelete }: {
 }) {
   const pct = readPct(progress)
   const coverBg = COVER_COLORS[index % COVER_COLORS.length]
-  const { data: coverUrl } = useBookCover(book.title)
+  const [coverFailed, setCoverFailed] = useState(false)
+  const { data: coverUrl } = useBookCover(book.title, book.fileName)
+  const showCover = coverUrl && !coverFailed
+
+  useEffect(() => {
+    setCoverFailed(false)
+  }, [coverUrl])
 
   return (
     <div className="group relative">
@@ -200,11 +185,12 @@ function BookCard({ book, progress, index, onDelete }: {
       >
         {/* Cover */}
         <div className="aspect-[2/3] relative overflow-hidden">
-          {coverUrl ? (
+          {showCover ? (
             <img
               src={coverUrl}
               alt={book.title}
               className="w-full h-full object-cover"
+              onError={() => setCoverFailed(true)}
             />
           ) : (
             <div
