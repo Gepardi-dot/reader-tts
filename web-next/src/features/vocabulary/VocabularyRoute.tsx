@@ -1,13 +1,25 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Layers } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Layers, LayoutGrid, AlignLeft, ChevronDown, ChevronUp } from 'lucide-react'
 import { api } from '@/shared/api/client'
+
+type CardState = 'new' | 'learning' | 'review' | 'relearning'
+type Layout = 'grid' | 'list'
+type StageFilter = 'all' | 'new' | 'learning' | 'review'
 
 interface DeckSummary {
   id: string
   title: string
   dueNow: number
+}
+
+interface VocabNoteCard {
+  id: string
+  state: CardState
+  dueAt: string
+  reps: number
+  scheduledDays: number
 }
 
 interface VocabNote {
@@ -17,14 +29,212 @@ interface VocabNote {
   extra: string | null
   explanation: string | null
   topic: string | null
+  sourceBookTitle: string | null
+  cards: VocabNoteCard[]
 }
 
 interface DeckDashboard {
   deck: DeckSummary
   notes: VocabNote[]
+  analytics?: {
+    rollingRetention7d?: number | null
+  }
 }
 
+const STAGE_STYLE: Record<CardState, { pill: string; text: string; ring: string }> = {
+  new:        { pill: '#eff6ff', text: '#2563eb', ring: '#2563eb' },
+  learning:   { pill: '#fffbeb', text: '#d97706', ring: '#f59e0b' },
+  review:     { pill: '#f0fdf4', text: '#16a34a', ring: '#16a34a' },
+  relearning: { pill: '#fff1f2', text: '#dc2626', ring: '#f43f5e' },
+}
+
+function ringFill(state: CardState, due: boolean): number {
+  if (state === 'new') return -1           // -1 = no ring
+  if (state === 'learning' || state === 'relearning') return 0.65
+  if (state === 'review') return due ? 0.92 : 0   // outline only when not due
+  return 0
+}
+
+function noteState(note: VocabNote): CardState {
+  const card = note.cards?.[0]
+  if (!card) return 'new'
+  const s = card.state
+  return s === 'relearning' ? 'learning' : s
+}
+
+function isDue(note: VocabNote): boolean {
+  const card = note.cards?.[0]
+  if (!card) return false
+  return new Date(card.dueAt) <= new Date()
+}
+
+function StageRing({ state, due }: { state: CardState; due: boolean }) {
+  const fill = ringFill(state, due)
+  const color = STAGE_STYLE[state].ring
+
+  // NEW state: no ring, just DUE badge if due
+  if (fill === -1) {
+    return due ? (
+      <span style={{ fontSize: 10, fontWeight: 800, color: '#2563eb', letterSpacing: '0.06em', marginTop: 2, flexShrink: 0 }}>DUE</span>
+    ) : null
+  }
+
+  const r = 18
+  const circ = 2 * Math.PI * r
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+      <svg width={44} height={44} style={{ transform: 'rotate(-90deg)' }}>
+        <circle cx={22} cy={22} r={r} fill="none" stroke="#e9e9e7" strokeWidth={3.5} />
+        {fill > 0 && (
+          <circle
+            cx={22} cy={22} r={r}
+            fill="none"
+            stroke={color}
+            strokeWidth={3.5}
+            strokeDasharray={`${fill * circ} ${circ}`}
+            strokeLinecap="round"
+          />
+        )}
+      </svg>
+      {due && (
+        <span style={{ fontSize: 10, fontWeight: 800, color: '#2563eb', letterSpacing: '0.06em', lineHeight: 1 }}>DUE</span>
+      )}
+    </div>
+  )
+}
+
+function StagePill({ state }: { state: CardState }) {
+  const s = STAGE_STYLE[state]
+  const label = state === 'relearning' ? 'LEARNING' : state.toUpperCase()
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center',
+      padding: '4px 11px', borderRadius: 99,
+      background: s.pill, color: s.text,
+      fontSize: 10.5, fontWeight: 700, letterSpacing: '0.06em',
+      border: `1.5px solid ${s.text}44`,
+    }}>
+      {label}
+    </span>
+  )
+}
+
+function WordCard({ note }: { note: VocabNote }) {
+  const def = note.back ?? note.explanation ?? note.extra
+  const phonetic = note.extra && note.extra.startsWith('/') ? note.extra : null
+  const state = noteState(note)
+  const due = isDue(note)
+  const book = note.sourceBookTitle ?? note.topic ?? null
+
+  return (
+    <div style={{
+      background: '#fff',
+      border: '1.5px solid #bfdbfe',
+      borderRadius: 14,
+      padding: '16px 16px 14px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+      cursor: 'default',
+      transition: 'box-shadow 0.15s',
+    }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = '0 2px 12px rgba(37,99,235,0.08)' }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = 'none' }}
+    >
+      {/* Top row: word + ring */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{ minWidth: 0 }}>
+          <p style={{ fontSize: 18, fontWeight: 700, color: '#1a1a2e', lineHeight: 1.25, margin: 0, letterSpacing: '-0.01em' }}>
+            {note.front}
+          </p>
+          {phonetic && (
+            <p style={{ fontSize: 12, color: '#6b7280', fontFamily: '"SF Mono", "JetBrains Mono", Consolas, monospace', marginTop: 4, lineHeight: 1 }}>{phonetic}</p>
+          )}
+        </div>
+        <StageRing state={state} due={due} />
+      </div>
+
+      {/* Definition */}
+      {def && (
+        <p style={{ fontSize: 13.5, color: '#374151', lineHeight: 1.6, margin: 0 }}
+           className="line-clamp-3"
+        >
+          {def}
+        </p>
+      )}
+
+      {/* Bottom row: stage pill + book */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 0 }}>
+        <StagePill state={state} />
+        {book && (
+          <span style={{ fontSize: 12, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 140, textAlign: 'right' }}>
+            {book}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function WordRow({
+  note,
+  expanded,
+  onToggle,
+  isLast,
+}: {
+  note: VocabNote
+  expanded: boolean
+  onToggle: () => void
+  isLast: boolean
+}) {
+  const def = note.back ?? note.explanation ?? note.extra
+  const state = noteState(note)
+  return (
+    <div
+      style={{ borderBottom: isLast ? 'none' : '1px solid #e9e9e7', background: expanded ? '#fafaf9' : '#fff' }}
+    >
+      <button
+        onClick={onToggle}
+        className="w-full px-4 py-3 flex items-center gap-2.5 cursor-pointer border-0 bg-transparent text-left"
+      >
+        <span style={{ fontFamily: 'Lora, Georgia, serif', fontSize: 14, fontWeight: 600, color: '#37352f', minWidth: 130 }}>
+          {note.front}
+        </span>
+        <StagePill state={state} />
+        <div className="ml-auto flex items-center gap-2 shrink-0">
+          {note.sourceBookTitle && (
+            <span className="text-[11px] text-[#9b9a97] max-w-[140px] truncate hidden sm:block">{note.sourceBookTitle}</span>
+          )}
+          {expanded ? <ChevronUp size={13} className="text-muted-foreground" /> : <ChevronDown size={13} className="text-muted-foreground" />}
+        </div>
+      </button>
+      {expanded && (
+        <div className="px-4 pb-3 space-y-1">
+          {def && <p className="text-[13px] text-[#9b9a97] leading-[1.6]">{def}</p>}
+          {note.topic && <p className="text-[11px] text-[#9b9a97]/60">{note.topic}</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SkeletonCard() {
+  return <div className="h-36 rounded-[14px] bg-muted animate-pulse" />
+}
+
+const STAGE_FILTERS: { key: StageFilter; label: string }[] = [
+  { key: 'all',      label: 'All' },
+  { key: 'new',      label: 'New' },
+  { key: 'learning', label: 'Learning' },
+  { key: 'review',   label: 'Review' },
+]
+
 export function VocabularyRoute() {
+  const [search, setSearch] = useState('')
+  const [layout, setLayout] = useState<Layout>('grid')
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [stageFilter, setStageFilter] = useState<StageFilter>('all')
+
   const { data: decks = [], isLoading: decksLoading } = useQuery({
     queryKey: ['decks'],
     queryFn: async () => {
@@ -48,67 +258,140 @@ export function VocabularyRoute() {
     (n) => n.front.trim().split(/\s+/).length === 1,
   )
 
+  const retention = dashboard?.analytics?.rollingRetention7d
+  const retentionLabel = retention != null ? `${Math.round(retention * 100)}%` : '—'
+
+  const filtered = words.filter((w) => {
+    if (search && !w.front.toLowerCase().includes(search.toLowerCase())) return false
+    if (stageFilter !== 'all') {
+      const s = noteState(w)
+      if (stageFilter === 'learning' && s !== 'learning') return false
+      if (stageFilter === 'new' && s !== 'new') return false
+      if (stageFilter === 'review' && s !== 'review') return false
+    }
+    return true
+  })
+
   return (
     <div className="min-h-svh bg-background pb-24 md:pb-6">
-      {/* Header */}
-      <div className="px-4 pt-6 pb-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Vocabulary</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            {deck ? `${deck.dueNow} due · ${words.length} words` : 'Saved words from reading'}
-          </p>
-        </div>
-        {deck && (
-          <Link to="/studio">
-            <Button size="sm" disabled={deck.dueNow === 0}>
-              Practice
-            </Button>
-          </Link>
-        )}
-      </div>
+      <div className="px-4 md:px-8 pt-7 pb-5" style={{ maxWidth: 860 }}>
 
-      {/* Word grid */}
-      {isLoading ? (
-        <div className="px-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-          {Array.from({ length: 12 }).map((_, i) => (
-            <div key={i} className="h-24 rounded-xl bg-muted animate-pulse" />
-          ))}
-        </div>
-      ) : words.length === 0 ? (
-        <div className="flex flex-col items-center justify-center px-6 py-24 text-center">
-          <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
-            <Layers size={28} className="text-muted-foreground/50" />
+        {/* Header */}
+        <div className="flex items-start justify-between mb-5">
+          <div>
+            <h1 className="text-[22px] font-semibold text-foreground tracking-tight">Vocabulary</h1>
+            <p className="text-[13px] text-muted-foreground mt-1">
+              {deck ? `${words.length} words saved · ${deck.dueNow} due for review` : 'Saved words from reading'}
+            </p>
           </div>
-          <p className="font-medium text-foreground mb-1">No words yet</p>
-          <p className="text-sm text-muted-foreground max-w-xs">
-            Select a word while reading and tap <strong>Vocabulary</strong> to save it here.
-          </p>
+          {deck && deck.dueNow > 0 && (
+            <Link to="/studio">
+              <button className="flex items-center gap-2 h-10 px-5 rounded-xl bg-primary text-primary-foreground text-[13.5px] font-semibold cursor-pointer border-0 hover:opacity-90 transition-opacity shadow-sm">
+                Practice · {deck.dueNow} due
+              </button>
+            </Link>
+          )}
         </div>
-      ) : (
-        <div className="px-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-          {words.map((word) => (
-            <div
-              key={word.id}
-              className="rounded-xl border border-border bg-card p-3 flex flex-col gap-1.5 min-h-[80px]"
-            >
-              <p
-                className="text-sm font-semibold text-foreground leading-snug"
-                style={{ fontFamily: 'Lora, Georgia, serif' }}
-              >
-                {word.front}
-              </p>
-              {(word.back ?? word.explanation ?? word.extra) && (
-                <p className="text-xs text-muted-foreground leading-snug line-clamp-3">
-                  {word.back ?? word.explanation ?? word.extra}
-                </p>
-              )}
-              {word.topic && (
-                <p className="text-[10px] text-muted-foreground/50 mt-auto pt-1">{word.topic}</p>
-              )}
+
+        {/* Stats row */}
+        <div className="grid grid-cols-3 gap-3 mb-5">
+          {[
+            { label: 'Total words',   value: words.length || '—' },
+            { label: 'Avg retention', value: retentionLabel },
+            { label: 'Due for review', value: deck?.dueNow ?? '—' },
+          ].map((s, i) => (
+            <div key={i} className="p-4 rounded-[12px] border border-border bg-white">
+              <div className="text-[22px] font-bold text-foreground mb-0.5">{s.value}</div>
+              <div className="text-[11.5px] text-muted-foreground">{s.label}</div>
             </div>
           ))}
         </div>
-      )}
+
+        {/* Search + stage filter + layout toggle */}
+        <div className="flex flex-col gap-2.5 mb-5">
+          <div className="relative">
+            <svg
+              className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+              style={{ color: 'var(--muted-foreground)' }}
+              width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+            >
+              <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search words..."
+              className="w-full h-[38px] pl-9 pr-3 border border-border rounded-xl text-[13px] outline-none focus:border-primary transition-colors bg-white"
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="flex gap-1.5 flex-1">
+              {STAGE_FILTERS.map(({ key, label }) => (
+                <button
+                  key={key}
+                  onClick={() => setStageFilter(key)}
+                  className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-medium cursor-pointer border-0 transition-colors"
+                  style={{
+                    background: stageFilter === key ? '#37352f' : '#fff',
+                    color: stageFilter === key ? '#fff' : '#9b9a97',
+                    border: `1px solid ${stageFilter === key ? '#37352f' : '#e9e9e7'}`,
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-0.5 shrink-0">
+              {([['grid', LayoutGrid], ['list', AlignLeft]] as [Layout, typeof LayoutGrid][]).map(([k, Icon]) => (
+                <button
+                  key={k}
+                  onClick={() => setLayout(k)}
+                  className="w-8 h-8 rounded flex items-center justify-center border-0 cursor-pointer transition-colors"
+                  style={{ background: layout === k ? '#efefef' : 'transparent' }}
+                >
+                  <Icon size={15} style={{ color: layout === k ? 'var(--foreground)' : 'var(--muted-foreground)' }} />
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Content */}
+        {isLoading ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)}
+          </div>
+        ) : words.length === 0 ? (
+          <div className="flex flex-col items-center justify-center px-6 py-24 text-center">
+            <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
+              <Layers size={28} className="text-muted-foreground/50" />
+            </div>
+            <p className="font-medium text-foreground mb-1">No words yet</p>
+            <p className="text-[13px] text-muted-foreground max-w-xs">
+              Select a word while reading and tap <strong>Vocabulary</strong> to save it here.
+            </p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <p className="text-[13px] text-muted-foreground py-8 text-center">No words match your filters.</p>
+        ) : layout === 'grid' ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+            {filtered.map((w) => <WordCard key={w.id} note={w} />)}
+          </div>
+        ) : (
+          <div className="border border-[#e9e9e7] rounded-[12px] overflow-hidden bg-white">
+            {filtered.map((w, i) => (
+              <WordRow
+                key={w.id}
+                note={w}
+                expanded={expanded === w.id}
+                onToggle={() => setExpanded(expanded === w.id ? null : w.id)}
+                isLast={i === filtered.length - 1}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

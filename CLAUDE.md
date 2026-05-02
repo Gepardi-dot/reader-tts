@@ -39,7 +39,7 @@ decisions, and improvement tracking. Update it as the codebase evolves.
   - Tables: `reader_progress`, `audio_progress` — versioned by `schema_migrations` table.
 - Dictionary is multi-tier: OpenWordNet (offline) → Samsung ADB bridge → local SQLite cache.
 - Job system (audio generation) uses JSON files under `library/<bookId>/jobs/`.
-- Live audio (per-page TTS): `google` (Gemini Flash TTS), `polly` (AWS), `qwen` (DashScope), `openai`, `piper`.
+- Live audio (per-page TTS): `google` (Gemini Flash TTS), `kokoro` (Fly.io, free), `qwen` (DashScope), `polly` (AWS).
 - Auth: `APP_SECRET_KEY` env var enables Bearer token auth on all `/api/` and `/library/` routes.
 - Sentry: opt-in via `SENTRY_DSN` (try/except ImportError guard; not in requirements.txt due to Lambda size).
 
@@ -77,11 +77,10 @@ SUPABASE_DB_URL / SUPABASE_POOLER_URL  → DB sync
 GEMINI_API_KEY                         → Gemini TTS (default live provider)
 DASHSCOPE_API_KEY                      → Qwen TTS
 POLLY_REGION / AWS_ACCESS_KEY_ID       → AWS Polly
-OPENAI_API_KEY                         → OpenAI TTS
+OPENAI_API_KEY                         → Context AI (vocabulary/dictionary features — NOT TTS)
 BOOK_STORAGE_BUCKET                    → S3 bucket for hosted uploads
 APP_SECRET_KEY                         → Bearer token auth (all /api/ and /library/ routes)
 SENTRY_DSN                             → Backend error tracking (install sentry-sdk manually)
-PIPER_EXE / PIPER_ESPEAK_DATA          → local offline TTS
 ```
 
 ---
@@ -110,18 +109,11 @@ python scripts/validate_env.py
 
 ---
 
-## Migration Status (2026-04-17)
+## Migration Status (complete as of 2026-04-17)
 
-`web/` → `web-rewrite/` migration is in progress. `web-rewrite/` is now the deployed app.
+`web-next/` is the deployed app. `web/` and `web-rewrite/` are legacy — do not edit.
 
-### Completed phases
-- **Phase 1** — Foundation: auth, Vercel build, CI switched to web-rewrite
-- **Phase 2** — Reader: keyboard nav, appearance controls, proper paragraphs, highlights
-- **Phase 3** — Library: deletion, search, progress badges, mobile-first AppShell (bottom nav)
-- **Phase 4** — Audio: MM:SS time, playback rate, mobile-safe AudioDock positioning
-- **Phase 5** — PWA: service worker (Workbox), web manifest, `viewport-fit=cover` for notched phones
-
-### Still in legacy `web/` only (not yet migrated to `web-next/`)
+### Features not yet in `web-next/`
 - Background audio generation job system (full-book narration)
 - Advanced live audio pre-fetching (segment queue, fallback provider)
 - Dictionary lookup UI

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { BookOpen, Check, Circle, Sparkles, Volume2, X } from 'lucide-react'
+import { BookOpen, Check, Circle, Sparkles, X } from 'lucide-react'
 import { api } from '@/shared/api/client'
 import { isVocabWord, isPlaceholderDefinition } from './vocabUtils'
 
@@ -24,7 +24,7 @@ const C = {
   blue: '#2563eb',
   orange: '#f47b24',
 }
-const GRAD = 'linear-gradient(145deg, #cdd0e8 0%, #ddd0c4 45%, #ebb898 100%)'
+const GRAD = '#faf7f2'
 const CARD_SHADOW = '0 2px 16px rgba(0,0,0,0.07), 0 1px 4px rgba(0,0,0,0.05)'
 
 const FONT = {
@@ -427,34 +427,35 @@ function Btn({
 }
 
 function AudioBtn({ text, size = 32 }: { text: string; size?: number }) {
+  const [speaking, setSpeaking] = useState(false)
+  function go(e: React.MouseEvent) {
+    e.stopPropagation()
+    speak(text)
+    setSpeaking(true)
+    setTimeout(() => setSpeaking(false), 2200)
+  }
   return (
     <button
-      onClick={() => speak(text)}
+      onClick={go}
       aria-label={`Pronounce ${text}`}
       style={{
-        width: size,
-        height: size,
-        borderRadius: '50%',
-        background: `${C.gold}18`,
-        border: `1px solid ${C.gold}30`,
-        color: C.gold,
+        width: size, height: size, borderRadius: '50%',
+        background: speaking ? C.blue : `${C.blue}15`,
+        border: `1.5px solid ${speaking ? C.blue : `${C.blue}44`}`,
+        color: speaking ? '#fff' : C.blue,
         cursor: 'pointer',
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        transition: 'all 0.15s',
-        flex: '0 0 auto',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        transition: 'all 0.2s', flex: '0 0 auto',
+        boxShadow: speaking ? `0 0 0 4px ${C.blue}22` : 'none',
       }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.background = C.gold
-        e.currentTarget.style.color = '#fff'
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = `${C.gold}18`
-        e.currentTarget.style.color = C.gold
-      }}
+      onMouseEnter={(e) => { if (!speaking) { e.currentTarget.style.background = `${C.blue}28` } }}
+      onMouseLeave={(e) => { if (!speaking) { e.currentTarget.style.background = `${C.blue}15` } }}
     >
-      <Volume2 size={Math.max(14, size * 0.46)} strokeWidth={2} />
+      <svg width={Math.round(size * 0.44)} height={Math.round(size * 0.44)} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+        <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+        <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+      </svg>
     </button>
   )
 }
@@ -737,33 +738,54 @@ function ExerciseRecall({ word, onComplete }: { word: PracticeWord; onComplete: 
 
   return (
     <div>
-      <ExerciseHeader title="Active Recall" subtitle="Recall before revealing" word={word.word} />
-      <div style={{ background: 'rgba(0,0,0,0.03)', borderRadius: 16, padding: 20, marginTop: 14, marginBottom: 14, border: '1px solid rgba(0,0,0,0.07)' }}>
-        <div style={{ fontFamily: FONT.display, fontSize: 24, fontWeight: 700, color: C.cream, lineHeight: 1.3, letterSpacing: '-0.01em' }}>{word.word}</div>
-        {word.phonetic && <div style={{ color: C.muted, fontSize: 13, fontFamily: FONT.mono, marginTop: 4 }}>{word.phonetic}</div>}
-        {!revealed && <div style={{ color: C.muted, fontSize: 13, marginTop: 16, fontStyle: 'italic' }}>Recall the definition silently, then reveal.</div>}
-        {revealed && (
-          <div style={{ marginTop: 14, animation: 'studioFadeIn 0.3s ease' }}>
-            <div style={{ color: C.gold, fontSize: 16, fontFamily: FONT.display, fontStyle: 'italic', marginBottom: 12 }}>{word.definition}</div>
-            <div style={{ background: 'rgba(0,0,0,0.04)', borderLeft: `3px solid ${C.gold}`, borderRadius: '0 10px 10px 0', padding: '10px 14px' }}>
+      <ExerciseHeader title="Active Recall" />
+      <p style={{ color: '#4a4a46', fontSize: 14, lineHeight: 1.55, margin: '0 0 16px' }}>
+        Recall the definition silently, then reveal and rate yourself.
+      </p>
+
+      {!revealed ? (
+        <>
+          <div
+            onClick={() => setRevealed(true)}
+            style={{
+              background: '#eff6ff',
+              border: '1.5px solid #93c5fd',
+              borderRadius: 14,
+              padding: '34px 20px',
+              textAlign: 'center',
+              cursor: 'pointer',
+              marginBottom: 14,
+              transition: 'background 0.15s',
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#dbeafe' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#eff6ff' }}
+          >
+            <div style={{ color: '#93c5fd', fontSize: 20, letterSpacing: 10, marginBottom: 10 }}>— — — — — —</div>
+            <div style={{ color: '#2563eb', fontSize: 13.5, fontWeight: 600, fontFamily: FONT.ui }}>Click to reveal</div>
+          </div>
+          <Btn onClick={() => setRevealed(true)} style={{ width: '100%', background: C.blue }}>Reveal definition</Btn>
+        </>
+      ) : (
+        <>
+          <div style={{ borderRadius: 14, overflow: 'hidden', marginBottom: 14, animation: 'studioFadeIn 0.3s ease', border: '1px solid rgba(0,0,0,0.07)' }}>
+            <div style={{ padding: '14px 16px', background: `${C.gold}10` }}>
+              <div style={{ color: C.gold, fontSize: 16, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.55 }}>{word.definition}</div>
+            </div>
+            <div style={{ background: 'rgba(0,0,0,0.03)', borderLeft: `3px solid ${C.gold}`, padding: '10px 14px' }}>
               <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{word.book}</div>
               <div style={{ color: C.text, fontSize: 14, lineHeight: 1.6, fontFamily: FONT.display, fontStyle: 'italic' }}>"{word.sentence}"</div>
             </div>
             {word.mnemonic && (
-              <div style={{ marginTop: 10, padding: '10px 12px', background: `${C.violet}12`, borderRadius: 10, border: `1px solid ${C.violet}33` }}>
-                <div style={{ color: C.violet, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 3, fontFamily: FONT.ui }}>Memory hook</div>
-                <div style={{ color: C.text, fontSize: 13, fontFamily: FONT.ui, lineHeight: 1.5 }}>{word.mnemonic}</div>
+              <div style={{ padding: '10px 14px', background: `${C.violet}10`, borderTop: `1px solid ${C.violet}22` }}>
+                <div style={{ color: C.violet, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 3 }}>Memory hook</div>
+                <div style={{ color: C.text, fontSize: 13, lineHeight: 1.5 }}>{word.mnemonic}</div>
               </div>
             )}
           </div>
-        )}
-      </div>
 
-      {!revealed ? (
-        <Btn onClick={() => setRevealed(true)} style={{ width: '100%' }}>Reveal Answer</Btn>
-      ) : (
-        <>
-          <div style={{ color: C.mutedHi, fontSize: 12, textAlign: 'center', marginBottom: 10, fontFamily: FONT.ui, letterSpacing: '0.04em' }}>HOW WELL DID YOU RECALL IT?</div>
+          <div style={{ color: C.mutedHi, fontSize: 11.5, textAlign: 'center', marginBottom: 10, fontFamily: FONT.ui, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+            How well did you recall it?
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 6 }}>
             {ratings.map((r) => (
               <button
@@ -780,7 +802,6 @@ function ExerciseRecall({ word, onComplete }: { word: PracticeWord; onComplete: 
           </div>
         </>
       )}
-
     </div>
   )
 }
@@ -1147,85 +1168,175 @@ function PracticeScreen({
   onComplete: (result: StepCompletePayload) => void
   busy: boolean
 }) {
+  const [xpAnim, setXpAnim] = useState<string | null>(null)
+
+  function handleComplete(payload: StepCompletePayload) {
+    if (payload.correct) {
+      const xp = payload.rating === 'easy' ? '+20 xp' : payload.rating === 'hard' ? '+10 xp' : '+15 xp'
+      setXpAnim(xp)
+      setTimeout(() => setXpAnim(null), 1400)
+    }
+    onComplete(payload)
+  }
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, opacity: busy ? 0.72 : 1, pointerEvents: busy ? 'none' : 'auto' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div style={{ flex: 1 }}><ProgressBar progress={stepIndex / Math.max(1, totalSteps)} height={6} /></div>
-        <span style={{ color: C.muted, fontSize: 12, fontFamily: FONT.mono, minWidth: 44, textAlign: 'right' }}>{stepIndex + 1}/{totalSteps}</span>
+    <div style={{ display: 'flex', flexDirection: 'column', opacity: busy ? 0.72 : 1, pointerEvents: busy ? 'none' : 'auto' }}>
+
+      {/* Progress dots + counter */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 22 }}>
+        <div style={{ display: 'flex', gap: 7, alignItems: 'center' }}>
+          {Array.from({ length: totalSteps }).map((_, i) => (
+            <div key={i} style={{
+              height: 6, borderRadius: 99,
+              width: i === stepIndex ? 22 : 6,
+              background: i < stepIndex ? `${C.blue}88` : i === stepIndex ? C.blue : 'rgba(0,0,0,0.12)',
+              transition: 'all 0.35s cubic-bezier(0.22,1,0.36,1)',
+            }} />
+          ))}
+        </div>
+        <span style={{ flex: 1 }} />
+        {xpAnim && (
+          <span style={{ fontSize: 13, fontWeight: 800, color: C.green, letterSpacing: '-0.01em', animation: 'xpPop 1.4s ease forwards' }}>
+            {xpAnim}
+          </span>
+        )}
+        <span style={{ color: C.muted, fontSize: 12, fontFamily: FONT.mono }}>{stepIndex + 1}/{totalSteps}</span>
       </div>
-      <div key={step.id} className="studio-card" style={{ padding: 16, animation: 'studioSlideIn 0.35s ease' }}>
-        {step.exercise === 'mcq' && <ExerciseMCQ word={step.word} distractors={distractors} onComplete={onComplete} />}
-        {step.exercise === 'cloze' && <ExerciseCloze word={step.word} onComplete={onComplete} />}
-        {step.exercise === 'recall' && <ExerciseRecall word={step.word} onComplete={onComplete} />}
-        {step.exercise === 'write-sentence' && <ExerciseWriteSentence word={step.word} onComplete={onComplete} />}
-        {step.exercise === 'write-definition' && <ExerciseWriteDefinition word={step.word} onComplete={onComplete} />}
-        {step.exercise === 'mnemonic' && <ExerciseMnemonic word={step.word} onComplete={onComplete} />}
+
+      {/* Word hero */}
+      {step.exercise === 'cloze' ? (
+        <div style={{ textAlign: 'center', paddingBottom: 22 }}>
+          <div style={{
+            width: 64, height: 64, borderRadius: '50%',
+            background: 'rgba(0,0,0,0.07)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            margin: '0 auto 14px',
+          }}>
+            <svg width={28} height={28} viewBox="0 0 24 24" fill="none" stroke="rgba(0,0,0,0.28)" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+            </svg>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+            <span style={{ fontSize: 14, color: C.mutedHi, fontStyle: 'italic' }}>Listen and identify the word</span>
+            <AudioBtn text={step.word.word} size={32} />
+          </div>
+        </div>
+      ) : (
+        <div style={{ textAlign: 'center', paddingBottom: 22 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+            <h2 style={{ fontSize: 38, fontWeight: 700, fontFamily: FONT.display, color: C.text, letterSpacing: '-0.02em', lineHeight: 1, margin: 0 }}>
+              {step.word.word}
+            </h2>
+            <AudioBtn text={step.word.word} size={38} />
+          </div>
+          {step.word.phonetic && (
+            <div style={{ fontSize: 13, color: C.muted, fontFamily: FONT.mono, marginBottom: 2 }}>{step.word.phonetic}</div>
+          )}
+          <div style={{ fontSize: 12, color: C.muted, fontStyle: 'italic' }}>from <em>{step.word.book}</em></div>
+        </div>
+      )}
+
+      {/* Exercise card */}
+      <div key={step.id} className="studio-card" style={{ padding: '22px 22px 20px', animation: 'studioSlideIn 0.28s cubic-bezier(0.22,1,0.36,1)' }}>
+        {step.exercise === 'mcq' && <ExerciseMCQ word={step.word} distractors={distractors} onComplete={handleComplete} />}
+        {step.exercise === 'cloze' && <ExerciseCloze word={step.word} onComplete={handleComplete} />}
+        {step.exercise === 'recall' && <ExerciseRecall word={step.word} onComplete={handleComplete} />}
+        {step.exercise === 'write-sentence' && <ExerciseWriteSentence word={step.word} onComplete={handleComplete} />}
+        {step.exercise === 'write-definition' && <ExerciseWriteDefinition word={step.word} onComplete={handleComplete} />}
+        {step.exercise === 'mnemonic' && <ExerciseMnemonic word={step.word} onComplete={handleComplete} />}
       </div>
-      {busy && <div style={{ color: C.muted, fontSize: 12, textAlign: 'center' }}>Saving progress…</div>}
+
+      {busy && <div style={{ color: C.muted, fontSize: 12, textAlign: 'center', marginTop: 10 }}>Saving progress…</div>}
     </div>
   )
 }
 
-function ResultsScreen({ results, words, deck, onDone }: { results: PracticeResult[]; words: PracticeWord[]; deck: DeckSummary | null; onDone: () => void }) {
-  const correct = results.filter((r) => r.correct).length
-  const pct = Math.round((correct / Math.max(1, results.length)) * 100)
-  const byExercise = results.reduce<Record<ExerciseType, number>>((acc, r) => {
-    acc[r.exercise] = (acc[r.exercise] || 0) + 1
-    return acc
-  }, {} as Record<ExerciseType, number>)
-  const labels: Record<ExerciseType, string> = {
-    mcq: 'Multiple Choice',
-    cloze: 'Context Cloze',
-    recall: 'Active Recall',
-    'write-sentence': 'Write Sentence',
-    'write-definition': 'Free Recall',
-    mnemonic: 'Memory Hook',
-  }
-  const uniqueWords = Array.from(new Map(words.map((word) => [word.id, word])).values())
+function ResultsScreen({
+  results,
+  onDone,
+  onPracticeAgain,
+}: {
+  results: PracticeResult[]
+  onDone: () => void
+  onPracticeAgain: () => void
+}) {
+  // Deduplicate: last result per word
+  const wordResultMap = new Map<string, PracticeResult>()
+  results.forEach((r) => wordResultMap.set(r.word, r))
+  const uniqueResults = Array.from(wordResultMap.values())
+
+  const correctCount = uniqueResults.filter((r) => r.correct).length
+  const toRepeat = uniqueResults.filter((r) => !r.correct).length
+  const accuracy = Math.round((correctCount / Math.max(1, uniqueResults.length)) * 100)
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, alignItems: 'center', textAlign: 'center' }}>
-      {/* Hero */}
-      <div style={{ marginBottom: 4 }}>
-        <div style={{ fontSize: 32, fontWeight: 900, color: C.cream, letterSpacing: '-0.02em', lineHeight: 1.15 }}>Session complete!</div>
-        <div style={{ color: C.mutedHi, fontSize: 14, marginTop: 6 }}>{results.length} exercises · {correct} correct</div>
-      </div>
-
-      {/* Score ring */}
-      <div style={{ width: 120, height: 120, borderRadius: '50%', background: `conic-gradient(${C.gold} ${pct}%, rgba(0,0,0,0.08) 0%)`, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: CARD_SHADOW }}>
-        <div style={{ width: 96, height: 96, borderRadius: '50%', background: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}>
-          <span style={{ color: C.gold, fontWeight: 900, fontSize: 24 }}>{pct}%</span>
-          <span style={{ color: C.muted, fontSize: 10, letterSpacing: '0.08em' }}>CORRECT</span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {/* Header */}
+      <div style={{ textAlign: 'center', paddingTop: 12 }}>
+        <div style={{ fontSize: 44, lineHeight: 1, marginBottom: 14 }}>🎉</div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: C.cream, letterSpacing: '-0.02em', marginBottom: 6 }}>
+          Session complete
+        </div>
+        <div style={{ color: C.mutedHi, fontSize: 14 }}>
+          You reviewed {uniqueResults.length} word{uniqueResults.length !== 1 ? 's' : ''}
         </div>
       </div>
 
-      {/* Exercises breakdown */}
-      <div className="studio-card" style={{ width: '100%', padding: 18, textAlign: 'left' }}>
-        <div style={{ color: C.cream, fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Exercises completed</div>
-        {Object.entries(byExercise).map(([key, value]) => (
-          <div key={key} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid rgba(0,0,0,0.06)` }}>
-            <span style={{ color: C.text, fontSize: 13.5 }}>{labels[key as ExerciseType]}</span>
-            <span style={{ color: C.muted, fontSize: 12.5, fontFamily: FONT.mono }}>×{value}</span>
+      {/* Stats */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+        {[
+          { label: 'Accuracy', value: `${accuracy}%`, color: C.blue },
+          { label: 'Correct', value: correctCount, color: C.green },
+          { label: 'To repeat', value: toRepeat, color: toRepeat > 0 ? C.amber : C.muted },
+        ].map((s) => (
+          <div key={s.label} className="studio-card" style={{ padding: '14px 12px', textAlign: 'center' }}>
+            <div style={{ fontSize: 22, fontWeight: 800, color: s.color, letterSpacing: '-0.02em' }}>{s.value}</div>
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>{s.label}</div>
           </div>
         ))}
       </div>
 
-      {/* Next reviews */}
-      <div className="studio-card" style={{ width: '100%', padding: 18, textAlign: 'left' }}>
-        <div style={{ color: C.cream, fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Next reviews scheduled</div>
-        {uniqueWords.map((w) => {
-          const intervals = computeIntervals(w)
-          return (
-            <div key={w.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '8px 0', borderBottom: `1px solid rgba(0,0,0,0.06)` }}>
-              <span style={{ color: C.text, fontSize: 13.5, fontFamily: FONT.display, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.word}</span>
-              <span style={{ color: C.gold, fontSize: 12.5, fontFamily: FONT.mono, fontWeight: 700, flex: '0 0 auto' }}>in {intervals.good}</span>
-            </div>
-          )
-        })}
+      {/* Word list */}
+      <div className="studio-card" style={{ padding: '4px 0' }}>
+        {uniqueResults.map((r, i) => (
+          <div
+            key={r.word}
+            style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '12px 18px',
+              borderBottom: i < uniqueResults.length - 1 ? '1px solid rgba(0,0,0,0.05)' : 'none',
+            }}
+          >
+            <span style={{ fontSize: 15, fontWeight: 600, color: C.cream, fontFamily: FONT.display }}>{r.word}</span>
+            <span style={{
+              fontSize: 11.5, fontWeight: 700,
+              color: r.correct ? C.green : C.red,
+              background: r.correct ? `${C.green}15` : `${C.red}15`,
+              padding: '4px 10px', borderRadius: 99,
+              border: `1px solid ${r.correct ? `${C.green}33` : `${C.red}33`}`,
+            }}>
+              {r.correct ? 'Correct' : 'Again'}
+            </span>
+          </div>
+        ))}
       </div>
 
-      {deck && <div style={{ color: C.muted, fontSize: 12 }}>{deck.reviewsCompletedToday} reviews completed today</div>}
-      <Btn onClick={onDone} style={{ width: '100%', borderRadius: 14, fontSize: 15, padding: '15px 22px' }}>Back to Studio</Btn>
+      {/* Buttons */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <Btn
+          onClick={onPracticeAgain}
+          style={{ width: '100%', background: C.blue, borderRadius: 14, fontSize: 14.5, padding: '14px 20px' }}
+        >
+          Practice again
+        </Btn>
+        <Btn
+          variant="ghost"
+          onClick={onDone}
+          style={{ width: '100%', borderRadius: 14, fontSize: 14.5, padding: '14px 20px' }}
+        >
+          Back to words
+        </Btn>
+      </div>
     </div>
   )
 }
@@ -1244,6 +1355,7 @@ export function StudioRoute() {
   const [submitting, setSubmitting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
   const stepStartedAt = useRef(Date.now())
+  const didAutoStart = useRef(false)
 
   const { data: decks = [], isLoading: decksLoading } = useQuery({
     queryKey: ['decks'],
@@ -1251,6 +1363,7 @@ export function StudioRoute() {
       const res = await api.get<{ items: DeckSummary[] }>('/api/vocabulary/decks')
       return res.items ?? []
     },
+    staleTime: 60_000,
   })
   const deck = decks[0]
 
@@ -1258,6 +1371,7 @@ export function StudioRoute() {
     queryKey: ['deck-dashboard', deck?.id],
     queryFn: () => api.get<DeckDashboard>(`/api/vocabulary/decks/${deck!.id}`),
     enabled: Boolean(deck?.id),
+    staleTime: 60_000,
   })
 
   const activeDeck = deckSummary ?? dashboard?.deck ?? deck ?? null
@@ -1459,7 +1573,23 @@ export function StudioRoute() {
     setRatedCardIds(new Set())
   }
 
+  function practiceAgain() {
+    setResults([])
+    setRatedCardIds(new Set())
+    setDeckSummary(null)
+    void startSession()
+  }
+
   const startDisabled = !activeDeck || (activeDeck.dueNow + activeDeck.newAvailable + activeDeck.cardsByState.learning + activeDeck.cardsByState.relearning) === 0
+
+  // Fire as soon as deck data is available from cache — don't wait for dashboard query.
+  // startSession() only needs `deck` (from the decks query).
+  useEffect(() => {
+    if (!didAutoStart.current && !decksLoading && deck && !startDisabled && screen === 'dashboard') {
+      didAutoStart.current = true
+      void startSession()
+    }
+  }, [decksLoading, deck, startDisabled, screen, startSession])
 
   return (
     <div
@@ -1475,14 +1605,15 @@ export function StudioRoute() {
     >
       <style>{`
         @keyframes studioFadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes studioSlideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes studioSlideIn { from { opacity: 0; transform: translateX(18px) scale(0.97); } to { opacity: 1; transform: translateX(0) scale(1); } }
+        @keyframes xpPop { 0% { opacity:0; transform:translateY(4px) scale(0.9); } 15% { opacity:1; transform:translateY(0) scale(1.1); } 80% { opacity:1; transform:translateY(-2px) scale(1); } 100% { opacity:0; transform:translateY(-12px); } }
         .studio-scope input::placeholder, .studio-scope textarea::placeholder { color: ${C.muted}; opacity: 1; }
         .studio-scope input:focus, .studio-scope textarea:focus { border-color: ${C.gold} !important; outline: none; box-shadow: 0 0 0 3px ${C.gold}28; }
         .studio-card { background: #fff; border-radius: 20px; box-shadow: ${CARD_SHADOW}; }
       `}</style>
       <div className="studio-scope" style={{ width: '100%', maxWidth: 560, padding: '20px 16px 80px' }}>
 
-        {isLoading ? (
+        {isLoading || (starting && screen === 'dashboard') ? (
           <div style={{ display: 'grid', gap: 12 }}>
             {Array.from({ length: 4 }).map((_, i) => (
               <div key={i} style={{ height: i === 0 ? 130 : 80, borderRadius: 20, background: 'rgba(255,255,255,0.5)', animation: 'studioFadeIn 1s ease infinite alternate' }} />
@@ -1517,7 +1648,7 @@ export function StudioRoute() {
             busy={submitting}
           />
         ) : (
-          <ResultsScreen results={results} words={practiceWords} deck={activeDeck} onDone={backToDashboard} />
+          <ResultsScreen results={results} onDone={backToDashboard} onPracticeAgain={practiceAgain} />
         )}
       </div>
     </div>

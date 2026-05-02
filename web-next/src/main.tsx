@@ -8,6 +8,8 @@ import { createSyncStoragePersister } from '@tanstack/query-sync-storage-persist
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { supabase } from '@/lib/supabase'
 import { setCachedToken } from '@/shared/api/client'
+import { setAudioCacheUserId } from '@/shared/storage/audioCache'
+import { setDictionaryCacheUserId } from '@/shared/storage/dictionaryCache'
 import { router } from './app/router'
 
 const queryClient = new QueryClient({
@@ -37,6 +39,8 @@ supabase.auth.onAuthStateChange((_event, session) => {
     window.localStorage.removeItem('storybook-qcache-v1')
   }
   activeUserId = nextUserId
+  void setAudioCacheUserId(nextUserId || null)
+  void setDictionaryCacheUserId(nextUserId || null)
   setCachedToken(token)
   if (!token) {
     // On sign-out, wipe the query cache so no stale data leaks between users
@@ -60,9 +64,17 @@ supabase.auth.onAuthStateChange((_event, session) => {
 supabase.auth.getSession().then(({ data }) => {
   if (data.session?.access_token) {
     activeUserId = data.session.user.id
+    void setAudioCacheUserId(data.session.user.id)
+    void setDictionaryCacheUserId(data.session.user.id)
     setCachedToken(data.session.access_token)
   }
 })
+
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {})
+  })
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

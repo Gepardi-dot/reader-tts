@@ -7,6 +7,7 @@ import { VocabularyRoute } from '@/features/vocabulary/VocabularyRoute'
 import { StudioRoute } from '@/features/studio/StudioRoute'
 import { UploadRoute } from '@/features/library/UploadRoute'
 import { AudioSettingsRoute } from '@/features/reader/AudioSettingsRoute'
+import { ProgressRoute } from '@/features/progress/ProgressRoute'
 import { LoginRoute } from '@/features/auth/LoginRoute'
 import { supabase } from '@/lib/supabase'
 
@@ -28,6 +29,7 @@ export const router = createBrowserRouter([
       { path: 'notes', element: <NotesRoute /> },
       { path: 'vocabulary', element: <VocabularyRoute /> },
       { path: 'studio', element: <StudioRoute /> },
+      { path: 'progress', element: <ProgressRoute /> },
       { path: 'audio', element: <AudioSettingsRoute /> },
       { path: 'upload', element: <UploadRoute /> },
     ],

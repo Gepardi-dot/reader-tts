@@ -13,6 +13,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { api } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
+import { findBookCover } from './coverLookup'
 
 interface Book {
   id: string
@@ -29,8 +30,18 @@ interface Book {
 
 interface ReadingProgress { pageNumber: number; totalPages: number; updatedAt?: string }
 
-// Warm cover tints cycling across books
+// Warm cover tints cycling across books (fallback when no internet match is found)
 const COVER_COLORS = ['#fef6ee', '#eef4fb', '#f0efe9', '#f8eef0']
+
+function useBookCover(title: string, fileName?: string) {
+  return useQuery({
+    queryKey: ['book-cover', title, fileName],
+    queryFn: () => findBookCover(title, fileName),
+    staleTime: Infinity,
+    gcTime: 24 * 60 * 60 * 1000,
+    retry: false,
+  })
+}
 
 const PARTICLE_WORDS = [
   'chapter', 'verse', 'prologue', 'epilogue', 'memoir', 'fable',
@@ -158,6 +169,9 @@ function BookCard({ book, progress, index, onDelete }: {
 }) {
   const pct = readPct(progress)
   const coverBg = COVER_COLORS[index % COVER_COLORS.length]
+  const [failedCoverUrl, setFailedCoverUrl] = useState<string | null>(null)
+  const { data: coverUrl } = useBookCover(book.title, book.fileName)
+  const showCover = coverUrl && failedCoverUrl !== coverUrl
 
   return (
     <div className="group relative">
@@ -166,20 +180,31 @@ function BookCard({ book, progress, index, onDelete }: {
         className="block rounded-xl border border-border bg-card hover:border-primary/40 hover:shadow-sm transition-all overflow-hidden"
       >
         {/* Cover */}
-        <div
-          className="aspect-[2/3] relative overflow-hidden flex flex-col items-center justify-center p-4 gap-3"
-          style={{ backgroundColor: coverBg }}
-        >
-          <BookOpen size={32} className="text-foreground/20 shrink-0" />
-          <span
-            className="text-xs text-foreground/50 text-center line-clamp-3 leading-snug"
-            style={{ fontFamily: 'Lora, Georgia, serif' }}
-          >
-            {book.title}
-          </span>
-          {/* Progress bar — inset at bottom, no blur */}
+        <div className="aspect-[2/3] relative overflow-hidden">
+          {showCover ? (
+            <img
+              src={coverUrl}
+              alt={book.title}
+              className="w-full h-full object-cover"
+              onError={() => setFailedCoverUrl(coverUrl)}
+            />
+          ) : (
+            <div
+              className="w-full h-full flex flex-col items-center justify-center p-4 gap-3"
+              style={{ backgroundColor: coverBg }}
+            >
+              <BookOpen size={32} className="text-foreground/20 shrink-0" />
+              <span
+                className="text-xs text-foreground/50 text-center line-clamp-3 leading-snug"
+                style={{ fontFamily: 'Lora, Georgia, serif' }}
+              >
+                {book.title}
+              </span>
+            </div>
+          )}
+          {/* Progress bar overlaid at bottom */}
           {pct > 0 && (
-            <div className="absolute inset-x-2.5 bottom-2.5 h-1 rounded-full bg-black/10">
+            <div className="absolute inset-x-2.5 bottom-2.5 h-1 rounded-full bg-black/20">
               <div
                 className="h-full rounded-full bg-primary transition-all"
                 style={{ width: `${pct}%` }}

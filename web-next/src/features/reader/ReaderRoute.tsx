@@ -12,6 +12,8 @@ import {
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { api, request, requestBlob, AuthError } from '@/shared/api/client'
+import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
+import { getCachedDictionary, lookupStaticDictionary, putCachedDictionary } from '@/shared/storage/dictionaryCache'
 import { cn } from '@/lib/utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -89,6 +91,10 @@ interface LiveAudioResult {
   url: string
   duration?: number | null
   cues?: LiveAudioCue[]
+  cacheKey?: string
+  cacheVersion?: number
+  contentType?: string
+  byteLength?: number | null
 }
 
 interface ProviderTestResult {
@@ -153,30 +159,20 @@ const THEMES    = {
 }
 
 const TTS_PROVIDERS = [
-  { id: 'kokoro',       label: 'Kokoro (free, remote)' },
-  { id: 'google',       label: 'Gemini Flash (cloud)' },
-  { id: 'polly',        label: 'Amazon Polly (cloud)' },
-  { id: 'openai',       label: 'OpenAI TTS (cloud)' },
-  { id: 'qwen',         label: 'Qwen (cloud)' },
-  { id: 'qwen_local',   label: 'Qwen Local (free, offline)' },
-  { id: 'neutts_local', label: 'NeuTTS (free, offline)' },
-  { id: 'piper',        label: 'Piper (offline)' },
+  { id: 'kokoro', label: 'Kokoro (free, remote)' },
+  { id: 'google', label: 'Gemini Flash (cloud)' },
 ]
 
 // Streaming-style playback: keep the first request small so audio can start quickly,
 // then synthesize larger follow-up chunks while the first chunk is playing.
 const FIRST_AUDIO_CHARS: Record<string, number> = {
   google: 240,
-  openai: 180,
   kokoro:  65,
-  piper:  220,
 }
 
 const CHUNK_CHARS: Record<string, number> = {
   google: 420,
-  openai: 800,
   kokoro: 420,
-  piper:  900,
 }
 
 const DEFAULT_FIRST_AUDIO_CHARS = 180
@@ -193,7 +189,6 @@ const PROVIDER_PREVIEW_TEXT = (
 // The first chunk we'll await before starting audio; the rest stream in the background.
 const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
   google: 2,
-  openai: 2,
   kokoro: 2,
 }
 
@@ -243,6 +238,44 @@ function requestLiveAudio(bookId: string, payload: LiveAudioPayload) {
 
   liveAudioMemoryCache.set(key, { expiresAt: now + LIVE_AUDIO_MEMORY_TTL_MS, promise })
   return promise
+}
+
+function isCacheableLiveAudio(result: LiveAudioResult): result is LiveAudioResult & { cacheKey: string; cacheVersion: number } {
+  return Boolean(result.cacheKey && typeof result.cacheVersion === 'number')
+}
+
+async function fetchAndCacheLiveAudioBlob(result: LiveAudioResult, signal?: AbortSignal) {
+  const blob = needsAuthenticatedAudioFetch(result.url)
+    ? await requestBlob(result.url, { signal })
+    : await fetch(result.url, { signal }).then((response) => {
+      if (!response.ok) throw new Error(`Audio fetch failed (${response.status})`)
+      return response.blob()
+    })
+
+  if (isCacheableLiveAudio(result)) {
+    await putCachedAudio({
+      cacheKey: result.cacheKey,
+      cacheVersion: result.cacheVersion,
+      blob,
+      cues: result.cues ?? [],
+      duration: result.duration ?? null,
+      contentType: result.contentType ?? (blob.type || 'audio/wav'),
+      byteLength: result.byteLength ?? blob.size,
+    }).catch(() => {})
+  }
+
+  return blob
+}
+
+async function loadLiveAudioBlob(result: LiveAudioResult, signal?: AbortSignal) {
+  const cachedAudio = isCacheableLiveAudio(result)
+    ? await getCachedAudio(result.cacheKey, result.cacheVersion).catch(() => null)
+    : null
+
+  return {
+    blob: cachedAudio?.blob ?? await fetchAndCacheLiveAudioBlob(result, signal),
+    cues: (cachedAudio?.cues ?? result.cues ?? []) as LiveAudioCue[],
+  }
 }
 
 function audioSliceStart(textLength: number, scrollPct: number) {
@@ -951,6 +984,25 @@ function fetchOfflineDictionary(word: string) {
   return api.get<DictResponse>(`/api/dictionary/lookup?term=${encodeURIComponent(normalizeLookupWord(word))}`)
 }
 
+function dictionaryHasDefinitions(payload: DictResponse | null) {
+  return Boolean(payload?.entries?.some((entry) => (entry.definitions?.length ?? 0) > 0))
+}
+
+async function fetchClientDictionary(word: string) {
+  const normalized = normalizeLookupWord(word)
+  const seeded = await lookupStaticDictionary(normalized)
+  if (dictionaryHasDefinitions(seeded)) return seeded as DictResponse
+
+  const learned = await getCachedDictionary(normalized).catch(() => null)
+  if (dictionaryHasDefinitions(learned)) return learned as DictResponse
+
+  const backend = await fetchOfflineDictionary(normalized)
+  if (dictionaryHasDefinitions(backend)) {
+    await putCachedDictionary(normalized, backend).catch(() => {})
+  }
+  return backend
+}
+
 // ── Dictionary Panel ──────────────────────────────────────────────────────────
 
 function DictionaryPanel({ word: initialWord, onClose, colors }: {
@@ -965,12 +1017,11 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
   // 1. Offline dictionary (backend)
   const { data: offlineData, isLoading: offlineLoading } = useQuery({
     queryKey: dictionaryQueryKey(lookupWord),
-    queryFn: () => fetchOfflineDictionary(lookupWord),
+    queryFn: () => fetchClientDictionary(lookupWord),
     staleTime: DICTIONARY_STALE_TIME_MS,
   })
 
-  const hasOfflineDefs = !offlineLoading && (offlineData?.entries ?? [])
-    .some(e => (e.definitions?.length ?? 0) > 0)
+  const hasOfflineDefs = !offlineLoading && dictionaryHasDefinitions(offlineData ?? null)
 
   // 2. Free Dictionary API fallback — fires only when offline dict has no definitions
   const { data: freeRaw, isLoading: freeLoading } = useQuery({
@@ -1084,6 +1135,20 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
     }
   }
 
+  const POS_PILL: Record<string, { bg: string; color: string }> = {
+    noun:        { bg: '#dbeafe', color: '#1d4ed8' },
+    verb:        { bg: '#dcfce7', color: '#15803d' },
+    adjective:   { bg: '#f3e8ff', color: '#7e22ce' },
+    adverb:      { bg: '#fff7ed', color: '#c2410c' },
+    pronoun:     { bg: '#fef9c3', color: '#854d0e' },
+    preposition: { bg: '#f1f5f9', color: '#475569' },
+    conjunction: { bg: '#ffe4e6', color: '#be123c' },
+  }
+  function posPill(pos: string) {
+    const key = pos.toLowerCase().split(' ')[0]
+    return POS_PILL[key] ?? { bg: `${colors.text}10`, color: `${colors.text}70` }
+  }
+
   return (
     <div style={{ color: colors.text, paddingBottom: 'max(env(safe-area-inset-bottom,0px),28px)' }}>
 
@@ -1102,7 +1167,7 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
         {inputValue.trim() && inputValue.trim() !== lookupWord && (
           <button onClick={() => navigate(inputValue)}
             className="text-xs font-medium px-2 py-0.5 rounded-md"
-            style={{ color: '#4285f4', backgroundColor: '#4285f418' }}>
+            style={{ color: '#f59e0b', backgroundColor: '#f59e0b18' }}>
             Go
           </button>
         )}
@@ -1116,165 +1181,206 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
 
         {/* Loading skeleton */}
         {isLoading && (
-          <div className="px-5 pt-5 pb-4 animate-pulse">
-            <div className="flex items-start gap-4 mb-5">
-              <div className="w-12 h-12 rounded-full shrink-0" style={{ backgroundColor: '#4285f412' }} />
-              <div className="flex-1 pt-0.5 min-w-0">
-                <h2
-                  className="text-[28px] font-normal leading-tight break-words"
-                  style={{ fontFamily: 'Lora, Georgia, serif', color: colors.text }}
-                >
-                  {lookupWord}
-                </h2>
-                <div className="mt-2 h-3 w-24 rounded" style={{ backgroundColor: `${colors.text}08` }} />
+          <div className="px-5 pt-5 pb-4 animate-pulse space-y-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full shrink-0" style={{ background: `${colors.text}08` }} />
+              <div className="flex-1 space-y-2">
+                <div className="h-7 w-32 rounded-lg" style={{ background: `${colors.text}10` }} />
+                <div className="h-3 w-20 rounded" style={{ background: `${colors.text}07` }} />
               </div>
             </div>
-            <div className="h-3 w-16 rounded mb-4" style={{ backgroundColor: `${colors.text}08` }} />
-            <div className="space-y-2">
-              {[100, 88, 75, 92, 60].map((w, i) => (
-                <div key={i} className="h-3.5 rounded" style={{ backgroundColor: `${colors.text}10`, width: `${w}%` }} />
-              ))}
-            </div>
+            <div className="h-5 w-14 rounded-full" style={{ background: `${colors.text}08` }} />
+            {[100, 88, 72, 90, 64].map((w, i) => (
+              <div key={i} className="h-3.5 rounded" style={{ background: `${colors.text}07`, width: `${w}%` }} />
+            ))}
           </div>
         )}
 
         {/* Result */}
         {!isLoading && displayData && (
-          <div className="px-5 pt-5 pb-4">
-
-            {/* ── Word + speaker ───────────────────────────── */}
-            <div className="flex items-start gap-4 mb-5">
-              <button
-                onClick={speak}
-                aria-label="Pronounce"
-                className="w-12 h-12 rounded-full flex items-center justify-center shrink-0 transition-all active:scale-90"
-                style={{ backgroundColor: speaking ? '#4285f4' : '#4285f420' }}
-              >
-                <Volume2 size={20} strokeWidth={1.8} style={{ color: speaking ? '#fff' : '#4285f4' }} />
-              </button>
-              <div className="flex-1 pt-0.5 min-w-0">
-                <div className="flex items-start justify-between gap-2">
-                  <h2 className="text-[28px] font-normal leading-tight break-words"
-                    style={{ fontFamily: 'Lora, Georgia, serif', color: colors.text }}>
-                    {displayData.term}
-                  </h2>
+          <div>
+            {/* ── Word hero ───────────────────────────────────── */}
+            <div className="px-5 pt-5 pb-4" style={{ borderBottom: `1px solid ${colors.text}0e` }}>
+              <div className="flex items-start justify-between gap-3">
+                {/* Left: audio + word */}
+                <div className="flex items-start gap-3 min-w-0">
                   <button
-                    onClick={() => void saveToVocab()}
-                    aria-label="Save to vocabulary"
-                    disabled={vocabState === 'busy'}
-                    className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-all active:scale-90 mt-0.5"
+                    onClick={speak}
+                    aria-label="Pronounce"
+                    className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-all active:scale-90 mt-1"
                     style={{
-                      backgroundColor: vocabState === 'saved' ? '#22c55e20' : `${colors.text}10`,
-                      color: vocabState === 'saved' ? '#22c55e' : `${colors.text}55`,
+                      background: speaking ? '#f59e0b' : '#f59e0b18',
+                      boxShadow: speaking ? '0 0 0 4px #f59e0b22' : 'none',
                     }}
                   >
-                    {vocabState === 'busy' ? (
-                      <div className="w-3.5 h-3.5 rounded-full border-2 border-current border-t-transparent animate-spin" />
-                    ) : vocabState === 'saved' ? (
-                      <span className="text-sm font-medium">✓</span>
-                    ) : (
-                      <Type size={14} />
-                    )}
+                    <Volume2 size={17} strokeWidth={2} style={{ color: speaking ? '#fff' : '#f59e0b' }} />
                   </button>
+                  <div className="min-w-0">
+                    <h2
+                      className="leading-tight break-words"
+                      style={{
+                        fontFamily: 'Lora, Georgia, serif',
+                        fontSize: 30,
+                        fontWeight: 600,
+                        color: colors.text,
+                        letterSpacing: '-0.01em',
+                      }}
+                    >
+                      {displayData.term}
+                    </h2>
+                    {displayData.pronunciation && (
+                      <p style={{ fontSize: 13, color: `${colors.text}55`, fontFamily: '"SF Mono", Consolas, monospace', marginTop: 3 }}>
+                        {displayData.pronunciation}
+                      </p>
+                    )}
+                  </div>
                 </div>
-                {displayData.pronunciation && (
-                  <p className="text-sm mt-1" style={{ color: `${colors.text}50` }}>
-                    {displayData.pronunciation}
-                  </p>
-                )}
+
+                {/* Right: save to vocabulary */}
+                <button
+                  onClick={() => void saveToVocab()}
+                  aria-label="Save to vocabulary"
+                  disabled={vocabState === 'busy'}
+                  className="flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-full transition-all active:scale-95 mt-1"
+                  style={{
+                    background: vocabState === 'saved' ? '#22c55e18' : `${colors.text}0c`,
+                    color: vocabState === 'saved' ? '#22c55e' : `${colors.text}60`,
+                    border: `1px solid ${vocabState === 'saved' ? '#22c55e33' : `${colors.text}14`}`,
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    letterSpacing: '0.01em',
+                  }}
+                >
+                  {vocabState === 'busy' ? (
+                    <div className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                  ) : vocabState === 'saved' ? (
+                    <span>✓ Saved</span>
+                  ) : (
+                    <><Type size={11} /> Save</>
+                  )}
+                </button>
               </div>
             </div>
 
-            {/* ── Entries ──────────────────────────────────── */}
-            {displayData.entries.map((entry, ei) => (
-              <div key={ei}
-                className={ei > 0 ? 'mt-6 pt-5 border-t' : ''}
-                style={{ borderColor: `${colors.text}12` }}
-              >
-                {/* Part of speech */}
-                {entry.partOfSpeech && (
-                  <p className="text-sm italic mb-4" style={{ color: `${colors.text}58` }}>
-                    {entry.partOfSpeech}
-                  </p>
-                )}
+            {/* ── Entries ──────────────────────────────────────── */}
+            <div className="px-5 pt-4 pb-5 space-y-6">
+              {displayData.entries.map((entry, ei) => (
+                <div key={ei}>
+                  {/* Part of speech pill */}
+                  {entry.partOfSpeech && (() => {
+                    const { bg, color } = posPill(entry.partOfSpeech)
+                    return (
+                      <div className="mb-3">
+                        <span style={{
+                          display: 'inline-flex', alignItems: 'center',
+                          padding: '3px 10px', borderRadius: 99,
+                          background: bg, color,
+                          fontSize: 10.5, fontWeight: 700,
+                          letterSpacing: '0.07em', textTransform: 'uppercase',
+                        }}>
+                          {entry.partOfSpeech}
+                        </span>
+                      </div>
+                    )
+                  })()}
 
-                {/* Definitions list */}
-                <div className="space-y-5">
-                  {entry.definitions.map((def, di) => (
-                    <div key={di} className="flex gap-3">
-                      <span className="text-xl shrink-0 leading-none" style={{ color: `${colors.text}22`, marginTop: 1 }}>·</span>
-                      <div className="flex-1 min-w-0">
-
-                        {/* Definition text */}
-                        <p className="text-[15px] leading-relaxed" style={{ color: colors.text }}>
-                          {def.definition}
-                        </p>
-
-                        {/* Up to 2 example sentences */}
-                        {def.examples.slice(0, 2).map((ex, xi) => (
-                          <p key={xi} className="text-sm mt-2 italic leading-relaxed"
-                            style={{ color: `${colors.text}50` }}>
-                            "{ex}"
+                  {/* Definitions */}
+                  <div className="space-y-4">
+                    {entry.definitions.map((def, di) => (
+                      <div key={di} className="flex gap-3">
+                        {/* Numbered badge */}
+                        <span style={{
+                          minWidth: 22, height: 22,
+                          background: '#f59e0b18',
+                          color: '#f59e0b',
+                          fontSize: 11, fontWeight: 800,
+                          borderRadius: 6,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          flexShrink: 0, marginTop: 2,
+                        }}>
+                          {di + 1}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p style={{ fontSize: 14.5, lineHeight: 1.65, color: colors.text }}>
+                            {def.definition}
                           </p>
+                          {def.examples.slice(0, 2).map((ex, xi) => (
+                            <div key={xi} style={{
+                              borderLeft: `2px solid #f59e0b55`,
+                              paddingLeft: 10,
+                              marginTop: 8,
+                            }}>
+                              <p style={{ fontSize: 13, fontStyle: 'italic', lineHeight: 1.55, color: `${colors.text}55` }}>
+                                "{ex}"
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Synonyms */}
+                  {(() => {
+                    const unique = [...new Set(entry.definitions.flatMap(d => d.synonyms))].slice(0, 7)
+                    return unique.length > 0 ? (
+                      <div className="flex flex-wrap items-center gap-1.5 mt-3 pt-3" style={{ borderTop: `1px solid ${colors.text}0a` }}>
+                        <span style={{ fontSize: 11, color: `${colors.text}40`, fontWeight: 600, letterSpacing: '0.04em' }}>
+                          SIMILAR
+                        </span>
+                        {unique.map(s => (
+                          <button key={s} onClick={() => navigate(s)}
+                            className="transition-all hover:opacity-80 active:scale-95"
+                            style={{
+                              padding: '2px 9px', borderRadius: 99,
+                              fontSize: 12, color: `${colors.text}65`,
+                              background: `${colors.text}08`,
+                              border: `1px solid ${colors.text}12`,
+                            }}>
+                            {s}
+                          </button>
                         ))}
                       </div>
-                    </div>
-                  ))}
+                    ) : null
+                  })()}
                 </div>
+              ))}
 
-                {/* Similar words — one row per part-of-speech, not per definition */}
-                {(() => {
-                  const unique = [...new Set(entry.definitions.flatMap(d => d.synonyms))].slice(0, 7)
-                  return unique.length > 0 ? (
-                    <div className="flex flex-wrap items-center gap-1.5 mt-4">
-                      <span className="text-[12px] shrink-0" style={{ color: `${colors.text}45` }}>
-                        Similar:
-                      </span>
-                      {unique.map(s => (
-                        <button key={s} onClick={() => navigate(s)}
-                          className="px-2.5 py-[3px] rounded-full text-xs border transition-all hover:opacity-70 active:scale-95"
-                          style={{ borderColor: `${colors.text}20`, color: `${colors.text}70` }}>
-                          {s}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null
-                })()}
-              </div>
-            ))}
-
-            {/* No definitions at all */}
-            {displayData.entries.length === 0 && (
-              <p className="text-sm" style={{ color: `${colors.text}50` }}>
-                No definition found for this word.
-              </p>
-            )}
-
-            {/* ── Related terms ────────────────────────────── */}
-            {displayData.relatedTerms.length > 0 && (
-              <div className="mt-6 pt-4 border-t" style={{ borderColor: `${colors.text}12` }}>
-                <p className="text-[11px] font-semibold uppercase tracking-widest mb-3"
-                  style={{ color: `${colors.text}38` }}>
-                  Related
+              {/* No definitions */}
+              {displayData.entries.length === 0 && (
+                <p style={{ fontSize: 14, color: `${colors.text}45`, fontStyle: 'italic' }}>
+                  No definition found for this word.
                 </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {displayData.relatedTerms.slice(0, 10).map(t => (
-                    <button key={t} onClick={() => navigate(t)}
-                      className="px-3 py-1 rounded-full text-xs border transition-all hover:opacity-70 active:scale-95"
-                      style={{ borderColor: `${colors.text}18`, color: `${colors.text}62` }}>
-                      {t}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
+              )}
 
-            {/* Source attribution */}
-            {displayData.source === 'online' && (
-              <p className="text-[10px] mt-5 text-center" style={{ color: `${colors.text}28` }}>
-                Definitions from Free Dictionary
-              </p>
-            )}
+              {/* Related terms */}
+              {displayData.relatedTerms.length > 0 && (
+                <div className="pt-4" style={{ borderTop: `1px solid ${colors.text}0e` }}>
+                  <p style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: `${colors.text}35`, marginBottom: 10 }}>
+                    Related
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {displayData.relatedTerms.slice(0, 10).map(t => (
+                      <button key={t} onClick={() => navigate(t)}
+                        className="transition-all hover:opacity-80 active:scale-95"
+                        style={{
+                          padding: '4px 12px', borderRadius: 99,
+                          fontSize: 12.5, color: `${colors.text}60`,
+                          border: `1px solid ${colors.text}18`,
+                        }}>
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {displayData.source === 'online' && (
+                <p style={{ fontSize: 10, textAlign: 'center', color: `${colors.text}25`, paddingTop: 4 }}>
+                  via Free Dictionary API
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -2954,7 +3060,6 @@ export function ReaderRoute() {
       pos = Math.max(end, pos + 1)
     }
     presynthGridRef.current = grid
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text, effectiveTtsProvider])
 
   // Kokoro presynthesis — pre-generate the entire book's audio in the background
@@ -3034,7 +3139,7 @@ export function ReaderRoute() {
       ).slice(0, PREFETCH_CHUNK_LIMIT)
       if (chunkDefs.length === 0) return
 
-      // Prefetch chunks in parallel — by the time the user hits play they're all cached
+      // Prefetch chunks in parallel - by the time the user hits play they're persisted locally.
       void Promise.all(chunkDefs.map((chunk) =>
         requestLiveAudio(bookId, {
           provider: effectiveTtsProvider,
@@ -3048,7 +3153,10 @@ export function ReaderRoute() {
           start: chunk.start,
           end: chunk.end,
           text: chunk.text,
-        }).catch(() => null)
+        })
+          .then((result) => loadLiveAudioBlob(result))
+          .then(() => null)
+          .catch(() => null)
       ))
     }, 1200)  // 1.2 s after last scroll event — quicker warm-up
 
@@ -3456,7 +3564,7 @@ export function ReaderRoute() {
     const fetchPromise = (async () => {
       try {
         const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
-        const { url, cues } = await requestLiveAudio(bookId!, {
+        const liveAudio = await requestLiveAudio(bookId!, {
           provider: effectiveTtsProvider,
           voice: effectiveTtsVoice,
           model: null,
@@ -3471,10 +3579,8 @@ export function ReaderRoute() {
         })
         if (signal.aborted) return null
 
-        // Download bytes once, create blob URL + decode for Web Audio gapless playback
-        const blob = needsAuthenticatedAudioFetch(url)
-          ? await requestBlob(url, { signal })
-          : await fetch(url, { signal }).then(r => r.blob())
+        // Download bytes once, persist them for reloads, then create a blob URL + decode for gapless playback.
+        const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
         if (signal.aborted) return null
 
         const blobUrl = URL.createObjectURL(blob)
@@ -3489,7 +3595,12 @@ export function ReaderRoute() {
         } catch { /* decode failure: fallback to HTMLAudio */ }
 
         if (signal.aborted) return null
-        updateWordAudioChunk(idx, { status: 'ready', url: blobUrl, buffer, cues: cues ?? [] })
+        updateWordAudioChunk(idx, {
+          status: 'ready',
+          url: blobUrl,
+          buffer,
+          cues,
+        })
         prefetchWordAudioAhead(wordAudioCurIdxRef.current, wordAudioChunksRef.current, signal)
         return blobUrl
       } catch (error) {

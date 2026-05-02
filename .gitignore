@@ -46,6 +46,10 @@ tmp-*.har
 
 .vercel
 public/
+!web-next/public/
+web-next/public/*
+!web-next/public/dictionary-seed.json
+!web-next/public/sw.js
 
 # Stitch design loop outputs
 .stitch/designs/*
