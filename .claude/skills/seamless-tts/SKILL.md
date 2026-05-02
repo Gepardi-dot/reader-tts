@@ -1,113 +1,68 @@
 ---
 name: seamless-tts
-description: When working on TTS playback latency, gapless audio, or buffering issues in storybook-reader — use this. Codifies the architecture so we stop re-deriving it each session.
+description: Invariants and footguns for TTS playback in storybook-reader. Read before touching any audio path code.
 ---
 
-# Seamless TTS — architecture cheat sheet
+# Seamless TTS — invariants only
 
-This skill exists because TTS playback in `storybook-reader` keeps getting "fixed"
-incrementally and regressing. Read this **before** touching anything in the audio
-path. The shape is non-obvious and the codebase is large.
+Line numbers drift — grep for symbols. This file contains only things invisible from the code itself.
 
-## The four hot files
+## Hot files
+- `web-next/src/features/reader/ReaderRoute.tsx` — all playback state, prefetch, gapless scheduling
+- `server/app.py` — `/api/books/{id}/live-audio`, `/api/books/{id}/presynthesize`, cache, providers
+- Playback entry: grep `playWord` in ReaderRoute. The audio-settings preview is a separate code path, not the reader.
 
-| File | Lines | What lives here |
-|------|------:|-----------------|
-| `web-next/src/features/reader/ReaderRoute.tsx` | ~4100 | Frontend reader, all playback state, prefetch, gapless scheduling |
-| `server/app.py` | ~5800 | FastAPI monolith: `/api/books/{id}/live-audio`, `/api/books/{id}/presynthesize`, upload, cache, providers |
-| `scripts/kokoro_server.py` | small | Fly.io kokoro-onnx FastAPI server (`/v1/synthesize`) |
-| `web-next/src/features/reader/ReaderRoute.tsx` (`playWord` ~line 3650) | — | The actual playback entry point — NOT the audio-settings preview |
+## Invariants
 
-## Architecture (don't re-derive this)
+**Cache key contract**
+`build_live_audio_payload` SHA-1 fields: bookId / provider / voice / model / outputFormat / narrationStyle / lengthScale / sentenceSilence / start / end.
+Adding or removing any field → bump `LIVE_AUDIO_CACHE_VERSION` (current: 7). Otherwise every S3 audio file is orphaned.
 
-### Backend
+**Gapless audio = Web Audio API only**
+Main reader uses `ctx.createBufferSource` scheduled at `max(now+0.002, lastScheduledEnd)`. Never replace with `new Audio()` or `<audio>` in the reader path — gaps will appear between chunks.
 
-- **Synthesis is per-chunk** (`prepare_live_synthesis_chunks` → `synthesize_provider_audio`). Each chunk gets a deterministic SHA-1 cache key (`build_live_audio_payload`, `LIVE_AUDIO_CACHE_VERSION`).
-- **Cache key fields:** `bookId / provider / voice / model / outputFormat / narrationStyle / lengthScale / sentenceSilence / start / end`. Voice changes = full re-synth. Same voice = instant.
-- **Presynth job** (`_run_presynth_job`) walks the book in 420-char chunks (boundaries at `.!?`), 4 workers parallel, retries 3×. Writes `.presynth-done.json` marker with provider+voice+cacheVersion.
-- **Vercel limitation:** `threading.Thread(daemon=True)` is killed when the serverless function returns. Auto-presynth only actually completes on a long-lived host (uvicorn local, or the Fly.io Kokoro server itself). On Vercel the marker may never be written, but per-chunk caching in S3 still works for any chunk that DID complete before the lambda died.
+**Vercel thread death**
+`threading.Thread(daemon=True)` dies when the lambda returns. Auto-presynth on upload won't complete on Vercel — only on long-lived hosts (uvicorn, Fly.io). Per-chunk S3 caching still lands whatever completes before the lambda dies.
 
-### Frontend
+**Presynth marker is single-provider**
+`.presynth-done.json` records ONE provider+voice (whichever finishes last). If user switches providers and gets re-warm behavior next open, this is the cause.
 
-- **The reader playback entry is `playWord` (line ~3650)**, not the audio-settings preview at line 2300. Don't be confused — the preview also has play/buffer/chunk machinery but is a separate component.
-- **Gapless scheduling is already in place** via Web Audio API: `wordAudioCtxRef` / `ctx.createBufferSource` / `wordAudioScheduledEndRef`. Each chunk's `AudioBuffer` is decoded and scheduled at `max(now+0.002, lastScheduledEnd)`. Don't replace this with `new Audio()` — it WILL gap.
-- **Bootstrap parallel chunks:** `PLAYBACK_BOOTSTRAP_CHUNKS` (line ~194). Default 2.
-- **Prefetch ahead window:** `PREFETCH_AHEAD_TARGET` (line ~207). Default 3 for kokoro, 2 elsewhere.
-- **Client-side presynth gate:** `useEffect` at line ~2954 only fires for `effectiveTtsProvider === 'kokoro'`. To enable Gemini presynth, widen this gate.
-- **Live-audio memory cache:** `liveAudioMemoryCache` (line ~212). 10-min TTL, key matches backend exactly. Read-ahead prefetch on scroll uses it (line ~3001).
-- **Per-chunk double-fetch:** `playableAudioUrl` (line ~367) — when audio is local-served (`/library/...`), the frontend fetches the URL a second time as an authenticated blob. S3-served URLs skip this.
+**In-process caches are broken on Vercel**
+Module-global dicts/sets only persist within one lambda invocation. No process-local cache without measured perf reason and correct cross-instance keying.
 
-## Where latency actually comes from (in order)
+**MediaSource streaming not supported**
+kokoro-onnx returns a complete WAV. Streaming requires rewriting the Kokoro server (chunked-transfer-encoding). Not a one-session task.
 
-1. **Kokoro Fly.io cold start** — shared-cpu-2x machine sleeps after idle. First synth = 5–30 s. Mitigated by `/api/providers/warmup` (line ~5552) firing on reader open. NOT mitigated for first-ever upload.
-2. **Per-chunk synthesis time** — Gemini ~2–4 s/chunk, Kokoro ~0.5–2 s/chunk warm. With prefetch=3 ahead and chunks=420 chars (~30 s audio each), the queue stays full as long as synthesis is faster than playback. If synthesis is slower, you starve.
-3. **No upload-time presynth** — was kokoro-only and only fired when the reader opened. Now fires from `import_book_source` via `_kickoff_auto_presynth` for any available provider with a known default voice (best effort; Vercel kills the thread but caches partial work).
-4. **Auth blob double-fetch** — only on local serving. On S3 it's a single fetch.
-
-## What NOT to do
-
-- **Don't replace Web Audio gapless with `new Audio()` or `<audio>` element** in the main reader path. Gaps WILL appear between chunks. `new Audio()` is fine for the audio-settings preview (single chunk, user is auditioning a voice).
-- **Don't bump prefetch ahead past ~6** — each prefetched chunk is a real Kokoro/Gemini API request. Costs scale linearly. Hard ceiling: budget × cost/chunk.
-- **Don't add MediaSource streaming without rewriting Kokoro server** — kokoro-onnx returns a complete WAV. To stream you'd need to chunk the model output and send via chunked-transfer-encoding. Doable but not a one-session task.
-- **Don't change the cache key shape** without bumping `LIVE_AUDIO_CACHE_VERSION` or every cached audio file in S3 becomes orphaned.
-- **Don't presynth without a marker** — the existence check at `book_live_audio_dir(book_id) / ".presynth-done.json"` is what makes re-opens instant. Skipping it = re-running synth on every open.
-
-## How to test changes
-
-```bash
-# Terminal 1 — backend
-cd C:/Users/miroa/storybook-reader
-uvicorn server.app:app --host 127.0.0.1 --port 8000 --reload
-
-# Terminal 2 — frontend
-cd C:/Users/miroa/storybook-reader/web-next
-npm run dev   # port 5175, proxies /api → 127.0.0.1:8000
-```
-
-Upload a small text file via the UI. Watch terminal 1 for `presynth-` thread logs.
-Open the book — first play should be a cache hit (instant). If it's not, check
-`library/<bookId>/live_audio/.presynth-done.json` and the `*.wav` files there.
-
-For E2E:
-
-```bash
-cd web-next
-npm run test:e2e   # Playwright; uses VITE_USE_MOCKS=1 — does NOT exercise real TTS
-```
-
-Real TTS testing requires `VITE_USE_MOCKS` unset and live API keys.
-
-## Vercel-specific gotchas
-
-- `threading.Thread` daemon dies on lambda return. Auto-presynth on upload won't complete server-side on Vercel. The frontend's `useEffect` presynth call DOES still work because it returns a `jobId` and the work runs in the same lambda invocation that handles each `live-audio` chunk request — but only chunks the user actually scrolls past will get cached.
-- For true server-side presynth in production: deploy a separate worker (Fly machine, Cloud Run job, or a Vercel Cron that walks pending books).
-- `BOOK_STORAGE_BUCKET` + AWS creds must be set in Vercel **production** env (not just preview/dev). Without S3 the cache is local to one lambda invocation and lost.
-
-## Regression watchpoints (added 2026-04-30)
-
-Real bugs that landed previously when "fixing" things in or near the audio path:
-
-- **In-process caches are broken on Vercel.** Any module-global `dict`/`set` (e.g. the old `_books_cache` in `server/app.py`) only persists within one lambda invocation. On Vercel, each request can hit a fresh container — making just-uploaded books invisible for 30–60 s. **Rule:** if you find or add a process-local cache anywhere on the request path, ask whether it's keyed correctly across instances. Default to no in-process caching unless there's a measured perf reason.
-- **Marker file is single-provider.** `library/<bookId>/live_audio/.presynth-done.json` records ONE provider+voice. If kokoro and google both auto-presynth (`_AUTO_PRESYNTH_PROVIDERS`), whichever finishes last wins the marker. The earlier-finished provider then gets re-run on next visit because the marker no longer matches its provider/voice. Known limitation; if user reports "kokoro re-warming when google was already cached", it's this.
-- **Cache key shape mutations orphan S3.** Any field added/removed in the SHA-1 input for `build_live_audio_payload` must be paired with a `LIVE_AUDIO_CACHE_VERSION` bump (current: 7). Otherwise every existing audio file in S3 is unreachable.
-- **Web Audio AudioContext suspension on iOS.** If you change the unlock path (gesture → `ctx.resume()`), test on iOS Safari — the gapless scheduling silently no-ops if the context is suspended.
-- **Don't `npm run build` the legacy `web-rewrite/` dir.** It exists but isn't deployed; production is `web-next/`. Mistaking the dirs has bricked deploys before.
-
-## Z-index ladder (current, 2026-04-30)
-
-Bumping any one of these without checking the others has caused real bugs. Order from bottom to top:
+## Z-index ladder (bump one → check all)
 
 | z-index | Element | Notes |
 |--------:|---------|-------|
 | `z-[54]` | Audio-follow highlight | `pointer-events-none` |
 | `z-[55]` | Selection overlay | `pointer-events-none` |
-| `z-[60]` | Selection action menu | The vocab/dictionary/play popup |
-| `z-[65]` | BottomSheet (audio + appearance) | Container + backdrop |
+| `z-[60]` | Selection action menu | Vocab/dictionary/play popup |
+| `z-[65]` | BottomSheet | Container + backdrop |
 | `z-[70]` | Toast | `pointer-events-none` |
-| `z-[80]` | shadcn `Select` dropdown portal | Set in `components/ui/select.tsx`. MUST stay above sheet so voice/provider dropdowns are clickable inside it. |
+| `z-[80]` | shadcn Select portal | `components/ui/select.tsx` — must stay above sheet |
 
-If you add a new element with `z-[6x]` or higher, document it here AND verify it doesn't interact with the sheet/dropdown layering.
+New element at `z-[6x]` or higher: add it to this table AND verify against sheet/dropdown layering.
 
-## Pointers to the worklog
+## Regression watchpoints
+- Z-index bump without checking the full ladder above
+- Cache key field change without `LIVE_AUDIO_CACHE_VERSION` bump → orphaned S3 audio
+- `new Audio()` in main reader path → gaps between chunks
+- Changing `ctx.resume()` gesture unlock → test iOS Safari (context suspension silently no-ops gapless scheduling)
+- `web-rewrite/` is legacy and NOT deployed — don't edit it; production is `web-next/`
+- Prefetch ahead > 6 → each chunk is a real API call, costs scale linearly
 
-`C:\Users\miroa\storybook-reader\WORKLOG.md` records what was changed in each recent commit and what specifically might regress. Read the most recent entries before editing this area.
+## Test commands
+
+```bash
+# Backend
+uvicorn server.app:app --host 127.0.0.1 --port 8000 --reload
+
+# Frontend
+cd web-next && npm run dev   # port 5175, proxies /api → :8000
+
+# Typecheck + build
+cd web-next && npm run typecheck && npm run build
+```

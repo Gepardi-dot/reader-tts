@@ -29,8 +29,40 @@ interface Book {
 
 interface ReadingProgress { pageNumber: number; totalPages: number; updatedAt?: string }
 
-// Warm cover tints cycling across books
+// Warm cover tints cycling across books (fallback when no cover image found)
 const COVER_COLORS = ['#fef6ee', '#eef4fb', '#f0efe9', '#f8eef0']
+
+function cleanTitleForSearch(raw: string): string {
+  return raw
+    .replace(/\[[\d\s]*\]/g, '')   // remove [1], [2], etc.
+    .replace(/_+/g, ' ')            // underscores → spaces
+    .replace(/\s*-\s*/g, ' ')       // " - " → space
+    .replace(/^\d{4}\s*/g, '')      // strip leading year (e.g. "1908kybalion")
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function useBookCover(title: string) {
+  return useQuery({
+    queryKey: ['book-cover', title],
+    queryFn: async () => {
+      const q = cleanTitleForSearch(title)
+      if (q.length < 2) return null
+      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=1&fields=items(volumeInfo/imageLinks)`
+      const res = await fetch(url)
+      if (!res.ok) return null
+      const data = await res.json() as { items?: { volumeInfo?: { imageLinks?: { thumbnail?: string; smallThumbnail?: string } } }[] }
+      const links = data?.items?.[0]?.volumeInfo?.imageLinks
+      const raw = links?.thumbnail ?? links?.smallThumbnail ?? null
+      if (!raw) return null
+      // Upgrade to https, remove curl effect, request a slightly larger size
+      return raw.replace('http://', 'https://').replace('&edge=curl', '').replace('zoom=1', 'zoom=2')
+    },
+    staleTime: Infinity,
+    gcTime: 24 * 60 * 60 * 1000,
+    retry: false,
+  })
+}
 
 const PARTICLE_WORDS = [
   'chapter', 'verse', 'prologue', 'epilogue', 'memoir', 'fable',
@@ -158,6 +190,7 @@ function BookCard({ book, progress, index, onDelete }: {
 }) {
   const pct = readPct(progress)
   const coverBg = COVER_COLORS[index % COVER_COLORS.length]
+  const { data: coverUrl } = useBookCover(book.title)
 
   return (
     <div className="group relative">
@@ -166,20 +199,30 @@ function BookCard({ book, progress, index, onDelete }: {
         className="block rounded-xl border border-border bg-card hover:border-primary/40 hover:shadow-sm transition-all overflow-hidden"
       >
         {/* Cover */}
-        <div
-          className="aspect-[2/3] relative overflow-hidden flex flex-col items-center justify-center p-4 gap-3"
-          style={{ backgroundColor: coverBg }}
-        >
-          <BookOpen size={32} className="text-foreground/20 shrink-0" />
-          <span
-            className="text-xs text-foreground/50 text-center line-clamp-3 leading-snug"
-            style={{ fontFamily: 'Lora, Georgia, serif' }}
-          >
-            {book.title}
-          </span>
-          {/* Progress bar — inset at bottom, no blur */}
+        <div className="aspect-[2/3] relative overflow-hidden">
+          {coverUrl ? (
+            <img
+              src={coverUrl}
+              alt={book.title}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <div
+              className="w-full h-full flex flex-col items-center justify-center p-4 gap-3"
+              style={{ backgroundColor: coverBg }}
+            >
+              <BookOpen size={32} className="text-foreground/20 shrink-0" />
+              <span
+                className="text-xs text-foreground/50 text-center line-clamp-3 leading-snug"
+                style={{ fontFamily: 'Lora, Georgia, serif' }}
+              >
+                {book.title}
+              </span>
+            </div>
+          )}
+          {/* Progress bar overlaid at bottom */}
           {pct > 0 && (
-            <div className="absolute inset-x-2.5 bottom-2.5 h-1 rounded-full bg-black/10">
+            <div className="absolute inset-x-2.5 bottom-2.5 h-1 rounded-full bg-black/20">
               <div
                 className="h-full rounded-full bg-primary transition-all"
                 style={{ width: `${pct}%` }}

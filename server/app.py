@@ -46,7 +46,6 @@ RUNTIME_ENV_NAMES = (
     "AWS_DEFAULT_REGION",
     "OPENAI_API_KEY",
     "OPENAI_CONTEXT_MODEL",
-    "OPENAI_TTS_MODEL",
     "GEMINI_API_KEY",
     "GEMINI_TTS_MODEL",
     "GEMMA_PROVIDER",
@@ -58,8 +57,6 @@ RUNTIME_ENV_NAMES = (
     "KOKORO_REMOTE_URL",
     "KOKORO_REMOTE_API_KEY",
     "KOKORO_REMOTE_TIMEOUT_SECONDS",
-    "PIPER_EXE",
-    "PIPER_ESPEAK_DATA",
     "SUPABASE_DB_URL",
     "SUPABASE_POOLER_URL",
     "DATABASE_URL",
@@ -180,8 +177,6 @@ DICTIONARY_BUNDLE_ROOT = ROOT / "dictionary"
 RUNTIME_DICTIONARY_ROOT = RUNTIME_ROOT / "dictionary"
 OFFLINE_DICTIONARY_BUNDLE_DB = DICTIONARY_BUNDLE_ROOT / "offline" / "dictionary.sqlite3"
 OPEN_WORDNET_BUNDLE_DIR = DICTIONARY_BUNDLE_ROOT / "open-wordnet"
-OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
-OPENAI_TTS_MODEL = env_value("OPENAI_TTS_MODEL") or "gpt-4o-mini-tts"
 GEMINI_TTS_MODEL = env_value("GEMINI_TTS_MODEL") or "gemini-2.5-flash-preview-tts"
 KOKORO_REMOTE_URL = (env_value("KOKORO_REMOTE_URL") or "").rstrip("/")
 KOKORO_REMOTE_API_KEY = env_value("KOKORO_REMOTE_API_KEY") or ""
@@ -196,7 +191,7 @@ BOOK_STORAGE_ADDRESSING_STYLE = (env_value("BOOK_STORAGE_ADDRESSING_STYLE") or "
 LOCAL_DEV_USER_ID = "00000000-0000-0000-0000-000000000001"
 LIVE_AUDIO_CACHE_VERSION = 7
 PROVIDER_TEST_CACHE_VERSION = 2
-TTSProviderId = Literal["piper", "google", "openai", "kokoro"]
+TTSProviderId = Literal["google", "kokoro"]
 GEMINI_MAX_RETRY_ATTEMPTS = 3
 GEMINI_MAX_RETRY_DELAY_SECONDS = 75.0
 BOOK_STORAGE_BUCKET = env_value("BOOK_STORAGE_BUCKET")
@@ -285,25 +280,6 @@ GEMINI_TTS_MODELS = [
     ),
 ]
 GEMINI_TTS_MODEL_IDS = {item["id"] for item in GEMINI_TTS_MODELS}
-OPENAI_TTS_MODELS = [
-    provider_model_option(
-        "gpt-4o-mini-tts",
-        "GPT-4o mini TTS",
-        "Fast promptable narration with a lightweight model.",
-    )
-]
-OPENAI_VOICES = [
-    voice_option("alloy", "Alloy", gender="neutral", gender_source="estimated", style="Balanced"),
-    voice_option("ash", "Ash", gender="male", gender_source="estimated", style="Calm"),
-    voice_option("ballad", "Ballad", gender="male", gender_source="estimated", style="Dramatic", tags=["Story"]),
-    voice_option("coral", "Coral", gender="female", gender_source="estimated", style="Warm", tags=["Story"]),
-    voice_option("echo", "Echo", gender="male", gender_source="estimated", style="Clear"),
-    voice_option("fable", "Fable", gender="male", gender_source="estimated", style="Narrative", tags=["Story"]),
-    voice_option("nova", "Nova", gender="female", gender_source="estimated", style="Bright"),
-    voice_option("onyx", "Onyx", gender="male", gender_source="estimated", style="Deep", tags=["Story"]),
-    voice_option("sage", "Sage", gender="female", gender_source="estimated", style="Measured"),
-    voice_option("shimmer", "Shimmer", gender="female", gender_source="estimated", style="Light"),
-]
 GEMINI_VOICES = [
     voice_option("Zephyr", "Zephyr", gender="neutral", gender_source="estimated", style="Bright"),
     voice_option("Puck", "Puck", gender="male", gender_source="estimated", style="Upbeat"),
@@ -523,7 +499,7 @@ class JobCancelledError(RuntimeError):
 
 
 class GenerateAudioRequest(BaseModel):
-    provider: TTSProviderId = "piper"
+    provider: TTSProviderId = "kokoro"
     voice: str | None = None
     model: str | None = None
     output_format: Literal["mp3", "m4b", "wav"] = "mp3"
@@ -534,7 +510,7 @@ class GenerateAudioRequest(BaseModel):
 
 
 class ProviderTestRequest(BaseModel):
-    provider: TTSProviderId = "piper"
+    provider: TTSProviderId = "kokoro"
     voice: str | None = None
     model: str | None = None
     narration_style: str = Field(default=DEFAULT_NARRATION_STYLE, max_length=1500)
@@ -543,7 +519,7 @@ class ProviderTestRequest(BaseModel):
 
 
 class LiveAudioRequest(BaseModel):
-    provider: TTSProviderId = "openai"
+    provider: TTSProviderId = "kokoro"
     voice: str | None = None
     model: str | None = None
     output_format: Literal["mp3", "wav"] = "mp3"
@@ -3006,28 +2982,6 @@ def provider_catalog() -> list[dict[str, Any]]:
             "defaultModel": resolve_google_tts_model(None),
             "voiceMetaNote": "Gender tags are estimated for Gemini voices. Style labels come from Google voice demos.",
         },
-        {
-            "id": "openai",
-            "name": "OpenAI TTS",
-            "available": bool(env_value("OPENAI_API_KEY")),
-            "recommended": False,
-            "description": "OpenAI text-to-speech with natural voices.",
-            "voices": OPENAI_VOICES,
-            "defaultVoice": "nova",
-            "models": OPENAI_TTS_MODELS,
-            "defaultModel": resolve_openai_tts_model(None),
-        },
-        {
-            "id": "piper",
-            "name": "Piper TTS",
-            "available": bool(env_value("PIPER_EXE")),
-            "recommended": False,
-            "description": "Fully offline neural TTS using Piper. Requires PIPER_EXE env var.",
-            "voices": [],
-            "defaultVoice": None,
-            "models": [],
-            "defaultModel": None,
-        },
     ]
 
 
@@ -3300,8 +3254,6 @@ def record_job_progress(
 def clamp_chunk_size(provider: str, requested: int | None) -> int:
     if provider == "google":
         return min(max(requested or 2200, 500), 4000)
-    if provider == "openai":
-        return min(max(requested or 1400, 400), 2500)
     return min(max(requested or 900, 300), 1600)
 
 
@@ -3316,10 +3268,6 @@ def resolve_google_tts_model(requested_model: str | None) -> str:
             return GEMINI_TTS_MODELS[0]["id"]
         raise RuntimeError(f"Unsupported Gemini TTS model: {model_name}")
     return model_name
-
-
-def resolve_openai_tts_model(requested_model: str | None) -> str:
-    return requested_model or OPENAI_TTS_MODEL
 
 
 def prepare_synthesis_chunks(text: str, provider: str, requested: int | None) -> list[str]:
@@ -4298,150 +4246,6 @@ def delete_book_files(book_id: str) -> None:
             path.unlink(missing_ok=True)
 
 
-def synthesize_piper(
-    *,
-    chunks: list[str],
-    output_path: Path,
-    chunk_dir: Path | None,
-    voice: str | None,
-    output_format: str,
-    length_scale: float,
-    sentence_silence: float,
-    job_id: str | None,
-) -> None:
-    model_path = Path(voice or provider_catalog()[0]["defaultVoice"] or pdf_to_audio.DEFAULT_MODEL).expanduser().resolve()
-    config_path = Path(f"{model_path}.json")
-    if not model_path.exists():
-        raise RuntimeError(f"Piper voice model not found: {model_path}")
-    if not config_path.exists():
-        raise RuntimeError(f"Piper voice config not found: {config_path}")
-
-    piper_exe = pdf_to_audio.find_binary(None, "PIPER_EXE", pdf_to_audio.DEFAULT_PIPER_EXE)
-    ffmpeg_exe = pdf_to_audio.find_binary(
-        None,
-        "FFMPEG_EXE",
-        Path("ffmpeg.exe"),
-        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
-    )
-    espeak_data = Path(env_value("PIPER_ESPEAK_DATA") or str(pdf_to_audio.DEFAULT_ESPEAK_DATA)).expanduser().resolve()
-
-    with tempfile.TemporaryDirectory(prefix="storybook_piper_", dir=str(output_path.parent)) as temp_dir:
-        wav_dir = chunk_dir or Path(temp_dir)
-        wav_dir.mkdir(parents=True, exist_ok=True)
-        wav_paths: list[Path] = []
-        total = len(chunks)
-
-        for index, chunk in enumerate(chunks, start=1):
-            raise_if_job_cancelled(job_id)
-            wav_path = wav_dir / f"chunk_{index:05d}.wav"
-            command = [
-                str(piper_exe),
-                "-m",
-                str(model_path),
-                "-c",
-                str(config_path),
-                "-f",
-                str(wav_path),
-                "--espeak_data",
-                str(espeak_data),
-                "--speaker",
-                "0",
-                "--length_scale",
-                str(length_scale),
-                "--noise_scale",
-                "0.667",
-                "--noise_w",
-                "0.8",
-                "--sentence_silence",
-                str(sentence_silence),
-            ]
-            pdf_to_audio.run_subprocess(command, input_text=chunk)
-            normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
-            wav_paths.append(wav_path)
-            record_job_progress(
-                job_id=job_id,
-                index=index,
-                total=total,
-                message=f"Synthesizing audio chunk {index} of {total} with Piper.",
-            )
-
-        raise_if_job_cancelled(job_id)
-        concat_provider_audio_chunks(
-            wav_paths,
-            ffmpeg_exe=ffmpeg_exe,
-            output_path=output_path,
-            output_format=output_format,
-        )
-
-
-def synthesize_openai(
-    *,
-    chunks: list[str],
-    output_path: Path,
-    chunk_dir: Path | None,
-    model: str | None,
-    voice: str | None,
-    narration_style: str,
-    output_format: str,
-    job_id: str | None,
-) -> None:
-    api_key = env_value("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured.")
-
-    ffmpeg_exe = pdf_to_audio.find_binary(
-        None,
-        "FFMPEG_EXE",
-        Path("ffmpeg.exe"),
-        pdf_to_audio.DEFAULT_FFMPEG_GLOB,
-    )
-    chosen_model = resolve_openai_tts_model(model)
-    chosen_voice = voice or "coral"
-
-    with tempfile.TemporaryDirectory(prefix="storybook_openai_", dir=str(output_path.parent)) as temp_dir:
-        wav_dir = chunk_dir or Path(temp_dir)
-        wav_dir.mkdir(parents=True, exist_ok=True)
-        wav_paths: list[Path] = []
-        total = len(chunks)
-
-        with httpx.Client(timeout=120.0) as client:
-            for index, chunk in enumerate(chunks, start=1):
-                raise_if_job_cancelled(job_id)
-                response = client.post(
-                    OPENAI_TTS_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": chosen_model,
-                        "voice": chosen_voice,
-                        "input": chunk,
-                        "instructions": narration_style,
-                        "response_format": "wav",
-                    },
-                )
-                response.raise_for_status()
-                wav_path = wav_dir / f"chunk_{index:05d}.wav"
-                wav_path.write_bytes(response.content)
-                normalize_chunk_wav(wav_path, ffmpeg_exe=ffmpeg_exe)
-                wav_paths.append(wav_path)
-                record_job_progress(
-                    job_id=job_id,
-                    index=index,
-                    total=total,
-                    message=f"Synthesizing audio chunk {index} of {total} with OpenAI.",
-                )
-
-        raise_if_job_cancelled(job_id)
-        concat_provider_audio_chunks(
-            wav_paths,
-            ffmpeg_exe=ffmpeg_exe,
-            output_path=output_path,
-            output_format=output_format,
-        )
-
-
 def synthesize_google(
     *,
     chunks: list[str],
@@ -4522,18 +4326,7 @@ def synthesize_provider_audio(
 ) -> str:
     chosen_model = ""
 
-    if provider_id == "piper":
-        synthesize_piper(
-            chunks=chunks,
-            output_path=output_path,
-            chunk_dir=chunk_dir,
-            voice=voice,
-            output_format=output_format,
-            length_scale=length_scale,
-            sentence_silence=sentence_silence,
-            job_id=job_id,
-        )
-    elif provider_id == "google":
+    if provider_id == "google":
         chosen_model = resolve_google_tts_model(model)
         synthesize_google(
             chunks=chunks,
@@ -4545,18 +4338,6 @@ def synthesize_provider_audio(
             output_format=output_format,
             length_scale=length_scale,
             sentence_silence=sentence_silence,
-            job_id=job_id,
-        )
-    elif provider_id == "openai":
-        chosen_model = resolve_openai_tts_model(model)
-        synthesize_openai(
-            chunks=chunks,
-            output_path=output_path,
-            chunk_dir=chunk_dir,
-            model=chosen_model,
-            voice=voice,
-            narration_style=narration_style,
-            output_format=output_format,
             job_id=job_id,
         )
     elif provider_id == "kokoro":
@@ -4608,8 +4389,6 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         chosen_model = resolve_google_tts_model(request.model)
     elif request.provider == "kokoro":
         chosen_voice = chosen_voice or "af_heart"
-    elif request.provider == "openai":
-        chosen_model = resolve_openai_tts_model(request.model)
 
     playback_format = "wav"
 
@@ -4620,9 +4399,9 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         "voice": chosen_voice,
         "model": chosen_model or request.model,
         "outputFormat": playback_format,
-        # Kokoro and Piper are ONNX/local models that ignore narration_style; normalize
-        # to "" so cache keys are provider-agnostic with respect to this field.
-        "narrationStyle": "" if request.provider in ("kokoro", "piper") else request.narration_style,
+        # Kokoro is an ONNX model that ignores narration_style; normalize to "" so
+        # cache keys are provider-agnostic with respect to this field.
+        "narrationStyle": "" if request.provider == "kokoro" else request.narration_style,
         "lengthScale": request.length_scale,
         "sentenceSilence": request.sentence_silence,
         "start": request.start,
@@ -4907,8 +4686,6 @@ def run_provider_test(request: ProviderTestRequest) -> dict[str, Any]:
     chosen_voice = request.voice or provider.get("defaultVoice")
     if request.provider == "google":
         chosen_model = resolve_google_tts_model(request.model)
-    elif request.provider == "openai":
-        chosen_model = resolve_openai_tts_model(request.model)
 
     resolved_model = chosen_model or ""
     sample_text = provider_test_snippet(request.provider)
@@ -5023,7 +4800,7 @@ def _run_presynth_job(
             voice=request.voice,
             model=None,
             output_format="mp3",
-            narration_style="",  # normalized — Kokoro/Piper ignore this field
+            narration_style="",  # normalized — Kokoro ignores this field
             length_scale=request.length_scale,
             sentence_silence=request.sentence_silence,
             pageNumber=1,
@@ -5073,8 +4850,7 @@ def _run_presynth_job(
 
 
 # Providers eligible for upload-time auto-presynth. Restricted to ones with a
-# stable default voice and a cache-friendly synthesis path. OpenAI and Piper
-# could be added later but are usually not the user's default for narration.
+# stable default voice and a cache-friendly synthesis path.
 _AUTO_PRESYNTH_PROVIDERS: tuple[str, ...] = ("kokoro", "google")
 
 
@@ -5594,8 +5370,6 @@ def health() -> dict[str, Any]:
     providers_configured = {
         "gemini": bool(env_value("GEMINI_API_KEY")),
         "kokoro": kokoro_configured(),
-        "openai": bool(env_value("OPENAI_API_KEY")),
-        "piper": bool(env_value("PIPER_EXE")),
     }
 
     # --- Storage ---

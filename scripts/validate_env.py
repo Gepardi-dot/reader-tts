@@ -85,36 +85,6 @@ def check_tts_providers() -> None:
     else:
         info("Qwen TTS: DASHSCOPE_API_KEY not set (optional)")
 
-    openai_key = env("OPENAI_API_KEY")
-    if openai_key:
-        ok(f"OpenAI TTS: key present (model: {env('OPENAI_TTS_MODEL') or 'default'})")
-        any_provider = True
-    else:
-        info("OpenAI TTS: OPENAI_API_KEY not set (optional)")
-
-    polly_region = env("POLLY_REGION") or env("AWS_REGION") or env("AWS_DEFAULT_REGION")
-    polly_key = env("AWS_ACCESS_KEY_ID")
-    polly_profile = env("AWS_PROFILE")
-    if polly_region and (polly_key or polly_profile):
-        cred_source = f"key={polly_key[:8]}…" if polly_key else f"profile={polly_profile}"
-        ok(f"Amazon Polly: region={polly_region}, {cred_source}")
-        any_provider = True
-    elif polly_region:
-        warn("Amazon Polly: region set but no credentials (AWS_ACCESS_KEY_ID or AWS_PROFILE)")
-    else:
-        info("Amazon Polly: not configured (optional)")
-
-    piper_exe = env("PIPER_EXE")
-    if piper_exe:
-        piper_path = Path(piper_exe)
-        if piper_path.exists():
-            ok(f"Piper TTS: executable found at {piper_exe}")
-            any_provider = True
-        else:
-            warn(f"Piper TTS: PIPER_EXE is set but file not found: {piper_exe}")
-    else:
-        info("Piper TTS: PIPER_EXE not set (optional)")
-
     if not any_provider:
         fail("No TTS providers are configured — the app will not be able to narrate books")
 
