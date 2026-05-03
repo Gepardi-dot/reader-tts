@@ -1554,7 +1554,7 @@ class VocabularyStudioService:
                 select *
                 from decks
                 where user_id = ?
-                order by updated_at desc, title collate nocase asc
+                order by updated_at desc, lower(title) asc
                 """,
                 (self.user_id,),
             ).fetchall()
@@ -1566,7 +1566,7 @@ class VocabularyStudioService:
             select *
             from decks
             where user_id = ?
-            order by updated_at desc, title collate nocase asc
+            order by updated_at desc, lower(title) asc
             """,
             (self.user_id,),
         ).fetchall()
