@@ -1674,6 +1674,176 @@ _SCHEMA_MIGRATIONS: list[list[str]] = [
         """,
         "create index if not exists book_import_cache_user_updated on book_import_cache(user_id, updated_at desc)",
     ],
+    # Version 7 — vocabulary studio (decks/notes/cards/reviews/etc).
+    # Was applied first via Supabase MCP under the name `vocabulary_studio_v1`;
+    # mirrored here so a fresh DB self-bootstraps. All statements are idempotent.
+    [
+        """
+        create table if not exists decks (
+            id           text        primary key,
+            user_id      uuid        not null references auth.users(id) on delete cascade,
+            title        text        not null,
+            description  text,
+            config_json  jsonb       not null default '{}'::jsonb,
+            created_at   timestamptz not null,
+            updated_at   timestamptz not null
+        )
+        """,
+        "create index if not exists idx_decks_user_updated_at on decks (user_id, updated_at desc)",
+        """
+        create table if not exists notes (
+            id               text        primary key,
+            deck_id          text        not null references decks(id) on delete cascade,
+            user_id          uuid        not null references auth.users(id) on delete cascade,
+            note_type        text        not null,
+            front            text        not null,
+            back             text,
+            extra            text,
+            hint             text,
+            explanation      text,
+            example_sentence text,
+            image_url        text,
+            audio_url        text,
+            tags_json        jsonb       not null default '[]'::jsonb,
+            topic            text,
+            source_ref       text        unique,
+            metadata_json    jsonb       not null default '{}'::jsonb,
+            created_at       timestamptz not null,
+            updated_at       timestamptz not null
+        )
+        """,
+        "create index if not exists idx_notes_deck_updated_at on notes (deck_id, updated_at desc)",
+        "create index if not exists idx_notes_user_deck_updated on notes (user_id, deck_id, updated_at desc)",
+        """
+        create table if not exists cards (
+            id                  text        primary key,
+            deck_id             text        not null references decks(id) on delete cascade,
+            note_id             text        not null references notes(id) on delete cascade,
+            user_id             uuid        not null references auth.users(id) on delete cascade,
+            card_type           text        not null,
+            state               text        not null,
+            due_at              timestamptz not null,
+            last_review_at      timestamptz,
+            stability           double precision,
+            difficulty          double precision,
+            elapsed_days        integer     not null default 0,
+            scheduled_days      integer     not null default 0,
+            reps                integer     not null default 0,
+            lapses              integer     not null default 0,
+            learning_step_index integer,
+            is_suspended        boolean     not null default false,
+            position            integer     not null default 0,
+            cloze_index         integer,
+            cue                 text        not null,
+            answer              text        not null,
+            created_at          timestamptz not null,
+            updated_at          timestamptz not null
+        )
+        """,
+        "create index if not exists idx_cards_deck_due on cards (deck_id, is_suspended, state, due_at)",
+        "create index if not exists idx_cards_note on cards (note_id, position)",
+        "create index if not exists idx_cards_user_deck_due on cards (user_id, deck_id, is_suspended, state, due_at)",
+        """
+        create table if not exists review_logs (
+            id                    text        primary key,
+            card_id               text        not null references cards(id) on delete cascade,
+            user_id               uuid        not null references auth.users(id) on delete cascade,
+            reviewed_at           timestamptz not null,
+            rating                text        not null,
+            state_before          text        not null,
+            state_after           text        not null,
+            due_before            timestamptz not null,
+            due_after             timestamptz not null,
+            elapsed_days          integer     not null,
+            scheduled_days_before integer     not null,
+            scheduled_days_after  integer     not null,
+            response_ms           integer,
+            answer_mode           text        not null,
+            was_auto_graded       boolean     not null default false,
+            typed_response        text,
+            created_at            timestamptz not null
+        )
+        """,
+        "create index if not exists idx_review_logs_card_reviewed_at on review_logs (card_id, reviewed_at desc)",
+        "create index if not exists idx_review_logs_reviewed_at on review_logs (reviewed_at desc)",
+        "create index if not exists idx_review_logs_user_card on review_logs (user_id, card_id, reviewed_at desc)",
+        """
+        create table if not exists production_logs (
+            id             text        primary key,
+            card_id        text        not null references cards(id) on delete cascade,
+            user_id        uuid        not null references auth.users(id) on delete cascade,
+            created_at     timestamptz not null,
+            sentences_json jsonb       not null default '[]'::jsonb
+        )
+        """,
+        "create index if not exists idx_production_logs_card_created_at on production_logs (card_id, created_at desc)",
+        """
+        create table if not exists card_context_cache (
+            id           text        primary key,
+            card_id      text        not null references cards(id) on delete cascade,
+            user_id      uuid        not null references auth.users(id) on delete cascade,
+            cache_key    text        not null,
+            payload_json jsonb       not null default '{}'::jsonb,
+            source       text        not null,
+            created_at   timestamptz not null,
+            updated_at   timestamptz not null,
+            unique (card_id, cache_key)
+        )
+        """,
+        "create index if not exists idx_card_context_cache_card_updated_at on card_context_cache (card_id, updated_at desc)",
+        """
+        create table if not exists practice_attempts (
+            id                 text        primary key,
+            card_id            text        not null references cards(id) on delete cascade,
+            user_id            uuid        not null references auth.users(id) on delete cascade,
+            mode               text        not null,
+            step               text        not null,
+            turn_index         integer     not null default 0,
+            provider           text        not null,
+            learner_input_json jsonb,
+            ai_payload_json    jsonb       not null default '{}'::jsonb,
+            verdict            text,
+            suggested_rating   text,
+            created_at         timestamptz not null
+        )
+        """,
+        "create index if not exists idx_practice_attempts_card_created_at on practice_attempts (card_id, created_at desc)",
+        "create index if not exists idx_practice_attempts_mode_step on practice_attempts (mode, step, created_at desc)",
+        """
+        create table if not exists learning_events (
+            id           text        primary key,
+            user_id      uuid        not null references auth.users(id) on delete cascade,
+            event_type   text        not null,
+            xp_delta     integer     not null default 0,
+            book_id      text,
+            deck_id      text,
+            card_id      text,
+            label        text        not null,
+            detail       text,
+            payload_json jsonb       not null default '{}'::jsonb,
+            created_at   timestamptz not null
+        )
+        """,
+        "create index if not exists idx_learning_events_user_created_at on learning_events (user_id, created_at desc)",
+        "alter table decks              enable row level security",
+        "alter table notes              enable row level security",
+        "alter table cards              enable row level security",
+        "alter table review_logs        enable row level security",
+        "alter table production_logs    enable row level security",
+        "alter table card_context_cache enable row level security",
+        "alter table practice_attempts  enable row level security",
+        "alter table learning_events    enable row level security",
+        # Policies are idempotent via drop-if-exists/create pairs (Postgres 15
+        # has no `create policy if not exists`).
+        "drop policy if exists decks_owner on decks; create policy decks_owner on decks for all using (auth.uid() = user_id)",
+        "drop policy if exists notes_owner on notes; create policy notes_owner on notes for all using (auth.uid() = user_id)",
+        "drop policy if exists cards_owner on cards; create policy cards_owner on cards for all using (auth.uid() = user_id)",
+        "drop policy if exists review_logs_owner on review_logs; create policy review_logs_owner on review_logs for all using (auth.uid() = user_id)",
+        "drop policy if exists production_logs_owner on production_logs; create policy production_logs_owner on production_logs for all using (auth.uid() = user_id)",
+        "drop policy if exists card_context_cache_owner on card_context_cache; create policy card_context_cache_owner on card_context_cache for all using (auth.uid() = user_id)",
+        "drop policy if exists practice_attempts_owner on practice_attempts; create policy practice_attempts_owner on practice_attempts for all using (auth.uid() = user_id)",
+        "drop policy if exists learning_events_owner on learning_events; create policy learning_events_owner on learning_events for all using (auth.uid() = user_id)",
+    ],
 ]
 
 

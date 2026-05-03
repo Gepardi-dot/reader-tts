@@ -17,6 +17,135 @@ from fsrs import Card, Rating as FsrsRating, Scheduler, State as FsrsState
 from pydantic import BaseModel, Field
 
 
+def _dialect() -> str:
+    """Return 'postgres' if a Supabase pooler/DB URL is configured, else 'sqlite'."""
+    url = (
+        os.getenv("SUPABASE_POOLER_URL")
+        or os.getenv("SUPABASE_DB_URL")
+        or os.getenv("DATABASE_URL")
+    )
+    return "postgres" if url else "sqlite"
+
+
+def _supabase_db_url() -> str | None:
+    return (
+        os.getenv("SUPABASE_POOLER_URL")
+        or os.getenv("SUPABASE_DB_URL")
+        or os.getenv("DATABASE_URL")
+    )
+
+
+_TS_PARAM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+
+def _pg_param(value: Any) -> Any:
+    """Adapt a sqlite-style param to psycopg.
+
+    The codebase passes ISO 8601 strings for timestamps and json.dumps strings
+    for JSON columns. psycopg needs datetimes for timestamptz comparisons; jsonb
+    inserts go through `_jp()` which already wraps in psycopg's Jsonb adapter.
+    """
+    if isinstance(value, str) and _TS_PARAM_RE.match(value):
+        if value.endswith("Z"):
+            normalized = f"{value[:-1]}+00:00"
+        else:
+            normalized = value
+        try:
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            return value
+    return value
+
+
+def _jp(value: Any) -> Any:
+    """Encode a Python value for a JSON-typed column (jsonb on Postgres, text on SQLite)."""
+    if value is None:
+        return None
+    if _dialect() == "postgres":
+        from psycopg.types.json import Jsonb
+
+        if isinstance(value, str):
+            try:
+                value = json.loads(value) if value else None
+            except json.JSONDecodeError:
+                return None
+        return Jsonb(value) if value is not None else None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+class _HybridRow:
+    """Row that supports both sqlite3.Row (`row["col"]`, `row[0]`) and dict semantics."""
+
+    __slots__ = ("_columns", "_values", "_lookup")
+
+    def __init__(self, columns: list[str], values: list[Any]) -> None:
+        self._columns = columns
+        self._values = list(values)
+        self._lookup = {name: idx for idx, name in enumerate(columns)}
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, int):
+            return self._values[key]
+        return self._values[self._lookup[key]]
+
+    def __contains__(self, key: Any) -> bool:
+        return key in self._lookup
+
+    def keys(self) -> list[str]:
+        return list(self._columns)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        idx = self._lookup.get(key)
+        return self._values[idx] if idx is not None else default
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+def _hybrid_row_factory(cursor: Any) -> Any:
+    desc = cursor.description
+    if desc is None:
+        return None
+    columns = [c.name for c in desc]
+
+    def make(values: list[Any]) -> _HybridRow:
+        return _HybridRow(columns, list(values))
+
+    return make
+
+
+class _DialectConn:
+    """Thin wrapper that lets the existing sqlite-style code run against psycopg.
+
+    On Postgres path: rewrites `?` placeholders to `%s`, adapts ISO timestamp
+    strings to datetime, and exposes `commit()` / `close()`. The underlying
+    connection's row factory yields `_HybridRow` so `row["col"]`, `row[0]`,
+    and `"col" in row.keys()` all work as before.
+    """
+
+    def __init__(self, raw: Any, dialect: str) -> None:
+        self._raw = raw
+        self.dialect = dialect
+
+    def execute(self, sql: str, params: Any = ()) -> Any:
+        if self.dialect == "postgres":
+            sql = sql.replace("?", "%s")
+            if params:
+                params = tuple(_pg_param(p) for p in params)
+        return self._raw.execute(sql, params or ())
+
+    def commit(self) -> None:
+        self._raw.commit()
+
+    def close(self) -> None:
+        self._raw.close()
+
+
 DEFAULT_USER_ID = "local-reader"
 DEFAULT_DECK_TITLE = "Reader Vocabulary"
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
@@ -214,14 +343,18 @@ def _normalize_tags(values: list[str]) -> list[str]:
     return normalized[:24]
 
 
-def _json_load_dict(raw: str | None) -> dict[str, Any]:
-    if not raw:
+def _json_load_dict(raw: Any) -> dict[str, Any]:
+    if raw is None or raw == "":
         return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _metadata_mnemonic(row: sqlite3.Row) -> str | None:
@@ -236,14 +369,18 @@ def _metadata_mnemonic(row: sqlite3.Row) -> str | None:
     return None
 
 
-def _json_load_list(raw: str | None) -> list[Any]:
-    if not raw:
+def _json_load_list(raw: Any) -> list[Any]:
+    if raw is None or raw == "":
         return []
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    return parsed if isinstance(parsed, list) else []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
 
 
 def _state_priority(state: str) -> int:
@@ -660,6 +797,22 @@ class VocabularyStudioService:
         with self._migration_lock:
             if self._ready:
                 return
+            if _dialect() == "postgres":
+                # On Postgres, schema is owned by app.py's _SCHEMA_MIGRATIONS
+                # (version 7+). ensure_progress_store() runs the migration once at
+                # the first DB-backed request; calling it here keeps the contract
+                # symmetric with the sqlite branch (after ensure_ready, schema is up).
+                try:
+                    from server import app as _app  # type: ignore
+
+                    _app.ensure_progress_store()
+                except Exception:
+                    # If app module isn't importable from this context (e.g. tests),
+                    # rely on the connection itself to surface schema errors.
+                    pass
+                self._ready = True
+                return
+
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self._db_path)
             try:
@@ -687,8 +840,23 @@ class VocabularyStudioService:
             self._ready = True
 
     @contextmanager
-    def connection(self) -> Iterator[sqlite3.Connection]:
+    def connection(self) -> Iterator[Any]:
         self.ensure_ready()
+        if _dialect() == "postgres":
+            import psycopg
+
+            url = _supabase_db_url()
+            if not url:
+                raise RuntimeError("Postgres dialect selected but no SUPABASE_DB_URL/SUPABASE_POOLER_URL/DATABASE_URL is set.")
+            raw = psycopg.connect(url, row_factory=_hybrid_row_factory)
+            wrapped = _DialectConn(raw, "postgres")
+            try:
+                yield wrapped
+                wrapped.commit()
+            finally:
+                wrapped.close()
+            return
+
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("pragma foreign_keys = on")
@@ -748,15 +916,15 @@ class VocabularyStudioService:
             """
             select
                 count(*) as total_cards,
-                sum(case when is_suspended = 1 then 1 else 0 end) as suspended_cards,
-                sum(case when state = 'new' and is_suspended = 0 then 1 else 0 end) as new_cards,
-                sum(case when state = 'learning' and is_suspended = 0 then 1 else 0 end) as learning_cards,
-                sum(case when state = 'review' and is_suspended = 0 then 1 else 0 end) as review_cards,
-                sum(case when state = 'relearning' and is_suspended = 0 then 1 else 0 end) as relearning_cards,
+                sum(case when is_suspended = true then 1 else 0 end) as suspended_cards,
+                sum(case when state = 'new' and is_suspended = false then 1 else 0 end) as new_cards,
+                sum(case when state = 'learning' and is_suspended = false then 1 else 0 end) as learning_cards,
+                sum(case when state = 'review' and is_suspended = false then 1 else 0 end) as review_cards,
+                sum(case when state = 'relearning' and is_suspended = false then 1 else 0 end) as relearning_cards,
                 sum(
                     case
                         when state in ('learning', 'review', 'relearning')
-                             and is_suspended = 0
+                             and is_suspended = false
                              and due_at <= ?
                         then 1 else 0
                     end
@@ -764,7 +932,7 @@ class VocabularyStudioService:
                 sum(
                     case
                         when state in ('learning', 'review', 'relearning')
-                             and is_suspended = 0
+                             and is_suspended = false
                              and due_at < ?
                         then 1 else 0
                     end
@@ -806,7 +974,7 @@ class VocabularyStudioService:
             select min(due_at)
             from cards
             where deck_id = ?
-              and is_suspended = 0
+              and is_suspended = false
               and state in ('learning', 'review', 'relearning')
               and due_at > ?
             """,
@@ -889,7 +1057,7 @@ class VocabularyStudioService:
             join notes n on n.id = c.note_id
             join decks d on d.id = c.deck_id
             where c.deck_id = ?
-              and c.is_suspended = 0
+              and c.is_suspended = false
               and c.state in ('learning', 'review', 'relearning')
               and c.due_at <= ?
               {bury_clause}
@@ -924,7 +1092,7 @@ class VocabularyStudioService:
             join notes n on n.id = c.note_id
             join decks d on d.id = c.deck_id
             where c.deck_id = ?
-              and c.is_suspended = 0
+              and c.is_suspended = false
               and c.state = 'new'
               {bury_clause}
             order by c.created_at asc, c.position asc
@@ -1000,7 +1168,7 @@ class VocabularyStudioService:
             join notes n on n.id = c.note_id
             join decks d on d.id = c.deck_id
             where c.deck_id = ?
-              and c.is_suspended = 0
+              and c.is_suspended = false
               {card_filter}
             order by c.created_at asc, c.position asc
             """,
@@ -1296,7 +1464,7 @@ class VocabularyStudioService:
             select due_at
             from cards
             where deck_id = ?
-              and is_suspended = 0
+              and is_suspended = false
               and state in ('learning', 'review', 'relearning')
               and due_at >= ?
               and due_at < ?
@@ -1319,7 +1487,7 @@ class VocabularyStudioService:
             select count(*)
             from cards
             where deck_id = ?
-              and is_suspended = 0
+              and is_suspended = false
               and state in ('learning', 'review', 'relearning')
               and due_at < ?
             """,
@@ -1330,7 +1498,7 @@ class VocabularyStudioService:
             select count(*)
             from cards
             where deck_id = ?
-              and is_suspended = 0
+              and is_suspended = false
               and state = 'new'
             """,
             (deck_id,),
@@ -1349,10 +1517,10 @@ class VocabularyStudioService:
         counts_row = conn.execute(
             """
             select
-                sum(case when state = 'new' and is_suspended = 0 then 1 else 0 end) as new_cards,
-                sum(case when state = 'learning' and is_suspended = 0 then 1 else 0 end) as learning_cards,
-                sum(case when state = 'review' and is_suspended = 0 then 1 else 0 end) as review_cards,
-                sum(case when state = 'relearning' and is_suspended = 0 then 1 else 0 end) as relearning_cards
+                sum(case when state = 'new' and is_suspended = false then 1 else 0 end) as new_cards,
+                sum(case when state = 'learning' and is_suspended = false then 1 else 0 end) as learning_cards,
+                sum(case when state = 'review' and is_suspended = false then 1 else 0 end) as review_cards,
+                sum(case when state = 'relearning' and is_suspended = false then 1 else 0 end) as relearning_cards
             from cards
             where deck_id = ?
             """,
@@ -1567,7 +1735,7 @@ class VocabularyStudioService:
                     from cards c
                     join notes n on n.id = c.note_id
                     where c.deck_id = ?
-                      and c.is_suspended = 0
+                      and c.is_suspended = false
                       and c.state = 'new'
                     order by c.created_at asc
                     limit 1
@@ -1649,7 +1817,7 @@ class VocabularyStudioService:
                     record["cardId"],
                     record["label"],
                     record["detail"],
-                    json.dumps(payload),
+                    _jp(payload),
                     record["createdAt"],
                 ),
             )
@@ -1694,7 +1862,7 @@ class VocabularyStudioService:
                     self.user_id,
                     title,
                     description,
-                    json.dumps(config),
+                    _jp(config),
                     timestamp,
                     timestamp,
                 ),
@@ -1863,10 +2031,10 @@ class VocabularyStudioService:
                     example_sentence,
                     _normalize_line(request.imageUrl),
                     _normalize_line(request.audioUrl),
-                    json.dumps(tags),
+                    _jp(tags),
                     topic,
                     source_ref,
-                    json.dumps(metadata),
+                    _jp(metadata),
                     timestamp,
                     timestamp,
                 ),
@@ -1897,7 +2065,7 @@ class VocabularyStudioService:
                         answer,
                         created_at,
                         updated_at
-                    ) values (?, ?, ?, ?, ?, 'new', ?, null, null, null, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?)
+                    ) values (?, ?, ?, ?, ?, 'new', ?, null, null, null, 0, 0, 0, 0, 0, false, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         _make_id(),
@@ -1954,7 +2122,7 @@ class VocabularyStudioService:
                 set metadata_json = ?, updated_at = ?
                 where id = ? and user_id = ?
                 """,
-                (json.dumps(metadata), timestamp, note_id, self.user_id),
+                (_jp(metadata), timestamp, note_id, self.user_id),
             )
             conn.execute(
                 "update decks set updated_at = ? where id = ?",
@@ -2050,10 +2218,10 @@ class VocabularyStudioService:
                         example_sentence,
                         None,
                         None,
-                        json.dumps(["reader-archive"]),
+                        _jp(["reader-archive"]),
                         item.bookTitle,
                         source_ref,
-                        json.dumps(metadata),
+                        _jp(metadata),
                         timestamp,
                         timestamp,
                     ),
@@ -2084,7 +2252,7 @@ class VocabularyStudioService:
                             answer,
                             created_at,
                             updated_at
-                        ) values (?, ?, ?, ?, ?, 'new', ?, null, null, null, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?)
+                        ) values (?, ?, ?, ?, ?, 'new', ?, null, null, null, 0, 0, 0, 0, 0, false, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             _make_id(),
@@ -2391,8 +2559,8 @@ class VocabularyStudioService:
                 step,
                 turn_index,
                 provider,
-                json.dumps(learner_input) if learner_input is not None else None,
-                json.dumps(ai_payload),
+                _jp(learner_input) if learner_input is not None else None,
+                _jp(ai_payload),
                 ai_payload.get("verdict"),
                 ai_payload.get("suggestedRating"),
                 now,
@@ -2464,10 +2632,14 @@ class VocabularyStudioService:
         if row is None:
             return None
 
-        try:
-            payload = json.loads(row["payload_json"])
-        except json.JSONDecodeError:
-            return None
+        raw_payload = row["payload_json"]
+        if isinstance(raw_payload, str):
+            try:
+                payload = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                return None
+        else:
+            payload = raw_payload
         if not isinstance(payload, dict):
             return None
         if not isinstance(payload.get("contextParagraph"), str):
@@ -2483,7 +2655,7 @@ class VocabularyStudioService:
         payload: dict[str, Any],
     ) -> None:
         now = _serialize_timestamp(_utc_now())
-        payload_json = json.dumps(payload)
+        payload_json = _jp(payload)
         conn.execute(
             """
             insert into card_context_cache (
@@ -3043,7 +3215,7 @@ class VocabularyStudioService:
                         card_id,
                         self.user_id,
                         _serialize_timestamp(now),
-                        json.dumps(sentences),
+                        _jp(sentences),
                     ),
                 )
                 production_count = self._production_status(conn, row)["productionCount"]
@@ -3152,7 +3324,7 @@ class VocabularyStudioService:
                     scheduled_days_after,
                     request.responseMs,
                     request.answerMode,
-                    int(request.wasAutoGraded),
+                    bool(request.wasAutoGraded),
                     _normalize_line(request.typedResponse),
                     _serialize_timestamp(reviewed_at),
                 ),
@@ -3200,7 +3372,7 @@ class VocabularyStudioService:
                     updated_at = ?
                 where id = ?
                 """,
-                (1 if request.isSuspended else 0, _serialize_timestamp(now), card_id),
+                (bool(request.isSuspended), _serialize_timestamp(now), card_id),
             )
             updated_row = self._require_card(conn, card_id)
             return {

@@ -9,8 +9,8 @@ Append-only journal. **Read `## Open` before editing any hot file.** Skill files
 | Date | Issue | Status |
 |------|-------|--------|
 | 2026-05-01 | OpenAI/Piper removal — all code done (app.py, ReaderRoute, validate_env, CLAUDE.md), typecheck + build + push pending | PENDING |
-| 2026-05-01 | Words page not showing saved vocab — query-key mismatch suspected between save path (`['decks']`, `['deck-dashboard']`) and VocabularyRoute fetch | PENDING |
-| 2026-04-30 | Vocab save toast now surfaces real error — waiting for user to reproduce in prod to identify root cause | WATCHING |
+| 2026-05-03 | Vocabulary page empty in prod — root cause: `vocabulary_studio.py` persisted to local SQLite under `DATA_ROOT` (`/tmp/storybook-reader/library/vocabulary-studio.sqlite3` on Vercel), and `/tmp` is per-lambda-instance ephemeral. Same class as 2026-04-29 `_books_cache`. Fix: dialect adapter in `vocabulary_studio.py` (`_DialectConn`, `_HybridRow`, `_jp`) routes to psycopg when `SUPABASE_POOLER_URL`/`SUPABASE_DB_URL` is set; SQLite fallback kept for local dev. Schema applied to Supabase via MCP and mirrored as `_SCHEMA_MIGRATIONS` v7 in `app.py` (idempotent — `if not exists` + `drop policy if exists` for RLS). Local SQLite smoke test passes. Pending: prod smoke verify after deploy. | CODE-DONE |
+| 2026-04-30 | Vocab save toast now surfaces real error — root cause is the SQLite-on-/tmp issue above; toast usually shows `404 deck not found` after a cold start lost the deck. Will close once Postgres migration lands. | LINKED-TO-ABOVE |
 
 ---
 
