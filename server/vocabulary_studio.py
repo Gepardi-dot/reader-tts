@@ -1536,6 +1536,7 @@ class VocabularyStudioService:
             "lapseRate": round(lapse_count / len(reviews_30), 4) if reviews_30 else None,
             "averageResponseMs": round(sum(response_ms_values) / len(response_ms_values)) if response_ms_values else None,
             "cardsLearned": int(cards_learned or 0),
+            "studyStreak": int(self._learning_streak_days(conn, now)),
             "cardsByState": {
                 "new": int(counts_row["new_cards"] or 0),
                 "learning": int(counts_row["learning_cards"] or 0),

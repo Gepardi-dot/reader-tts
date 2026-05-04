@@ -29,6 +29,7 @@ interface VocabNote {
   extra: string | null
   explanation: string | null
   topic: string | null
+  sourceBookId: string | null
   sourceBookTitle: string | null
   cards: VocabNoteCard[]
 }
@@ -38,12 +39,15 @@ interface DeckDashboard {
   notes: VocabNote[]
   analytics?: {
     rollingRetention7d?: number | null
+    studyStreak?: number | null
   }
 }
 
+const DUE_COLOR = '#fbc12a'
+
 const STAGE_STYLE: Record<CardState, { pill: string; text: string; ring: string }> = {
   new:        { pill: '#eff6ff', text: '#2563eb', ring: '#2563eb' },
-  learning:   { pill: '#fffbeb', text: '#d97706', ring: '#f59e0b' },
+  learning:   { pill: '#fff7e0', text: '#fbc12a', ring: '#fbc12a' },
   review:     { pill: '#f0fdf4', text: '#16a34a', ring: '#16a34a' },
   relearning: { pill: '#fff1f2', text: '#dc2626', ring: '#f43f5e' },
 }
@@ -75,7 +79,7 @@ function StageRing({ state, due }: { state: CardState; due: boolean }) {
   // NEW state: no ring, just DUE badge if due
   if (fill === -1) {
     return due ? (
-      <span style={{ fontSize: 10, fontWeight: 800, color: '#2563eb', letterSpacing: '0.06em', marginTop: 2, flexShrink: 0 }}>DUE</span>
+      <span style={{ fontSize: 10, fontWeight: 800, color: DUE_COLOR, letterSpacing: '0.06em', marginTop: 2, flexShrink: 0 }}>DUE</span>
     ) : null
   }
 
@@ -97,7 +101,7 @@ function StageRing({ state, due }: { state: CardState; due: boolean }) {
         )}
       </svg>
       {due && (
-        <span style={{ fontSize: 10, fontWeight: 800, color: '#2563eb', letterSpacing: '0.06em', lineHeight: 1 }}>DUE</span>
+        <span style={{ fontSize: 10, fontWeight: 800, color: DUE_COLOR, letterSpacing: '0.06em', lineHeight: 1 }}>DUE</span>
       )}
     </div>
   )
@@ -109,10 +113,10 @@ function StagePill({ state }: { state: CardState }) {
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center',
-      padding: '4px 11px', borderRadius: 99,
+      padding: '5px 13px', borderRadius: 99,
       background: s.pill, color: s.text,
-      fontSize: 10.5, fontWeight: 700, letterSpacing: '0.06em',
-      border: `1.5px solid ${s.text}44`,
+      fontSize: 11, fontWeight: 700, letterSpacing: '0.07em',
+      border: `1px solid ${s.text}33`,
     }}>
       {label}
     </span>
@@ -128,23 +132,32 @@ function WordCard({ note }: { note: VocabNote }) {
 
   return (
     <div style={{
-      background: '#fff',
-      border: '1.5px solid #bfdbfe',
+      background: '#fbfdfe',
+      border: '1px solid #e4ecf5',
       borderRadius: 14,
-      padding: '16px 16px 14px',
+      padding: '18px 18px 16px',
       display: 'flex',
       flexDirection: 'column',
-      gap: 10,
+      gap: 12,
       cursor: 'default',
-      transition: 'box-shadow 0.15s',
+      boxShadow: '0 1px 2px rgba(15,23,42,0.03)',
+      transition: 'box-shadow 0.15s, border-color 0.15s',
     }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = '0 2px 12px rgba(37,99,235,0.08)' }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = 'none' }}
+      onMouseEnter={(e) => {
+        const el = e.currentTarget as HTMLDivElement
+        el.style.boxShadow = '0 2px 10px rgba(37,99,235,0.07)'
+        el.style.borderColor = '#d4e0ee'
+      }}
+      onMouseLeave={(e) => {
+        const el = e.currentTarget as HTMLDivElement
+        el.style.boxShadow = '0 1px 2px rgba(15,23,42,0.03)'
+        el.style.borderColor = '#e4ecf5'
+      }}
     >
       {/* Top row: word + ring */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div style={{ minWidth: 0 }}>
-          <p style={{ fontSize: 18, fontWeight: 700, color: '#1a1a2e', lineHeight: 1.25, margin: 0, letterSpacing: '-0.01em' }}>
+          <p style={{ fontFamily: 'Lora, Georgia, serif', fontSize: 19, fontWeight: 700, color: '#1a1a2e', lineHeight: 1.25, margin: 0, letterSpacing: '-0.01em' }}>
             {note.front}
           </p>
           {phonetic && (
@@ -164,12 +177,24 @@ function WordCard({ note }: { note: VocabNote }) {
       )}
 
       {/* Bottom row: stage pill + book */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 0 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 0, minWidth: 0 }}>
         <StagePill state={state} />
         {book && (
-          <span style={{ fontSize: 12, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 140, textAlign: 'right' }}>
-            {book}
-          </span>
+          note.sourceBookId && note.sourceBookTitle ? (
+            <Link
+              to={`/book/${note.sourceBookId}`}
+              title={note.sourceBookTitle}
+              style={{ fontSize: 12, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160, textAlign: 'right', textDecoration: 'none', flexShrink: 1, minWidth: 0 }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = '#374151' }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = '#9ca3af' }}
+            >
+              {book}
+            </Link>
+          ) : (
+            <span title={book} style={{ fontSize: 12, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160, textAlign: 'right', flexShrink: 1, minWidth: 0 }}>
+              {book}
+            </span>
+          )
         )}
       </div>
     </div>
@@ -260,6 +285,8 @@ export function VocabularyRoute() {
 
   const retention = dashboard?.analytics?.rollingRetention7d
   const retentionLabel = retention != null ? `${Math.round(retention * 100)}%` : '—'
+  const streak = dashboard?.analytics?.studyStreak
+  const streakLabel = streak && streak > 0 ? `${streak} days 🔥` : '—'
 
   const filtered = words.filter((w) => {
     if (search && !w.front.toLowerCase().includes(search.toLowerCase())) return false
@@ -274,7 +301,7 @@ export function VocabularyRoute() {
 
   return (
     <div className="min-h-svh bg-background pb-24 md:pb-6">
-      <div className="px-4 md:px-8 pt-7 pb-5" style={{ maxWidth: 860 }}>
+      <div className="px-4 md:px-8 pt-7 pb-5 max-w-[860px] mx-auto">
 
         {/* Header */}
         <div className="flex items-start justify-between mb-5">
@@ -298,7 +325,7 @@ export function VocabularyRoute() {
           {[
             { label: 'Total words',   value: words.length || '—' },
             { label: 'Avg retention', value: retentionLabel },
-            { label: 'Due for review', value: deck?.dueNow ?? '—' },
+            { label: 'Study streak',  value: streakLabel },
           ].map((s, i) => (
             <div key={i} className="p-4 rounded-[12px] border border-border bg-white">
               <div className="text-[22px] font-bold text-foreground mb-0.5">{s.value}</div>
@@ -307,9 +334,9 @@ export function VocabularyRoute() {
           ))}
         </div>
 
-        {/* Search + stage filter + layout toggle */}
-        <div className="flex flex-col gap-2.5 mb-5">
-          <div className="relative">
+        {/* Search + stage filter + layout toggle (wraps on mobile) */}
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3 mb-5">
+          <div className="relative w-full sm:flex-1 sm:min-w-0 order-1">
             <svg
               className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
               style={{ color: 'var(--muted-foreground)' }}
@@ -325,35 +352,34 @@ export function VocabularyRoute() {
             />
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="flex gap-1.5 flex-1">
-              {STAGE_FILTERS.map(({ key, label }) => (
-                <button
-                  key={key}
-                  onClick={() => setStageFilter(key)}
-                  className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-medium cursor-pointer border-0 transition-colors"
-                  style={{
-                    background: stageFilter === key ? '#37352f' : '#fff',
-                    color: stageFilter === key ? '#fff' : '#9b9a97',
-                    border: `1px solid ${stageFilter === key ? '#37352f' : '#e9e9e7'}`,
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div className="flex gap-0.5 shrink-0">
-              {([['grid', LayoutGrid], ['list', AlignLeft]] as [Layout, typeof LayoutGrid][]).map(([k, Icon]) => (
-                <button
-                  key={k}
-                  onClick={() => setLayout(k)}
-                  className="w-8 h-8 rounded flex items-center justify-center border-0 cursor-pointer transition-colors"
-                  style={{ background: layout === k ? '#efefef' : 'transparent' }}
-                >
-                  <Icon size={15} style={{ color: layout === k ? 'var(--foreground)' : 'var(--muted-foreground)' }} />
-                </button>
-              ))}
-            </div>
+          <div className="flex gap-1.5 shrink-0 order-2 flex-1 sm:flex-initial overflow-x-auto">
+            {STAGE_FILTERS.map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setStageFilter(key)}
+                className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-medium cursor-pointer transition-colors"
+                style={{
+                  background: stageFilter === key ? '#37352f' : '#fff',
+                  color: stageFilter === key ? '#fff' : '#6b7280',
+                  border: `1px solid ${stageFilter === key ? '#37352f' : '#e5e7eb'}`,
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex gap-0.5 shrink-0 order-3 ml-auto sm:ml-0">
+            {([['grid', LayoutGrid], ['list', AlignLeft]] as [Layout, typeof LayoutGrid][]).map(([k, Icon]) => (
+              <button
+                key={k}
+                onClick={() => setLayout(k)}
+                className="w-8 h-8 rounded flex items-center justify-center border-0 cursor-pointer transition-colors"
+                style={{ background: layout === k ? '#efefef' : 'transparent' }}
+              >
+                <Icon size={15} style={{ color: layout === k ? 'var(--foreground)' : 'var(--muted-foreground)' }} />
+              </button>
+            ))}
           </div>
         </div>
 
@@ -375,7 +401,7 @@ export function VocabularyRoute() {
         ) : filtered.length === 0 ? (
           <p className="text-[13px] text-muted-foreground py-8 text-center">No words match your filters.</p>
         ) : layout === 'grid' ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 items-start">
             {filtered.map((w) => <WordCard key={w.id} note={w} />)}
           </div>
         ) : (
