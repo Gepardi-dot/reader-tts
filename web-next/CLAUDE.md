@@ -1,6 +1,6 @@
 # web-next — Claude Agent Notes
 
-Next-generation frontend for Storybook Reader. Replaces `web-rewrite/` when complete.
+Primary frontend for Storybook Reader (deployed). `web-rewrite/` is legacy reference only.
 
 ## Stack
 - React 19 + Vite 8 + React Router v7
