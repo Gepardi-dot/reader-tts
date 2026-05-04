@@ -172,15 +172,13 @@ export function AppShell() {
 
         {/* Practice button + sign out */}
         <div className="p-2 border-t border-border space-y-1 shrink-0">
-          {dueCount > 0 && (
-            <Link
-              to="/studio"
-              className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg bg-primary text-primary-foreground text-[13px] font-semibold transition-opacity hover:opacity-90"
-            >
-              <Sparkles size={13} />
-              Practice · {dueCount} due
-            </Link>
-          )}
+          <Link
+            to="/studio"
+            className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg bg-primary text-primary-foreground text-[13px] font-semibold transition-opacity hover:opacity-90"
+          >
+            <Sparkles size={13} />
+            {dueCount > 0 ? `Practice · ${dueCount} due` : 'Practice'}
+          </Link>
           <button
             onClick={handleSignOut}
             className="flex items-center gap-2 w-full px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"

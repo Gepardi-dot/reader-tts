@@ -311,13 +311,11 @@ export function VocabularyRoute() {
               {deck ? `${words.length} words saved · ${deck.dueNow} due for review` : 'Saved words from reading'}
             </p>
           </div>
-          {deck && deck.dueNow > 0 && (
-            <Link to="/studio">
-              <button className="flex items-center gap-2 h-10 px-5 rounded-xl bg-primary text-primary-foreground text-[13.5px] font-semibold cursor-pointer border-0 hover:opacity-90 transition-opacity shadow-sm">
-                Practice · {deck.dueNow} due
-              </button>
-            </Link>
-          )}
+          <Link to="/studio">
+            <button className="flex items-center gap-2 h-10 px-5 rounded-xl bg-primary text-primary-foreground text-[13.5px] font-semibold cursor-pointer border-0 hover:opacity-90 transition-opacity shadow-sm">
+              {deck && deck.dueNow > 0 ? `Practice · ${deck.dueNow} due` : 'Practice'}
+            </button>
+          </Link>
         </div>
 
         {/* Stats row */}
