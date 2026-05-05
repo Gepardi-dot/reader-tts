@@ -236,26 +236,6 @@ export function AppShell() {
             </NavLink>
           ))}
 
-          {/* Library tab */}
-          <NavLink
-            to="/library"
-            className={({ isActive }) =>
-              cn(
-                'flex flex-col items-center justify-center gap-0.5 flex-1 h-full transition-colors',
-                isActive ? 'text-primary' : 'text-muted-foreground',
-              )
-            }
-          >
-            {({ isActive }) => (
-              <>
-                <Library size={22} strokeWidth={1.75} />
-                <span className={cn('text-[10px] font-medium leading-none', isActive && 'font-semibold')}>
-                  Library
-                </span>
-              </>
-            )}
-          </NavLink>
-
           {/* Practice tab */}
           <NavLink
             to="/studio"
