@@ -3,11 +3,11 @@ import { useParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-  ArrowLeft, ArrowRight, Languages, MessageSquare, Settings2, Type, Volume2, X,
+  ArrowRight, Languages, MessageSquare, Settings2, Type, Volume2, X,
   Play, Pause, SkipBack, SkipForward,
   Minus, Plus, AlignLeft, AlignCenter, AlignJustify,
   Copy, BookMarked, Globe, BookOpen, Mic, NotebookPen, Sparkles, Search,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, ChevronDown,
 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -1916,10 +1916,9 @@ function TranslatePanel({ text, onClose, colors }: {
 
 // ── Assistant Chat ────────────────────────────────────────────────────────────
 
-function AssistantChat({ bookTitle, pageContext, onClose, colors }: {
+function AssistantChat({ bookTitle, pageContext, colors }: {
   bookTitle: string
   pageContext: string
-  onClose: () => void
   colors: typeof THEMES['paper']
 }) {
   const [messages,  setMessages]  = useState<AIChatMessage[]>([])
@@ -1987,28 +1986,17 @@ function AssistantChat({ bookTitle, pageContext, onClose, colors }: {
   return (
     <div
       className="flex flex-col"
-      style={{ color: colors.text, height: '72vh', paddingBottom: 'env(safe-area-inset-bottom,0px)' }}
+      style={{ color: colors.text, height: 360, paddingBottom: 'env(safe-area-inset-bottom,0px)' }}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 pt-1 pb-3 shrink-0">
-        <div className="flex flex-col gap-0.5">
-          <div className="flex items-center gap-1.5">
-            <div className="w-2 h-2 rounded-full bg-[#2383e2]" />
-            <span className="text-[11px] font-semibold uppercase tracking-widest" style={{ opacity: 0.45 }}>Assistant</span>
-          </div>
-          <p
-            className="text-[12.5px] font-medium pl-3.5 line-clamp-1 max-w-[220px]"
-            style={{ opacity: 0.55, fontFamily: 'Lora, Georgia, serif', fontStyle: 'italic' }}
-          >
-            {bookTitle}
-          </p>
-        </div>
-        <button onClick={onClose} className="p-1.5 rounded-md transition-opacity" style={{ opacity: 0.35 }}
-          onMouseEnter={e => (e.currentTarget.style.opacity = '0.7')}
-          onMouseLeave={e => (e.currentTarget.style.opacity = '0.35')}
+      {/* Context label */}
+      <div className="flex items-center gap-1.5 px-4 pt-3 pb-2 shrink-0">
+        <div className="w-2 h-2 rounded-full bg-[#2383e2] shrink-0" />
+        <p
+          className="text-[12.5px] font-medium line-clamp-1 max-w-[280px]"
+          style={{ opacity: 0.55, fontFamily: 'Lora, Georgia, serif', fontStyle: 'italic' }}
         >
-          <X size={15} />
-        </button>
+          {bookTitle}
+        </p>
       </div>
 
       {/* Messages */}
@@ -2138,30 +2126,23 @@ function AssistantChat({ bookTitle, pageContext, onClose, colors }: {
 
 // ── Appearance Content ────────────────────────────────────────────────────────
 
-function AppearanceContent({ appearance, onChange, onClose }: {
+function AppearanceContent({ appearance, onChange }: {
   appearance: Appearance
   onChange: (patch: Partial<Appearance>) => void
-  onClose: () => void
 }) {
   const colors = THEMES[appearance.theme]
 
   return (
-    <div className="px-4 pt-1 pb-safe space-y-5"
-      style={{ color: colors.text, paddingBottom: 'max(env(safe-area-inset-bottom,0px), 20px)' }}>
-      <div className="flex items-center justify-between py-2">
-        <span className="text-sm font-semibold tracking-wide uppercase opacity-55">Appearance</span>
-        <button onClick={onClose} className="p-1 rounded-full opacity-40 hover:opacity-80 transition-opacity">
-          <X size={16} />
-        </button>
-      </div>
+    <div className="px-3.5 pt-2.5 space-y-3"
+      style={{ color: colors.text, paddingBottom: 16 }}>
 
       {/* Font */}
       <div>
-        <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 mb-2">Font</p>
-        <div className="flex gap-2">
+        <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Font</p>
+        <div className="flex gap-1.5">
           {(['serif', 'sans'] as const).map((f) => (
             <button key={f} onClick={() => onChange({ font: f })}
-              className={cn('flex-1 py-2.5 rounded-xl border text-sm font-medium transition-all',
+              className={cn('flex-1 py-2 rounded-lg border text-sm font-medium transition-all',
                 appearance.font === f ? 'border-primary bg-primary text-white shadow-sm' : 'border-border/60 opacity-55 hover:opacity-90')}
               style={{ fontFamily: f === 'serif' ? 'Lora, Georgia, serif' : 'Inter, sans-serif' }}>
               {f === 'serif' ? 'Serif' : 'Sans'}
@@ -2172,32 +2153,32 @@ function AppearanceContent({ appearance, onChange, onClose }: {
 
       {/* Font size */}
       <div>
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40">Size</p>
-          <span className="text-xs opacity-40 tabular-nums">{appearance.fontSize}px</span>
+        <div className="flex items-center justify-between mb-1">
+          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40">Size</p>
+          <span className="text-[11px] opacity-40 tabular-nums">{appearance.fontSize}px</span>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <button onClick={() => onChange({ fontSize: Math.max(14, appearance.fontSize - 1) })}
             disabled={appearance.fontSize <= 14}
-            className="p-1.5 rounded-lg border border-border/60 opacity-55 hover:opacity-90 disabled:opacity-20">
-            <Minus size={14} />
+            className="p-1 rounded-lg border border-border/60 opacity-55 hover:opacity-90 disabled:opacity-20">
+            <Minus size={13} />
           </button>
           <Slider value={[appearance.fontSize]} min={14} max={22} step={1}
             onValueChange={(val) => onChange({ fontSize: Array.isArray(val) ? val[0] : (val as number) })}
             className="flex-1" />
           <button onClick={() => onChange({ fontSize: Math.min(22, appearance.fontSize + 1) })}
             disabled={appearance.fontSize >= 22}
-            className="p-1.5 rounded-lg border border-border/60 opacity-55 hover:opacity-90 disabled:opacity-20">
-            <Plus size={14} />
+            className="p-1 rounded-lg border border-border/60 opacity-55 hover:opacity-90 disabled:opacity-20">
+            <Plus size={13} />
           </button>
         </div>
       </div>
 
       {/* Line spacing */}
       <div>
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40">Spacing</p>
-          <span className="text-xs opacity-40 tabular-nums">{appearance.lineHeight.toFixed(1)}×</span>
+        <div className="flex items-center justify-between mb-1">
+          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40">Spacing</p>
+          <span className="text-[11px] opacity-40 tabular-nums">{appearance.lineHeight.toFixed(1)}×</span>
         </div>
         <Slider value={[Math.round(appearance.lineHeight * 10)]} min={15} max={22} step={1}
           onValueChange={(val) => onChange({ lineHeight: (Array.isArray(val) ? val[0] : (val as number)) / 10 })} />
@@ -2205,11 +2186,11 @@ function AppearanceContent({ appearance, onChange, onClose }: {
 
       {/* Width */}
       <div>
-        <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 mb-2">Width</p>
-        <div className="flex gap-2">
+        <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Width</p>
+        <div className="flex gap-1.5">
           {(['narrow', 'balanced', 'wide'] as const).map((w) => (
             <button key={w} onClick={() => onChange({ width: w })}
-              className={cn('flex-1 py-2.5 rounded-xl border text-sm font-medium capitalize transition-all',
+              className={cn('flex-1 py-2 rounded-lg border text-xs font-medium capitalize transition-all',
                 appearance.width === w ? 'border-primary bg-primary text-white shadow-sm' : 'border-border/60 opacity-55 hover:opacity-90')}>
               {w}
             </button>
@@ -2217,40 +2198,42 @@ function AppearanceContent({ appearance, onChange, onClose }: {
         </div>
       </div>
 
-      {/* Align */}
-      <div>
-        <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 mb-2">Align</p>
-        <div className="flex gap-2">
-          {([
-            { id: 'left' as const,    Icon: AlignLeft    },
-            { id: 'center' as const,  Icon: AlignCenter  },
-            { id: 'justify' as const, Icon: AlignJustify },
-          ]).map(({ id, Icon }) => (
-            <button key={id} onClick={() => onChange({ align: id })}
-              className={cn('flex-1 py-2.5 rounded-xl border flex items-center justify-center transition-all',
-                appearance.align === id ? 'border-primary bg-primary text-white shadow-sm' : 'border-border/60 opacity-55 hover:opacity-90')}>
-              <Icon size={16} />
-            </button>
-          ))}
+      {/* Align + Theme on same row */}
+      <div className="flex gap-3 pb-1">
+        <div className="flex-1">
+          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Align</p>
+          <div className="flex gap-1">
+            {([
+              { id: 'left' as const,    Icon: AlignLeft    },
+              { id: 'center' as const,  Icon: AlignCenter  },
+              { id: 'justify' as const, Icon: AlignJustify },
+            ]).map(({ id, Icon }) => (
+              <button key={id} onClick={() => onChange({ align: id })}
+                className={cn('flex-1 py-2 rounded-lg border flex items-center justify-center transition-all',
+                  appearance.align === id ? 'border-primary bg-primary text-white shadow-sm' : 'border-border/60 opacity-55 hover:opacity-90')}>
+                <Icon size={14} />
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
 
-      {/* Theme */}
-      <div className="pb-2">
-        <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 mb-2">Theme</p>
-        <div className="flex gap-2">
-          {([
-            { id: 'paper' as const, bg: '#fbf8f4', fg: '#1c1c1e', label: 'Paper' },
-            { id: 'white' as const, bg: '#ffffff', fg: '#1c1c1e', label: 'White' },
-            { id: 'dark'  as const, bg: '#1a1a18', fg: '#e8e6e1', label: 'Dark'  },
-          ]).map(({ id, bg, fg, label }) => (
-            <button key={id} onClick={() => onChange({ theme: id })}
-              className={cn('flex-1 py-2.5 rounded-xl border text-sm font-medium transition-all',
-                appearance.theme === id ? 'ring-2 ring-primary ring-offset-2' : 'hover:opacity-80')}
-              style={{ backgroundColor: bg, color: fg, borderColor: `${fg}22` }}>
-              {label}
-            </button>
-          ))}
+        <div className="flex-1">
+          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Theme</p>
+          <div className="flex gap-1">
+            {([
+              { id: 'paper' as const, bg: '#fbf8f4', fg: '#1c1c1e' },
+              { id: 'white' as const, bg: '#ffffff', fg: '#1c1c1e' },
+              { id: 'dark'  as const, bg: '#1a1a18', fg: '#e8e6e1' },
+            ]).map(({ id, bg, fg }) => (
+              <button key={id} onClick={() => onChange({ theme: id })}
+                className={cn('flex-1 py-2 rounded-lg border text-xs font-medium transition-all',
+                  appearance.theme === id ? 'ring-2 ring-primary ring-offset-1' : 'hover:opacity-80')}
+                style={{ backgroundColor: bg, color: fg, borderColor: `${fg}22` }}
+                title={id.charAt(0).toUpperCase() + id.slice(1)}>
+                <span style={{ fontFamily: 'Lora, serif', fontSize: 13 }}>Aa</span>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </div>
@@ -2355,17 +2338,17 @@ export interface AudioHandle {
   stop:   () => void
 }
 
-function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVoiceChange, onError }: {
-  onClose: () => void
+function AudioContent({ colors, provider, onProviderChange, voice, onVoiceChange, onError, rate: rateProp, onRateChange }: {
   colors: typeof THEMES['paper']
   provider: string; onProviderChange: (p: string) => void
   voice: string | null; onVoiceChange: (v: string | null) => void
   onError?: (message: string) => void
+  rate?: number; onRateChange?: (r: number) => void
 }) {
   const [phase,   setPhase]   = useState<'idle' | 'buffering' | 'playing' | 'paused'>('idle')
   const [chunks,  setChunks]  = useState<AudioChunk[]>([])
   const [curIdx,  setCurIdx]  = useState(0)
-  const [rate,    setRate]    = useState(1.0)
+  const [rate,    setRate]    = useState(rateProp ?? 1.0)
   const [sampleText, setSampleText] = useState(PROVIDER_PREVIEW_TEXT)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
@@ -2605,9 +2588,6 @@ function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVo
     // 'buffering' → ignore taps
   }
 
-  // Stop when sheet closes
-  const handleClose = () => { stopPlayback(); onClose() }
-
   // ── Derived UI state ────────────────────────────────────────────────────────
   const isIdle      = phase === 'idle'
   const isBuffering = phase === 'buffering'
@@ -2636,19 +2616,12 @@ function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVo
   }
 
   return (
-    <div className="px-4 pt-1 pb-safe space-y-5"
-      style={{ color: colors.text, paddingBottom: 'max(env(safe-area-inset-bottom,0px), 20px)' }}>
-      <div className="flex items-center justify-between py-2">
-        <span className="text-sm font-semibold tracking-wide uppercase opacity-55">Audio</span>
-        <button onClick={handleClose}
-          className="p-1 rounded-full opacity-40 hover:opacity-80 transition-opacity">
-          <X size={16} />
-        </button>
-      </div>
+    <div className="px-3.5 pt-2.5 space-y-3"
+      style={{ color: colors.text, paddingBottom: 16 }}>
 
       {/* Provider */}
       <div>
-        <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 mb-2">Provider</p>
+        <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Provider</p>
         <Select value={provider} onValueChange={(v) => {
           if (v == null) return
           stopPlayback()
@@ -2657,7 +2630,7 @@ function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVo
           onProviderChange(v)
           onVoiceChange(defaultVoiceForProvider(nextProvider))
         }}>
-          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
           <SelectContent>
             {providerOptions.map((p) => (
               <SelectItem key={p.id} value={p.id} disabled={!p.available}>
@@ -2671,12 +2644,12 @@ function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVo
       {/* Voice */}
       {providerVoices.length > 0 && (
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 mb-2">Voice</p>
+          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Voice</p>
           <Select
             value={voice ?? (providerVoices[0]?.id ?? '')}
             onValueChange={(v) => { if (v != null) { stopPlayback(); setErrorMsg(null); onVoiceChange(v) } }}
           >
-            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
             <SelectContent>
               {providerVoices.map((v) => (
                 <SelectItem key={v.id} value={v.id}>{v.label}</SelectItem>
@@ -2688,23 +2661,24 @@ function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVo
 
       {/* Speed */}
       <div>
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40">Speed</p>
-          <span className="text-xs opacity-40 tabular-nums">{rate.toFixed(1)}×</span>
+        <div className="flex items-center justify-between mb-1">
+          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40">Speed</p>
+          <span className="text-[11px] opacity-40 tabular-nums">{rate.toFixed(1)}×</span>
         </div>
         <Slider value={[Math.round(rate * 10)]} min={5} max={25} step={1}
           onValueChange={(val) => {
             const r = (Array.isArray(val) ? val[0] : (val as number)) / 10
             setRate(r)
+            onRateChange?.(r)
             rateRef.current = r
             if (audioRef.current) audioRef.current.playbackRate = r
           }} />
       </div>
 
-      <div className="rounded-2xl border px-4 py-3 space-y-1.5"
+      <div className="rounded-xl border px-3 py-2 space-y-1"
         style={{ borderColor: `${colors.text}12`, background: `${colors.text}05` }}>
-        <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40">Voice Sample</p>
-        <p className="text-sm leading-6 opacity-75 italic">
+        <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40">Voice Sample</p>
+        <p className="text-[12.5px] leading-5 opacity-70 italic line-clamp-3">
           "{sampleText}"
         </p>
       </div>
@@ -2742,31 +2716,31 @@ function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVo
       )}
 
       {/* Controls */}
-      <div className="flex items-center justify-center gap-8 py-2 pb-4">
+      <div className="flex items-center justify-center gap-6 py-1 pb-2">
         <button
           onClick={() => cycleVoice(-1)}
           disabled={providerVoices.length < 2 || isBuffering}
-          className="p-2 opacity-30 hover:opacity-60 transition-opacity disabled:opacity-15"
+          className="p-1.5 opacity-30 hover:opacity-60 transition-opacity disabled:opacity-15"
           aria-label="Previous voice"
-        ><SkipBack size={22} /></button>
+        ><SkipBack size={18} /></button>
         <button
           onClick={togglePlay}
           disabled={playDisabled}
-          className="w-14 h-14 rounded-full bg-primary text-white flex items-center justify-center shadow-lg active:scale-95 transition-transform disabled:opacity-50"
+          className="w-12 h-12 rounded-full bg-primary text-white flex items-center justify-center shadow-lg active:scale-95 transition-transform disabled:opacity-50"
         >
           {isBuffering
-            ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
             : (isPlaying
-                ? <Pause size={24} />
-                : <Play size={24} fill="currentColor" />
+                ? <Pause size={20} />
+                : <Play size={20} fill="currentColor" />
               )}
         </button>
         <button
           onClick={() => cycleVoice(1)}
           disabled={providerVoices.length < 2 || isBuffering}
-          className="p-2 opacity-30 hover:opacity-60 transition-opacity disabled:opacity-15"
+          className="p-1.5 opacity-30 hover:opacity-60 transition-opacity disabled:opacity-15"
           aria-label="Next voice"
-        ><SkipForward size={22} /></button>
+        ><SkipForward size={18} /></button>
       </div>
     </div>
   )
@@ -2778,79 +2752,118 @@ function AudioContent({ onClose, colors, provider, onProviderChange, voice, onVo
 // Persistent bottom bar visible while audio is buffering / playing / paused.
 // Lives outside the sheet so it stays visible when the sheet is closed.
 
-function PlayBar({ phase, curIdx, totalChunks, voiceLabel, colors, handle, onOpenSheet }: {
-  phase:       AudioPhase
-  curIdx:      number
-  totalChunks: number
-  voiceLabel:  string
-  colors:      typeof THEMES['paper']
-  handle:      AudioHandle | null
-  onOpenSheet: () => void
+function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, colors, handle, onOpenSheet }: {
+  phase:        AudioPhase
+  curIdx:       number
+  totalChunks:  number
+  voiceLabel:   string
+  rate:         number
+  onRateChange: (r: number) => void
+  colors:       typeof THEMES['paper']
+  handle:       AudioHandle | null
+  onOpenSheet:  () => void
 }) {
   const isBuffering = phase === 'buffering'
   const isPlaying   = phase === 'playing'
 
   const progressPct = totalChunks > 1
     ? Math.round(((curIdx + (isPlaying ? 1 : 0)) / totalChunks) * 100)
-    : 0
+    : isPlaying ? 35 : 0
+
+  function nudgeRate(delta: number) {
+    const next = Math.round(Math.max(0.5, Math.min(2.5, rate + delta)) * 10) / 10
+    onRateChange(next)
+  }
 
   return (
     <motion.div
-      className="fixed bottom-0 left-0 right-0 z-40 flex items-center gap-3 px-4 py-3"
+      className="fixed z-40 flex items-center gap-2 px-3"
       style={{
-        background: colors.bg,
+        bottom: 0,
+        left: '50%',
+        height: 48,
+        borderRadius: '10px 10px 0 0',
+        backgroundColor: colors.bg,
         borderTop: `1px solid ${colors.text}12`,
-        paddingBottom: 'max(env(safe-area-inset-bottom, 12px), 12px)',
+        borderLeft: `1px solid ${colors.text}08`,
+        borderRight: `1px solid ${colors.text}08`,
+        boxShadow: '0 -2px 12px rgba(0,0,0,0.07)',
+        maxWidth: 680,
+        width: 'calc(100vw - 2rem)',
+        transform: 'translateX(-50%)',
       }}
-      initial={{ y: 80, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      exit={{ y: 80, opacity: 0 }}
+      initial={{ y: '100%', x: '-50%' }}
+      animate={{ y: 0, x: '-50%' }}
+      exit={{ y: '100%', x: '-50%' }}
       transition={{ type: 'spring', damping: 32, stiffness: 300 }}
     >
-      {/* Voice label — tapping reopens the audio sheet */}
-      <button
-        className="flex-1 min-w-0 text-left"
-        onClick={onOpenSheet}
-      >
-        <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40 leading-none mb-0.5">
+      {/* Left: info — clicking voice opens audio sheet */}
+      <div className="flex flex-col shrink-0" style={{ minWidth: 100 }}>
+        <span className="text-[10px] font-semibold leading-none" style={{ color: colors.text }}>
           Now playing
-        </p>
-        <p className="text-sm truncate" style={{ color: colors.text, opacity: 0.75 }}>
-          {voiceLabel}
-        </p>
-      </button>
+        </span>
+        <div className="flex items-center gap-1 mt-0.5">
+          {/* Voice name — opens audio sheet */}
+          <button
+            className="text-[11px] transition-opacity hover:opacity-100"
+            style={{ color: `${colors.text}80` }}
+            onClick={onOpenSheet}
+            title="Change voice"
+          >
+            {voiceLabel}
+          </button>
+          <span style={{ color: `${colors.text}40`, fontSize: 10 }}>·</span>
+          {/* Speed — nudge with click, hold shift to bigger step */}
+          <button
+            className="text-[11px] tabular-nums transition-opacity hover:opacity-100"
+            style={{ color: `${colors.text}80` }}
+            onClick={(e) => nudgeRate(e.shiftKey ? 0.2 : 0.1)}
+            onContextMenu={(e) => { e.preventDefault(); nudgeRate(e.shiftKey ? -0.2 : -0.1) }}
+            title="Left-click +0.1×, right-click −0.1×"
+          >
+            {rate.toFixed(1)}×
+          </button>
+        </div>
+      </div>
 
-      {/* Chunk progress bar */}
-      {totalChunks > 1 && (
-        <div className="w-20 h-0.5 rounded-full overflow-hidden shrink-0" style={{ background: `${colors.text}15` }}>
+      {/* Center: play button + progress bar */}
+      <div className="flex items-center gap-2 flex-1 min-w-0">
+        <button
+          onClick={() => handle?.toggle()}
+          disabled={isBuffering}
+          className="flex items-center justify-center active:scale-90 transition-transform disabled:opacity-40 shrink-0"
+          style={{
+            width: 26, height: 26, borderRadius: '50%',
+            background: '#2383e2',
+          }}
+        >
+          {isBuffering
+            ? <div className="w-3 h-3 border-[1.5px] border-white border-t-transparent rounded-full animate-spin" />
+            : isPlaying
+              ? <Pause size={12} color="white" fill="white" />
+              : <Play  size={12} color="white" fill="white" />
+          }
+        </button>
+
+        {/* Progress track */}
+        <div className="flex-1 h-[3px] rounded-full overflow-hidden" style={{ background: `${colors.text}15` }}>
           <div
-            className="h-full rounded-full transition-all duration-700"
-            style={{ width: `${progressPct}%`, background: colors.text, opacity: 0.3 }}
+            className="h-full rounded-full transition-all duration-500"
+            style={{ width: `${progressPct}%`, background: '#2383e2' }}
           />
         </div>
-      )}
+      </div>
 
-      {/* Play / Pause */}
-      <button
-        onClick={() => handle?.toggle()}
-        disabled={isBuffering}
-        className="w-10 h-10 rounded-full flex items-center justify-center active:scale-90 transition-transform disabled:opacity-40 shrink-0"
-        style={{ background: `${colors.text}12` }}
-      >
-        {isBuffering
-          ? <div className="w-4 h-4 border-[1.5px] border-current border-t-transparent rounded-full animate-spin" style={{ color: colors.text }} />
-          : isPlaying
-            ? <Pause size={18} style={{ color: colors.text }} />
-            : <Play  size={18} fill={colors.text} style={{ color: colors.text }} />
-        }
-      </button>
-
-      {/* Stop */}
+      {/* Right: close */}
       <button
         onClick={() => handle?.stop()}
-        className="w-8 h-8 rounded-full flex items-center justify-center opacity-40 hover:opacity-70 active:scale-90 transition-all shrink-0"
+        className="flex items-center justify-center shrink-0 transition-opacity"
+        style={{ width: 22, height: 22, opacity: 0.4 }}
+        onMouseEnter={e => (e.currentTarget.style.opacity = '0.7')}
+        onMouseLeave={e => (e.currentTarget.style.opacity = '0.4')}
+        aria-label="Stop"
       >
-        <X size={16} style={{ color: colors.text }} />
+        <X size={13} style={{ color: colors.text }} />
       </button>
     </motion.div>
   )
@@ -2894,6 +2907,7 @@ export function ReaderRoute() {
   const [presynthProgress, setPresynthProgress] = useState<{ completed: number; total: number } | null>(null)
   const [ttsProvider,   setTtsProvider]   = useState(() => loadAudioPrefs().provider)
   const [ttsVoice,      setTtsVoice]      = useState<string | null>(() => loadAudioPrefs().voice)
+  const [audioRate,     setAudioRate]     = useState(1.0)
 
   const lastScrollY           = useRef(0)
   const latestScrollPct       = useRef(0)
@@ -2958,7 +2972,7 @@ export function ReaderRoute() {
   const effectiveProviderInfo = providersData?.providers?.find(p => p.id === effectiveTtsProvider)
   const playBarVoiceLabel = effectiveProviderInfo
     ?.voices.find(v => v.id === effectiveTtsVoice)
-    ?.label ?? effectiveTtsVoice ?? effectiveProviderInfo?.name ?? effectiveTtsProvider
+    ?.label ?? effectiveTtsVoice ?? 'Voice'
   const wordAudioPhase: AudioPhase = !wordAudio
     ? 'idle'
     : wordAudio.status === 'loading'
@@ -3917,68 +3931,84 @@ export function ReaderRoute() {
       className="min-h-svh"
       style={{ backgroundColor: colors.bg, color: colors.text, overflowX: 'hidden', maxWidth: '100vw' }}
     >
-      {/* ── Top bar (floating pill) ───────────────────────────────── */}
+      {/* ── Top bar (full-width) ──────────────────────────────────── */}
       <header
-        className="fixed z-40 flex items-center px-2.5 h-12"
+        className="fixed z-40 top-0 left-0 right-0 flex items-center px-3"
         style={{
-          top: 16,
-          left: '50%',
-          width: 'min(560px, calc(100vw - 32px))',
-          borderRadius: 14,
+          height: 52,
           backgroundColor: colors.bar,
           backdropFilter: 'blur(14px)',
           WebkitBackdropFilter: 'blur(14px)',
-          border: `1px solid ${colors.text}0f`,
-          boxShadow: '0 2px 12px rgba(0,0,0,0.06)',
+          borderBottom: `1px solid ${colors.text}12`,
           opacity: barVisible ? 1 : 0,
-          transform: barVisible
-            ? 'translateX(-50%) translateY(0)'
-            : 'translateX(-50%) translateY(-14px)',
+          transform: barVisible ? 'translateY(0)' : 'translateY(-14px)',
           transition: 'opacity 200ms, transform 200ms',
           pointerEvents: barVisible ? 'auto' : 'none',
         }}
       >
-        <Link to="/library"
-          className="flex items-center justify-center w-9 h-9 rounded-lg hover:opacity-55 transition-opacity shrink-0"
-          style={{ color: colors.text }}
-          aria-label="Back to Library"
-        >
-          <ArrowLeft size={18} />
-        </Link>
-
-        <div className="flex-1 text-center px-2 min-w-0">
-          <p
-            className="text-[12.5px] truncate"
-            style={{ color: `${colors.text}99`, fontFamily: '"Inter", system-ui, sans-serif' }}
+        {/* Left: back to library */}
+        <div className="flex items-center flex-1">
+          <Link
+            to="/library"
+            className="flex items-center gap-1 px-2 py-1.5 rounded-lg transition-opacity opacity-60 hover:opacity-100 shrink-0"
+            style={{ color: colors.text, fontSize: 13 }}
+            aria-label="Back to Library"
           >
-            {payload?.book.title ?? ''}
-          </p>
+            <ChevronLeft size={15} />
+            Library
+          </Link>
         </div>
 
-        <div className="flex items-center shrink-0">
+        {/* Center: title + progress (absolutely centered) */}
+        <div className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-none" style={{ minWidth: 0 }}>
+          <span
+            className="text-[13px] font-medium truncate max-w-[200px]"
+            style={{ fontFamily: 'Lora, Georgia, serif', color: colors.text }}
+          >
+            {payload?.book.title ?? ''}
+          </span>
+          <span className="text-[10.5px]" style={{ color: `${colors.text}80` }}>
+            {readPct}%
+          </span>
+        </div>
+
+        {/* Right: icon buttons */}
+        <div className="flex items-center gap-0.5 flex-1 justify-end">
           <button
             onClick={() => setSheet(s => s === 'chat' ? 'none' : 'chat')}
-            className="flex items-center justify-center w-9 h-9 rounded-lg hover:opacity-55 transition-opacity"
-            style={{ color: sheet === 'chat' ? '#2383e2' : colors.text }}
+            className="flex items-center justify-center rounded-lg transition-all"
+            style={{
+              width: 34, height: 34,
+              background: sheet === 'chat' ? `${colors.text}12` : 'transparent',
+              color: sheet === 'chat' ? colors.text : `${colors.text}80`,
+            }}
             aria-label="Assistant"
           >
-            <MessageSquare size={16} />
+            <MessageSquare size={15} />
           </button>
           <button
             onClick={() => setSheet(s => s === 'audio' ? 'none' : 'audio')}
-            className="flex items-center justify-center w-9 h-9 rounded-lg hover:opacity-55 transition-opacity"
-            style={{ color: colors.text }}
+            className="flex items-center justify-center rounded-lg transition-all"
+            style={{
+              width: 34, height: 34,
+              background: sheet === 'audio' ? `${colors.text}12` : 'transparent',
+              color: sheet === 'audio' ? colors.text : `${colors.text}80`,
+            }}
             aria-label="Audio"
           >
-            <Volume2 size={16} />
+            <Volume2 size={15} />
           </button>
           <button
             onClick={() => setSheet(s => s === 'appearance' ? 'none' : 'appearance')}
-            className="flex items-center justify-center w-9 h-9 rounded-lg hover:opacity-55 transition-opacity"
-            style={{ color: colors.text }}
+            className="flex items-center justify-center rounded-lg transition-all"
+            style={{
+              width: 34, height: 34,
+              background: sheet === 'appearance' ? `${colors.text}12` : 'transparent',
+              color: sheet === 'appearance' ? colors.text : `${colors.text}80`,
+            }}
             aria-label="Appearance"
           >
-            <Settings2 size={16} />
+            <Settings2 size={15} />
           </button>
         </div>
       </header>
@@ -4017,8 +4047,9 @@ export function ReaderRoute() {
 
       {/* ── Scrollable text ───────────────────────────────────────────── */}
       <div
-        className="mx-auto px-5 pt-20 pb-36 transition-all duration-200"
+        className="mx-auto px-5 pb-36 transition-all duration-200"
         style={{
+          paddingTop: 72,
           maxWidth: `${WIDTH_PX[appearance.width]}px`,
           WebkitTouchCallout: 'none',  // suppress iOS long-press callout
         }}
@@ -4150,46 +4181,119 @@ export function ReaderRoute() {
         })()}
       </BottomSheet>
 
-      {/* ── Assistant chat sheet ─────────────────────────────────────── */}
+      {/* ── Reader Popover (Audio / Appearance) ──────────────────────── */}
+      {(() => {
+        const isOpen = sheet === 'audio' || sheet === 'appearance'
+
+        const TABS: Array<{ id: 'audio' | 'appearance'; label: string; Icon: typeof Volume2 }> = [
+          { id: 'audio',      label: 'Audio',      Icon: Volume2 },
+          { id: 'appearance', label: 'Appearance', Icon: Settings2 },
+        ]
+
+        return (
+          <>
+            {/* Backdrop */}
+            <div
+              className="fixed inset-0 z-[200]"
+              style={{ pointerEvents: isOpen ? 'all' : 'none' }}
+              onClick={() => setSheet('none')}
+            />
+
+            {/* Panel */}
+            <div
+              className="fixed z-[201] flex flex-col overflow-hidden"
+              style={{
+                bottom: 20,
+                right: 14,
+                width: 380,
+                maxHeight: 'calc(100dvh - 100px)',
+                borderRadius: 14,
+                backgroundColor: colors.bg,
+                border: `1px solid ${colors.text}10`,
+                boxShadow: '0 8px 32px rgba(0,0,0,0.14), 0 2px 8px rgba(0,0,0,0.08)',
+                transformOrigin: 'bottom right',
+                transform: isOpen ? 'scale(1) translateY(0)' : 'scale(0.88) translateY(12px)',
+                opacity: isOpen ? 1 : 0,
+                pointerEvents: isOpen ? 'all' : 'none',
+                transition: 'transform 220ms cubic-bezier(0.32,0.72,0,1), opacity 180ms ease',
+              }}
+            >
+              {/* Tab header */}
+              <div className="flex items-center justify-between p-2.5 flex-shrink-0" style={{ paddingBottom: 0 }}>
+                <div className="flex rounded-lg p-0.5" style={{ background: `${colors.text}08` }}>
+                  {TABS.map(({ id, label, Icon }) => (
+                    <button
+                      key={id}
+                      onClick={() => setSheet(s => (s === id ? 'none' : id) as typeof s)}
+                      className="flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium rounded-md transition-all whitespace-nowrap"
+                      style={{
+                        background: sheet === id ? colors.bar : 'transparent',
+                        color: sheet === id ? colors.text : `${colors.text}80`,
+                        boxShadow: sheet === id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+                      }}
+                    >
+                      <Icon size={12} /> {label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={() => setSheet('none')}
+                  className="flex items-center justify-center rounded-full transition-all"
+                  style={{
+                    width: 28, height: 28,
+                    border: `1px solid ${colors.text}18`,
+                    background: `${colors.text}08`,
+                    color: `${colors.text}80`,
+                  }}
+                  aria-label="Close"
+                >
+                  <ChevronDown size={14} />
+                </button>
+              </div>
+
+              {/* Content area */}
+              {isOpen && (
+                <div className="overflow-y-auto" style={{ flex: 1 }}>
+                  <div style={{ display: sheet === 'audio' ? 'block' : 'none' }}>
+                    <AudioContent
+                      colors={colors}
+                      provider={effectiveTtsProvider}
+                      onProviderChange={setTtsProvider}
+                      voice={effectiveTtsVoice}
+                      onVoiceChange={setTtsVoice}
+                      onError={showToast}
+                      rate={audioRate}
+                      onRateChange={setAudioRate}
+                    />
+                  </div>
+                  <div style={{ display: sheet === 'appearance' ? 'block' : 'none' }}>
+                    <AppearanceContent
+                      appearance={appearance}
+                      onChange={patchAppearance}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )
+      })()}
+
+      {/* ── Assistant chat sheet (separate) ──────────────────────────── */}
       {sheet === 'chat' && (() => {
-        const ft = payload?.text ?? ''
+        const ft  = payload?.text ?? ''
         const mid = Math.floor(scrollPct * ft.length)
-        const lo  = Math.max(0, mid - 1000)
-        const hi  = Math.min(ft.length, mid + 1000)
-        const ctx = ft.slice(lo, hi)
+        const ctx = ft.slice(Math.max(0, mid - 1000), Math.min(ft.length, mid + 1000))
         return (
           <BottomSheet open onClose={() => setSheet('none')} bg={colors.bg}>
             <AssistantChat
               bookTitle={payload?.book.title ?? 'this book'}
               pageContext={ctx}
-              onClose={() => setSheet('none')}
               colors={colors}
             />
           </BottomSheet>
         )
       })()}
-
-      {/* ── Appearance sheet ──────────────────────────────────────────── */}
-      <BottomSheet open={sheet === 'appearance'} onClose={() => setSheet('none')} bg={colors.bg}>
-        <AppearanceContent
-          appearance={appearance}
-          onChange={patchAppearance}
-          onClose={() => setSheet('none')}
-        />
-      </BottomSheet>
-
-      {/* ── Audio sheet ───────────────────────────────────────────────── */}
-      <BottomSheet open={sheet === 'audio'} onClose={() => setSheet('none')} bg={colors.bg}>
-        <AudioContent
-          onClose={() => setSheet('none')}
-          colors={colors}
-          provider={effectiveTtsProvider}
-          onProviderChange={setTtsProvider}
-          voice={effectiveTtsVoice}
-          onVoiceChange={setTtsVoice}
-          onError={showToast}
-        />
-      </BottomSheet>
 
       {/* ── Presynthesis progress (subtle, disappears when done) ─────── */}
       {presynthProgress && presynthProgress.completed < presynthProgress.total && (
@@ -4212,6 +4316,8 @@ export function ReaderRoute() {
             curIdx={activePlayBarCurIdx}
             totalChunks={activePlayBarTotal}
             voiceLabel={playBarVoiceLabel}
+            rate={audioRate}
+            onRateChange={setAudioRate}
             colors={colors}
             handle={activePlayBarHandle}
             onOpenSheet={() => setSheet('audio')}
