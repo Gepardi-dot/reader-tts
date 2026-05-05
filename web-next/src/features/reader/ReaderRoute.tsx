@@ -665,30 +665,45 @@ async function getOrCreateDeck(): Promise<string | null> {
 function BottomSheet({ open, onClose, children, bg = '#ffffff' }: {
   open: boolean; onClose: () => void; children: React.ReactNode; bg?: string
 }) {
+  const [mounted, setMounted] = useState(open)
+  const [visible, setVisible] = useState(false)
+
+  useEffect(() => {
+    if (open) {
+      setMounted(true)
+      requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)))
+    } else {
+      setVisible(false)
+      const t = setTimeout(() => setMounted(false), 260)
+      return () => clearTimeout(t)
+    }
+  }, [open])
+
+  if (!mounted) return null
+
   return (
-    <AnimatePresence>
-      {open && (
-        <div className="fixed inset-0 z-[65] flex items-end justify-center">
-          <motion.div
-            className="absolute inset-0 bg-black/30"
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            onClick={onClose}
-          />
-          <motion.div
-            className="relative w-full max-w-md rounded-t-2xl shadow-2xl overflow-hidden"
-            style={{ backgroundColor: bg }}
-            initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
-            transition={{ type: 'spring', damping: 32, stiffness: 340 }}
-          >
-            <div className="flex justify-center pt-3 pb-1">
-              <div className="w-8 h-1 rounded-full bg-current opacity-20" />
-            </div>
-            {children}
-          </motion.div>
+    <div className="fixed inset-0 z-[65] flex items-end justify-center">
+      <div
+        className="absolute inset-0 bg-black/30"
+        style={{ opacity: visible ? 1 : 0, transition: 'opacity 200ms ease' }}
+        onClick={onClose}
+      />
+      <div
+        className="relative w-full max-w-md rounded-t-2xl shadow-2xl overflow-hidden"
+        style={{
+          backgroundColor: bg,
+          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+          transform: visible ? 'translateY(0)' : 'translateY(100%)',
+          transition: 'transform 220ms cubic-bezier(0.32,0.72,0,1)',
+          willChange: 'transform',
+        }}
+      >
+        <div className="flex justify-center pt-3 pb-1">
+          <div className="w-8 h-1 rounded-full bg-current opacity-20" />
         </div>
-      )}
-    </AnimatePresence>
+        {children}
+      </div>
+    </div>
   )
 }
 
@@ -3962,8 +3977,8 @@ export function ReaderRoute() {
         {/* Center: title + progress (absolutely centered) */}
         <div className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-none" style={{ minWidth: 0 }}>
           <span
-            className="text-[13px] font-medium truncate max-w-[200px]"
-            style={{ fontFamily: 'Lora, Georgia, serif', color: colors.text }}
+            className="text-[13px] font-medium truncate"
+            style={{ fontFamily: 'Lora, Georgia, serif', color: colors.text, maxWidth: 'min(200px, calc(100vw - 220px))' }}
           >
             {payload?.book.title ?? ''}
           </span>
@@ -4203,9 +4218,9 @@ export function ReaderRoute() {
             <div
               className="fixed z-[201] flex flex-col overflow-hidden"
               style={{
-                bottom: 20,
+                bottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
                 right: 14,
-                width: 380,
+                width: 'min(380px, calc(100vw - 28px))',
                 maxHeight: 'calc(100dvh - 100px)',
                 borderRadius: 14,
                 backgroundColor: colors.bg,
