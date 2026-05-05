@@ -1,39 +1,32 @@
 ---
 name: seamless-tts
-description: Invariants and footguns for TTS playback in storybook-reader. Read before touching any audio path code.
+description: Invariants, current state, and known problems for TTS playback in storybook-reader. Read before touching any audio path code — and treat the "current state" section as replaceable, not sacred.
 ---
 
-# Seamless TTS — invariants only
+# Seamless TTS
 
-Line numbers drift — grep for symbols. This file contains only things invisible from the code itself.
+Line numbers drift — grep for symbols. This file separates correctness rules (don't violate) from current implementation (replaceable) from known problems (rethink-worthy).
 
 ## Hot files
-- `web-next/src/features/reader/ReaderRoute.tsx` — all playback state, prefetch, gapless scheduling
+- `web-next/src/features/reader/ReaderRoute.tsx` — playback state, prefetch, gapless scheduling
 - `server/app.py` — `/api/books/{id}/live-audio`, `/api/books/{id}/presynthesize`, cache, providers
-- Playback entry: grep `playWord` in ReaderRoute. The audio-settings preview is a separate code path, not the reader.
+- `scripts/kokoro_server.py` — Fly.io Kokoro server (not yet deployed)
+- Playback entry: grep `playWord` in ReaderRoute. The audio-settings preview is a separate code path.
 
-## Invariants
+---
 
-**Cache key contract**
-`build_live_audio_payload` SHA-1 fields: bookId / provider / voice / model / outputFormat / narrationStyle / lengthScale / sentenceSilence / start / end.
-Adding or removing any field → bump `LIVE_AUDIO_CACHE_VERSION` (current: 7). Otherwise every S3 audio file is orphaned.
+## Hard invariants — violating these breaks correctness
 
-**Gapless audio = Web Audio API only**
-Main reader uses `ctx.createBufferSource` scheduled at `max(now+0.002, lastScheduledEnd)`. Never replace with `new Audio()` or `<audio>` in the reader path — gaps will appear between chunks.
+**Cache key bump on field change.**
+`build_live_audio_payload` SHA-1s: bookId / provider / voice / model / outputFormat / narrationStyle / lengthScale / sentenceSilence / start / end. Adding or removing any field → bump `LIVE_AUDIO_CACHE_VERSION` (current: 7). Skipping the bump orphans every cached S3 audio file.
 
-**Vercel thread death**
-`threading.Thread(daemon=True)` dies when the lambda returns. Auto-presynth on upload won't complete on Vercel — only on long-lived hosts (uvicorn, Fly.io). Per-chunk S3 caching still lands whatever completes before the lambda dies.
+**No module-global caches on Vercel.**
+Per-process dicts/sets only persist within one lambda invocation. Any cache must be S3 / Supabase / external — never in-memory.
 
-**Presynth marker is single-provider**
-`.presynth-done.json` records ONE provider+voice (whichever finishes last). If user switches providers and gets re-warm behavior next open, this is the cause.
+**Vercel cannot run background work.**
+`threading.Thread(daemon=True)` dies when the lambda returns. Any "fire and forget" path on Vercel will be killed mid-flight. Per-chunk S3 caching still lands whatever completes before death.
 
-**In-process caches are broken on Vercel**
-Module-global dicts/sets only persist within one lambda invocation. No process-local cache without measured perf reason and correct cross-instance keying.
-
-**MediaSource streaming not supported**
-kokoro-onnx returns a complete WAV. Streaming requires rewriting the Kokoro server (chunked-transfer-encoding). Not a one-session task.
-
-## Z-index ladder (bump one → check all)
+**Z-index ladder (bump one → check all).**
 
 | z-index | Element | Notes |
 |--------:|---------|-------|
@@ -46,15 +39,51 @@ kokoro-onnx returns a complete WAV. Streaming requires rewriting the Kokoro serv
 
 New element at `z-[6x]` or higher: add it to this table AND verify against sheet/dropdown layering.
 
-## Regression watchpoints
-- Z-index bump without checking the full ladder above
-- Cache key field change without `LIVE_AUDIO_CACHE_VERSION` bump → orphaned S3 audio
-- `new Audio()` in main reader path → gaps between chunks
-- Changing `ctx.resume()` gesture unlock → test iOS Safari (context suspension silently no-ops gapless scheduling)
-- `web-rewrite/` is legacy and NOT deployed — don't edit it; production is `web-next/`
-- Prefetch ahead > 6 → each chunk is a real API call, costs scale linearly
+---
 
-## Test commands
+## Current implementation — descriptive, not prescriptive
+
+If a user reports a quality problem, suspect the implementation before defending it. Each item below is a choice that was made, not a law of nature.
+
+- **Gapless playback uses Web Audio API.** `ctx.createBufferSource` scheduled at `max(now+0.002, lastScheduledEnd)`. Requires the full WAV in memory before playback can start — this is why time-to-first-audio is high on cold starts.
+- **Per-page synthesis.** Each request synthesizes one page worth of chunks. Page boundaries come from `paginateReaderText()` upstream of TTS.
+- **Presynth marker is single-provider.** `.presynth-done.json` records ONE provider+voice (whichever finishes last). Voice switch → entire book re-warms.
+- **kokoro-onnx returns complete WAVs.** Streaming would require the Kokoro server (`scripts/kokoro_server.py`) to switch to chunked-transfer-encoding.
+- **SHA-1 cache key over 10 fields.** Any one field changing → cache miss → cold synth.
+- **Live audio providers in production:** `google` (Gemini Flash TTS) and `kokoro` (via Fly.io, not yet deployed).
+
+---
+
+## Known problems worth rethinking
+
+These are *not* "things to work around" — they are signals that the architecture should change.
+
+| Problem | Likely better path |
+|---------|-------------------|
+| Web Audio API requires full WAV → high time-to-first-audio | MediaSource + chunked transfer; or HTMLAudioElement with media fragments |
+| Voice switch re-warms whole book (single-provider marker) | Marker keyed per `provider+voice`; warm caches stay warm |
+| Auto-presynth on Vercel never completes (daemon thread death) | Move synth to Fly.io worker; Vercel is wrong host for long-lived work |
+| Gemini cold-start latency on every fresh chunk | Pre-warm on book open; or move default provider to Kokoro once Fly deploy lands |
+| `ctx.resume()` gesture unlock fragile on iOS Safari | Replace with persistent unlocked context on first user interaction |
+| Cost-bounded prefetch (`ahead > 6 = expensive`) | Cost shouldn't gate UX; if latency is the complaint, lift the cap and use cheaper provider |
+
+If you fix one of these, **delete the corresponding row** and update "Current implementation" to match.
+
+---
+
+## When the user reports bad TTS
+
+1. **Don't reach for a patch inside the current architecture by default.** A 2026-frustrated user reporting "TTS is fucked up" is evidence the architecture is wrong, not that one line needs tweaking.
+2. **Ask for the specific symptom:** which provider, gaps vs. latency vs. cutoff vs. wrong voice vs. robotic, desktop vs. mobile, cold load vs. mid-session.
+3. **Pull evidence before guessing:** Vercel runtime logs for `/api/books/*/live-audio`, browser console, network tab waterfall.
+4. **If the root cause requires breaking an "invariant" in this file, propose that.** The Hard Invariants list is correctness-only; everything else can be replaced. Update or delete the section that contradicts the fix in the same commit.
+5. **`web-rewrite/` is legacy and not deployed** — production is `web-next/`, don't go diff-archaeology there.
+
+---
+
+## Sanity checks before claiming done
+
+Type-check passing is NOT enough. Exercise the actual user path:
 
 ```bash
 # Backend
@@ -66,3 +95,10 @@ cd web-next && npm run dev   # port 5175, proxies /api → :8000
 # Typecheck + build
 cd web-next && npm run typecheck && npm run build
 ```
+
+Manual UX checks:
+- Open reader → press play → first audio within 1–2s on warm cache, ≤4s cold
+- Switch voice mid-book → next page synthesizes with new voice without errors
+- Open audio settings sheet while audio plays → no z-index bleed
+- Let it play across a page boundary → no audible gap
+- iOS Safari: lock screen, return → audio resumes (or fails predictably)
