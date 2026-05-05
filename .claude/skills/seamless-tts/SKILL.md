@@ -35,7 +35,9 @@ Per-process dicts/sets only persist within one lambda invocation. Any cache must
 | `z-[60]` | Selection action menu | Vocab/dictionary/play popup |
 | `z-[65]` | BottomSheet | Container + backdrop |
 | `z-[70]` | Toast | `pointer-events-none` |
-| `z-[80]` | shadcn Select portal | `components/ui/select.tsx` — must stay above sheet |
+| `z-[200]` | Audio/Appearance panel backdrop | `fixed inset-0`, `pointer-events: all` when open |
+| `z-[201]` | Audio/Appearance panel | Inline popover, bottom-right |
+| `z-[300]` | shadcn Select portal | `components/ui/select.tsx` — must stay above panel+backdrop |
 
 New element at `z-[6x]` or higher: add it to this table AND verify against sheet/dropdown layering.
 

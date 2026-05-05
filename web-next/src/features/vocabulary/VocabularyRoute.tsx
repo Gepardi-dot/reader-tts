@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useState, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Layers, LayoutGrid, AlignLeft, ChevronDown, ChevronUp } from 'lucide-react'
 import { api } from '@/shared/api/client'
@@ -31,6 +31,7 @@ interface VocabNote {
   topic: string | null
   sourceBookId: string | null
   sourceBookTitle: string | null
+  metadata: { dictionarySource?: string | null } | null
   cards: VocabNoteCard[]
 }
 
@@ -259,6 +260,7 @@ export function VocabularyRoute() {
   const [layout, setLayout] = useState<Layout>('grid')
   const [expanded, setExpanded] = useState<string | null>(null)
   const [stageFilter, setStageFilter] = useState<StageFilter>('all')
+  const queryClient = useQueryClient()
 
   const { data: decks = [], isLoading: decksLoading } = useQuery({
     queryKey: ['decks'],
@@ -277,6 +279,28 @@ export function VocabularyRoute() {
     queryFn: () => api.get<DeckDashboard>(`/api/vocabulary/decks/${deck!.id}`),
     enabled: Boolean(deck?.id),
   })
+
+  // Silently upgrade any notes whose definition came from WordNet
+  useEffect(() => {
+    if (!dashboard?.notes || !deck?.id) return
+    const stale = dashboard.notes.filter(
+      (n) => n.metadata?.dictionarySource === 'Open English WordNet' || n.back === 'Saved from reading',
+    )
+    if (stale.length === 0) return
+    let refreshed = 0
+    const refresh = async () => {
+      for (const note of stale) {
+        try {
+          await api.post(`/api/vocabulary/notes/${note.id}/refresh-definition`, {})
+          refreshed++
+        } catch { /* ignore individual failures */ }
+      }
+      if (refreshed > 0) {
+        queryClient.invalidateQueries({ queryKey: ['deck-dashboard', deck.id] })
+      }
+    }
+    refresh()
+  }, [dashboard?.notes?.length, deck?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const isLoading = decksLoading || (Boolean(deck) && dashLoading)
   const words = (dashboard?.notes ?? []).filter(

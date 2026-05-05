@@ -2137,6 +2137,63 @@ class VocabularyStudioService:
                 "deck": self._deck_summary(conn, deck_row, now),
             }
 
+    def refresh_note_definition(self, note_id: str) -> dict[str, Any]:
+        now = _utc_now()
+        with self.connection() as conn:
+            note_row = conn.execute(
+                "select * from notes where id = ? and user_id = ?",
+                (note_id, self.user_id),
+            ).fetchone()
+            if note_row is None:
+                raise HTTPException(status_code=404, detail="Note not found.")
+
+            front = note_row["front"]
+            if not front or self._dictionary_lookup is None:
+                raise HTTPException(status_code=422, detail="No dictionary lookup available.")
+
+            try:
+                dictionary_payload = self._dictionary_lookup(front)
+            except Exception:
+                raise HTTPException(status_code=502, detail="Dictionary lookup failed.")
+
+            entries = dictionary_payload.get("entries") if isinstance(dictionary_payload, dict) else None
+            if not isinstance(entries, list) or not entries:
+                raise HTTPException(status_code=404, detail="No definition found for this word.")
+
+            first_definition = entries[0].get("definition") if isinstance(entries[0], dict) else None
+            back = _normalize_line(first_definition)
+            if back is None:
+                raise HTTPException(status_code=404, detail="No definition found for this word.")
+
+            metadata = _json_load_dict(note_row["metadata_json"])
+            metadata["dictionarySource"] = dictionary_payload.get("source")
+            pronunciation = dictionary_payload.get("pronunciation")
+            if pronunciation:
+                metadata["pronunciation"] = pronunciation
+            else:
+                metadata.pop("pronunciation", None)
+
+            timestamp = _serialize_timestamp(now)
+            conn.execute(
+                "update notes set back = ?, metadata_json = ?, updated_at = ? where id = ? and user_id = ?",
+                (back, _jp(metadata), timestamp, note_id, self.user_id),
+            )
+            conn.execute(
+                "update cards set answer = ?, updated_at = ? where note_id = ? and card_type = 'basic'",
+                (back, timestamp, note_id),
+            )
+            conn.execute(
+                "update decks set updated_at = ? where id = ?",
+                (timestamp, note_row["deck_id"]),
+            )
+            refreshed = conn.execute("select * from notes where id = ?", (note_id,)).fetchone()
+            card_rows = conn.execute("select * from cards where note_id = ? order by position asc", (note_id,)).fetchall()
+            deck_row = self._require_deck(conn, note_row["deck_id"])
+            return {
+                "note": self._serialize_note(refreshed, list(card_rows)),
+                "deck": self._deck_summary(conn, deck_row, now),
+            }
+
     def import_archive_items(self, deck_id: str, request: ArchiveImportRequest) -> dict[str, Any]:
         now = _utc_now()
         created_notes: list[dict[str, Any]] = []
@@ -3414,6 +3471,10 @@ def create_vocabulary_router(service: VocabularyStudioService) -> APIRouter:
     @router.patch("/notes/{note_id}/mnemonic")
     def update_note_mnemonic(note_id: str, request: NoteMnemonicUpdateRequest) -> dict[str, Any]:
         return service.update_note_mnemonic(note_id, request)
+
+    @router.post("/notes/{note_id}/refresh-definition")
+    def refresh_note_definition(note_id: str) -> dict[str, Any]:
+        return service.refresh_note_definition(note_id)
 
     @router.post("/decks/{deck_id}/imports/archive")
     def import_archive(deck_id: str, request: ArchiveImportRequest) -> dict[str, Any]:

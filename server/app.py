@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import urllib.parse
 import uuid
 import wave
 import xml.etree.ElementTree as ET
@@ -221,6 +222,7 @@ OPEN_WORDNET_DATA_DIR = RUNTIME_DICTIONARY_ROOT / "open-wordnet"
 SAMSUNG_DICTIONARY_PACKAGE = "com.diotek.sec.lookup.dictionary"
 SAMSUNG_DICTIONARY_BRIDGE_LABEL = "Samsung Dictionary · Collins English"
 OPEN_WORDNET_SOURCE_LABEL = "Open English WordNet"
+FREE_DICTIONARY_SOURCE_LABEL = "Free Dictionary API"
 SAMSUNG_DICTIONARY_DEVICE_ID = env_value("SAMSUNG_DICTIONARY_DEVICE_ID")
 _samsung_dictionary_bridge_lock = threading.Lock()
 _wordnet_download_lock = threading.Lock()
@@ -1332,6 +1334,117 @@ def build_wordnet_payload(wn: Any, term: str) -> dict[str, Any] | None:
     }
 
 
+def lookup_free_dictionary_api(term: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Fetch a definition from dictionaryapi.dev. Falls back to WordNet lemma if inflected form returns 404."""
+    normalized = normalize_dictionary_term(term)
+    if not normalized:
+        return None, "Empty term."
+
+    def _fetch(query: str) -> tuple[list[dict], str | None, str | None]:
+        try:
+            encoded = urllib.parse.quote(query, safe="")
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{encoded}")
+            if resp.status_code == 404:
+                return [], None, None
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            return [], None, str(exc)
+
+        if not isinstance(data, list) or not data:
+            return [], None, None
+
+        pronunciation: str | None = None
+        for phonetic in data[0].get("phonetics", []):
+            if phonetic.get("text"):
+                pronunciation = phonetic["text"]
+                break
+
+        word = data[0].get("word", query)
+        entries: list[dict] = []
+        seen: set[tuple[str | None, str]] = set()
+        for api_entry in data:
+            for meaning in api_entry.get("meanings", []):
+                pos = meaning.get("partOfSpeech")
+                for defn in meaning.get("definitions", []):
+                    definition = (defn.get("definition") or "").strip()
+                    if not definition:
+                        continue
+                    key = (pos, definition.casefold())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    entries.append({
+                        "term": word,
+                        "pronunciation": pronunciation,
+                        "part_of_speech": pos,
+                        "definition": definition,
+                        "examples": [defn["example"]] if defn.get("example") else [],
+                        "register": None,
+                        "notes": None,
+                        "synonyms": (defn.get("synonyms") or [])[:6],
+                        "source": FREE_DICTIONARY_SOURCE_LABEL,
+                    })
+                    if len(entries) >= 8:
+                        return entries, pronunciation, None
+        return entries, pronunciation, None
+
+    entries, pronunciation, error = _fetch(normalized)
+
+    # For single inflected words, retry with WordNet-lemmatized base form
+    if not entries and " " not in normalized:
+        wn, _ = ensure_open_wordnet_available()
+        if wn is not None:
+            seen_bases: set[str] = set()
+            for pos in ("v", "n", "a", "s", "r"):
+                base = wn.morphy(normalized, pos)
+                if base and base.casefold() != normalized.casefold() and base not in seen_bases:
+                    seen_bases.add(base)
+                    base_entries, base_pronunciation, base_error = _fetch(base)
+                    if base_entries:
+                        entries = base_entries
+                        pronunciation = base_pronunciation
+                        error = base_error
+                        break
+
+    if not entries:
+        return None, error or f"Free Dictionary API: no entry for \"{normalized}\"."
+
+    cache_dictionary_entries(normalized, entries)
+    cached_rows = fetch_dictionary_rows(normalized)
+    if cached_rows:
+        payload = build_dictionary_payload(normalized, cached_rows)
+        if pronunciation and not payload.get("pronunciation"):
+            payload["pronunciation"] = pronunciation
+        return payload, None
+
+    # Cache write failed — build response directly from entries
+    first = entries[0]
+    return {
+        "term": first["term"],
+        "normalizedTerm": normalized,
+        "available": True,
+        "exact": str(first["term"]).casefold() == normalized.casefold(),
+        "source": FREE_DICTIONARY_SOURCE_LABEL,
+        "pronunciation": pronunciation,
+        "entries": [
+            {
+                "partOfSpeech": e.get("part_of_speech"),
+                "definition": e["definition"],
+                "examples": e.get("examples") or [],
+                "registerLabel": None,
+                "notes": None,
+                "synonyms": e.get("synonyms") or [],
+            }
+            for e in entries
+        ],
+        "matchNote": None,
+        "relatedTerms": [],
+        "message": None,
+    }, None
+
+
 def lookup_open_wordnet_dictionary(term: str) -> tuple[dict[str, Any] | None, str | None]:
     normalized = normalize_dictionary_term(term)
     wn, availability_error = ensure_open_wordnet_available()
@@ -1427,6 +1540,11 @@ def lookup_offline_dictionary(term: str) -> dict[str, Any]:
     if rows:
         source = rows[0]["source"] if "source" in rows[0].keys() else None
         if source == OPEN_WORDNET_SOURCE_LABEL:
+            # Upgrade stale WordNet cache entry to Free Dictionary where possible
+            free_dict_payload, _ = lookup_free_dictionary_api(normalized)
+            if free_dict_payload is not None:
+                free_dict_payload["message"] = None
+                return free_dict_payload
             wn, availability_error = ensure_open_wordnet_available()
             if not availability_error and wn is not None:
                 wordnet_payload = build_wordnet_payload(wn, normalized)
@@ -1442,13 +1560,19 @@ def lookup_offline_dictionary(term: str) -> dict[str, Any]:
     if samsung_payload is not None:
         return samsung_payload
 
+    free_dict_payload, free_dict_error = lookup_free_dictionary_api(normalized)
+    if free_dict_payload is not None:
+        if samsung_error and not free_dict_payload.get("message"):
+            free_dict_payload["message"] = samsung_error
+        return free_dict_payload
+
     wordnet_payload, wordnet_error = lookup_open_wordnet_dictionary(normalized)
     if wordnet_payload is not None:
         if samsung_error and not wordnet_payload.get("message"):
             wordnet_payload["message"] = samsung_error
         return wordnet_payload
 
-    failure_notes = [message for message in (samsung_error, wordnet_error) if message]
+    failure_notes = [message for message in (samsung_error, free_dict_error, wordnet_error) if message]
     failure_message = " ".join(dict.fromkeys(failure_notes)) if failure_notes else None
 
     if dictionary_db_available():
