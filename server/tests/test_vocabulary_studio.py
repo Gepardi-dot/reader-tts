@@ -737,5 +737,56 @@ class VocabularyStudioTestCase(unittest.TestCase):
         self.assertEqual(user_prompt["allowedExamples"], ["A steady hand kept the glass from spilling."])
 
 
+class StudioSummaryTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = Path(mkdtemp())
+        self.service = VocabularyStudioService(self.tempdir)
+
+    def tearDown(self) -> None:
+        del self.service
+        gc.collect()
+        shutil.rmtree(self.tempdir, ignore_errors=True)
+
+    def _insert_event(self, when: datetime, *, xp_delta: int = 10) -> None:
+        from server.vocabulary_studio import _make_id  # noqa: WPS433
+        with self.service.connection() as conn:
+            conn.execute(
+                """
+                insert into learning_events (id, user_id, event_type, xp_delta, label, payload_json, created_at)
+                values (?, ?, ?, ?, ?, '{}', ?)
+                """,
+                (_make_id(), self.service.user_id, "review_completed", xp_delta, "test", when.isoformat()),
+            )
+
+    def test_studio_summary_returns_zeros_when_no_events(self) -> None:
+        result = self.service.studio_summary()
+        self.assertEqual(result["streakDays"], 0)
+        self.assertEqual(result["xpToday"], 0)
+        self.assertEqual(result["xpThisWeek"], 0)
+        self.assertEqual(result["dailyGoalProgress"], 0)
+        self.assertGreater(result["dailyGoal"], 0)
+
+    def test_studio_summary_breaks_streak_when_yesterday_is_missed(self) -> None:
+        # Event 2 days ago, nothing today or yesterday → streak ends at 0 (today is empty).
+        two_days_ago = datetime.now(timezone.utc) - timedelta(days=2)
+        self._insert_event(two_days_ago, xp_delta=15)
+        result = self.service.studio_summary()
+        self.assertEqual(result["streakDays"], 0)
+        # That older event is still inside the 7-day window:
+        self.assertEqual(result["xpThisWeek"], 15)
+        self.assertEqual(result["xpToday"], 0)
+
+    def test_studio_summary_counts_continuous_streak(self) -> None:
+        # Insert one event for each of the last 5 days (today and 4 prior).
+        now = datetime.now(timezone.utc)
+        for offset in range(5):
+            self._insert_event(now - timedelta(days=offset, hours=1), xp_delta=20)
+        result = self.service.studio_summary()
+        self.assertEqual(result["streakDays"], 5)
+        self.assertEqual(result["xpToday"], 20)
+        # All 5 events are within the rolling 7-day window:
+        self.assertEqual(result["xpThisWeek"], 100)
+
+
 if __name__ == "__main__":
     unittest.main()

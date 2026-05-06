@@ -1765,6 +1765,52 @@ class VocabularyStudioService:
                 "recentActivity": self._recent_learning_activity(conn),
             }
 
+    def studio_summary(self) -> dict[str, Any]:
+        # Lightweight summary for the Studio header: streak, XP today/week, daily-goal progress.
+        now = _utc_now()
+        day_start, day_end = _local_day_bounds(now)
+        week_start = day_end - timedelta(days=7)
+        daily_goal = 20
+        with self.connection() as conn:
+            xp_today_row = conn.execute(
+                """
+                select coalesce(sum(xp_delta), 0)
+                from learning_events
+                where user_id = ?
+                  and created_at >= ?
+                  and created_at < ?
+                """,
+                (self.user_id, _serialize_timestamp(day_start), _serialize_timestamp(day_end)),
+            ).fetchone()
+            xp_week_row = conn.execute(
+                """
+                select coalesce(sum(xp_delta), 0)
+                from learning_events
+                where user_id = ?
+                  and created_at >= ?
+                  and created_at < ?
+                """,
+                (self.user_id, _serialize_timestamp(week_start), _serialize_timestamp(day_end)),
+            ).fetchone()
+            reviews_today_row = conn.execute(
+                """
+                select count(*)
+                from review_logs
+                where user_id = ?
+                  and reviewed_at >= ?
+                  and reviewed_at < ?
+                """,
+                (self.user_id, _serialize_timestamp(day_start), _serialize_timestamp(day_end)),
+            ).fetchone()
+            streak_days = self._learning_streak_days(conn, now)
+        return {
+            "streakDays": int(streak_days),
+            "xpToday": int((xp_today_row[0] if xp_today_row else 0) or 0),
+            "xpThisWeek": int((xp_week_row[0] if xp_week_row else 0) or 0),
+            "dailyGoal": daily_goal,
+            "dailyGoalProgress": int((reviews_today_row[0] if reviews_today_row else 0) or 0),
+        }
+
     def record_learning_event(self, request: LearningEventRequest | dict[str, Any]) -> dict[str, Any]:
         active_request = request if isinstance(request, LearningEventRequest) else LearningEventRequest.model_validate(request)
         now = _utc_now()
@@ -3511,5 +3557,9 @@ def create_vocabulary_router(service: VocabularyStudioService) -> APIRouter:
     @router.patch("/cards/{card_id}")
     def update_card(card_id: str, request: CardUpdateRequest) -> dict[str, Any]:
         return service.update_card(card_id, request)
+
+    @router.get("/learning-summary")
+    def get_learning_summary() -> dict[str, Any]:
+        return service.studio_summary()
 
     return router

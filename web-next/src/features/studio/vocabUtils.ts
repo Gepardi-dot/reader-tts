@@ -9,6 +9,7 @@ const PLACEHOLDER_DEF_PATTERNS = [
   /^saved from (your )?reading\.?$/i,
   /^definition unavailable\.?$/i,
   /^a word from your reading\.?$/i,
+  /^a vocabulary word in this deck\.?$/i,
   /^see [a-z]/i,
 ]
 

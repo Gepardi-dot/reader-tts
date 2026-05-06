@@ -3,6 +3,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { BookOpen, Check, Circle, Sparkles, X } from 'lucide-react'
 import { api } from '@/shared/api/client'
 import { isVocabWord, isPlaceholderDefinition } from './vocabUtils'
+import {
+  buildSessionPlan as buildPlanForStages,
+  buildRemedialStep,
+  objectiveResultToRating,
+  pickDistractors,
+  type ExerciseKind,
+} from './sessionPlan'
+import { StudioHeader, useStudioSummary } from './StudioHeader'
 
 const C = {
   bg: 'transparent',
@@ -57,26 +65,88 @@ async function aiCheckVocab(payload: {
   })
 }
 
-function verdictToRating(v: VocabCheck['verdict']): Rating {
-  return v === 'correct' ? 'good' : v === 'partial' ? 'hard' : 'again'
+interface CoachHistoryItem {
+  role: 'assistant' | 'learner'
+  text: string
+  step: string
 }
 
-interface AIDefinition {
+interface CoachResponse {
+  provider: string
+  verdict: 'correct' | 'close' | 'incorrect'
+  feedbackTitle: string
+  feedbackBody: string
+  correction: string
+  nextPrompt: string
+  suggestedRating: Rating
+  canRate: boolean
+  turnCount: number
+}
+
+async function coachCard(cardId: string, body: {
+  mode: 'review' | 'lesson'
+  step: 'answer' | 'retry' | 'usage'
+  turnIndex: number
+  learnerResponse: string
+  history: CoachHistoryItem[]
+}): Promise<CoachResponse> {
+  return api.post<CoachResponse>(`/api/vocabulary/cards/${cardId}/coach`, body)
+}
+
+function coachToVocabCheck(coach: CoachResponse): VocabCheck {
+  const verdict: VocabCheck['verdict'] = coach.verdict === 'close' ? 'partial' : coach.verdict
+  return {
+    verdict,
+    feedback: [coach.feedbackTitle, coach.feedbackBody].filter(Boolean).join(' ').trim() || coach.feedbackBody,
+    suggestion: coach.nextPrompt || null,
+  }
+}
+
+interface ProductionSentenceNote {
+  sentence: string
+  accepted: boolean
+  note: string
+}
+
+interface ProductionResponse {
+  cardId: string
+  accepted: boolean
+  provider: string
+  feedback: string
+  sentenceNotes: ProductionSentenceNote[]
+  productionCount: number
+  sentences: string[]
+}
+
+async function submitCardProduction(cardId: string, sentences: string[]): Promise<ProductionResponse> {
+  return api.post<ProductionResponse>(`/api/vocabulary/cards/${cardId}/production`, { sentences })
+}
+
+interface CardContext {
+  source: string
+  term: string
+  pronunciation: string | null
   definition: string
-  partOfSpeech: string | null
-  example: string | null
+  contextTitle: string
+  contextParagraph: string
+  usageFocus: string[]
+  practicePrompts: string[]
 }
 
-async function aiDefineWord(word: string, bookSentence?: string | null): Promise<AIDefinition> {
-  return api.post<AIDefinition>('/api/ai/define-word', {
-    word,
-    book_sentence: bookSentence ?? null,
+async function fetchCardContext(cardId: string, refreshHint?: string | null): Promise<CardContext> {
+  return api.post<CardContext>(`/api/vocabulary/cards/${cardId}/context`, {
+    refreshHint: refreshHint ?? null,
   })
 }
 
 type CardState = 'new' | 'learning' | 'review' | 'relearning'
-type ExerciseType = 'mcq' | 'cloze' | 'mnemonic' | 'recall' | 'write-sentence' | 'write-definition'
+type ExerciseType = ExerciseKind
 type Screen = 'dashboard' | 'practice' | 'results'
+
+const AVAILABLE_EXERCISES: ExerciseKind[] = [
+  'mcq', 'cloze', 'mnemonic', 'recall', 'write-sentence', 'write-definition',
+  'reverse-recall', 'listening',
+]
 
 interface DeckSummary {
   id: string
@@ -193,6 +263,8 @@ interface StepCompletePayload {
   rating?: Rating
   mnemonic?: string
   typedResponse?: string
+  hintsUsed?: number
+  attempts?: number
 }
 
 interface PracticeSessionResponse {
@@ -306,27 +378,24 @@ function noteToSavedWord(note: VocabNote): SavedWord {
 }
 
 function buildSessionPlan(words: PracticeWord[]): PracticeStep[] {
-  const steps: PracticeStep[] = []
-  words.forEach((word, index) => {
-    const base = `${word.id}-${index}`
-    if (word.stage === 'new') {
-      steps.push({ id: `${base}-mcq`, word, exercise: 'mcq' })
-      if (!word.mnemonic) steps.push({ id: `${base}-mnemonic`, word, exercise: 'mnemonic' })
-      return
-    }
-    if (word.stage === 'learning' || word.stage === 'relearning') {
-      steps.push({ id: `${base}-cloze`, word, exercise: 'cloze' })
-      steps.push({ id: `${base}-recall`, word, exercise: 'recall' })
-      return
-    }
-    steps.push({ id: `${base}-${index % 3 === 0 ? 'recall' : index % 3 === 1 ? 'write-sentence' : 'write-definition'}`, word, exercise: index % 3 === 0 ? 'recall' : index % 3 === 1 ? 'write-sentence' : 'write-definition' })
-  })
-  return steps.slice(0, 12)
+  return buildPlanForStages(words, AVAILABLE_EXERCISES) as PracticeStep[]
 }
 
 function ratingFromResult(exercise: ExerciseType, result: StepCompletePayload): Rating | null {
   if (result.rating) return result.rating
   if (exercise === 'mnemonic') return null
+  if (
+    exercise === 'mcq'
+    || exercise === 'cloze'
+    || exercise === 'reverse-recall'
+    || exercise === 'listening'
+  ) {
+    return objectiveResultToRating({
+      correct: result.correct,
+      hintsUsed: result.hintsUsed ?? 0,
+      attempts: result.attempts ?? 1,
+    })
+  }
   if (result.correct) return 'good'
   return exercise === 'write-sentence' || exercise === 'write-definition' ? 'hard' : 'again'
 }
@@ -649,6 +718,135 @@ function ExerciseMCQ({
   )
 }
 
+function ExerciseListening({
+  word,
+  distractors,
+  onComplete,
+}: {
+  word: PracticeWord
+  distractors: string[]
+  onComplete: (result: StepCompletePayload) => void
+}) {
+  const [selected, setSelected] = useState<string | null>(null)
+  const [hasPlayed, setHasPlayed] = useState(false)
+  const [options] = useState(() => {
+    const fallback = ['Brief and direct', 'Difficult to understand', 'Full of careful detail', 'Done with strong emotion']
+    const pool = [...distractors, ...fallback].filter(item => item && item !== word.definition)
+    return shuffle([word.definition, ...Array.from(new Set(pool)).slice(0, 3)])
+  })
+
+  function play() {
+    speak(word.word)
+    setHasPlayed(true)
+  }
+
+  const revealed = selected !== null
+  const correct = selected === word.definition
+
+  return (
+    <div>
+      <ExerciseHeader title="Listening Recognition" subtitle="Tap play and pick the meaning" />
+      {!hasPlayed ? (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '28px 0 18px' }}>
+          <button
+            onClick={play}
+            aria-label="Play the word"
+            style={{
+              width: 80, height: 80, borderRadius: '50%',
+              background: C.blue,
+              border: 'none',
+              color: '#fff',
+              cursor: 'pointer',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: `0 8px 24px ${C.blue}40`,
+              transition: 'transform 0.15s, box-shadow 0.15s',
+            }}
+            onMouseDown={(e) => { e.currentTarget.style.transform = 'scale(0.95)' }}
+            onMouseUp={(e) => { e.currentTarget.style.transform = 'scale(1)' }}
+            onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)' }}
+          >
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+          </button>
+          <div style={{ color: C.mutedHi, fontSize: 13, fontFamily: FONT.ui }}>Tap to hear the word</div>
+        </div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '14px 0 4px' }}>
+            <button
+              onClick={play}
+              aria-label="Replay the word"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8,
+                padding: '10px 16px',
+                borderRadius: 99,
+                border: `1.5px solid ${C.blue}55`,
+                background: `${C.blue}12`,
+                color: C.blue,
+                cursor: 'pointer',
+                fontSize: 13, fontWeight: 600, fontFamily: FONT.ui,
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+              Replay
+            </button>
+          </div>
+          <div style={{ color: C.mutedHi, fontSize: 13, marginTop: 14, marginBottom: 10, fontFamily: FONT.ui, textAlign: 'center' }}>What does this word mean?</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {options.map((opt, i) => {
+              const isSel = selected === opt
+              const isCorrect = opt === word.definition
+              let bg = C.cardHi
+              let bd = C.border
+              let col = C.text
+              if (revealed) {
+                if (isCorrect) { bg = `${C.green}20`; bd = `${C.green}66`; col = C.green }
+                else if (isSel) { bg = `${C.red}20`; bd = `${C.red}66`; col = C.red }
+              }
+              return (
+                <button
+                  key={opt}
+                  onClick={() => !revealed && setSelected(opt)}
+                  style={{
+                    background: bg,
+                    border: `1px solid ${bd}`,
+                    borderRadius: 12,
+                    padding: '13px 15px',
+                    color: col,
+                    fontSize: 14,
+                    textAlign: 'left',
+                    cursor: revealed ? 'default' : 'pointer',
+                    fontFamily: FONT.ui,
+                    transition: 'all 0.2s',
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {String.fromCharCode(65 + i)}. {opt}
+                </button>
+              )
+            })}
+          </div>
+          {revealed && (
+            <>
+              <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 14, border: `1px solid ${C.border}`, background: C.card }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                  <div style={{ fontFamily: FONT.display, fontSize: 20, fontWeight: 700, color: C.cream }}>{word.word}</div>
+                  {word.phonetic && <div style={{ color: C.muted, fontSize: 12, fontFamily: FONT.mono }}>{word.phonetic}</div>}
+                </div>
+                {word.sentence && (
+                  <div style={{ color: C.text, fontSize: 13.5, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.5 }}>"{word.sentence}"</div>
+                )}
+              </div>
+              <div style={{ marginTop: 14 }}>
+                <Btn onClick={() => onComplete({ correct, hintsUsed: 0, attempts: 1 })} style={{ width: '100%' }}>Continue</Btn>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 function ExerciseCloze({ word, onComplete }: { word: PracticeWord; onComplete: (result: StepCompletePayload) => void }) {
   const [input, setInput] = useState('')
   const [submitted, setSubmitted] = useState(false)
@@ -722,6 +920,117 @@ function ExerciseCloze({ word, onComplete }: { word: PracticeWord; onComplete: (
         </>
       )}
 
+    </div>
+  )
+}
+
+function normalizeForReverseRecall(value: string): string {
+  return value.trim().toLowerCase().replace(/^(the|a|an)\s+/, '')
+}
+
+function ExerciseReverseRecall({ word, onComplete }: { word: PracticeWord; onComplete: (result: StepCompletePayload) => void }) {
+  const [input, setInput] = useState('')
+  const [attempts, setAttempts] = useState(0)
+  const [hintShown, setHintShown] = useState(false)
+  const [revealed, setRevealed] = useState(false)
+  const [lastAttemptCorrect, setLastAttemptCorrect] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { inputRef.current?.focus() }, [])
+
+  const target = normalizeForReverseRecall(word.word)
+  const userAnswer = normalizeForReverseRecall(input)
+
+  function check() {
+    if (!input.trim()) return
+    const correct = userAnswer === target
+    const nextAttempts = attempts + 1
+    setAttempts(nextAttempts)
+    setLastAttemptCorrect(correct)
+    if (correct || nextAttempts >= 2) {
+      setRevealed(true)
+    } else {
+      setHintShown(true)
+      setInput('')
+      setTimeout(() => inputRef.current?.focus(), 0)
+    }
+  }
+
+  function handleContinue() {
+    onComplete({
+      correct: lastAttemptCorrect,
+      hintsUsed: hintShown ? 1 : 0,
+      attempts,
+      typedResponse: input,
+    })
+  }
+
+  const hint = word.word.charAt(0)
+
+  return (
+    <div>
+      <ExerciseHeader title="Reverse Recall" subtitle="Recall the word from its meaning" />
+      <div style={{ background: `${C.gold}10`, border: `1px solid ${C.gold}33`, borderLeft: `3px solid ${C.gold}`, borderRadius: '0 12px 12px 0', padding: '14px 16px', marginTop: 14, marginBottom: 16 }}>
+        <div style={{ color: C.gold, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>Definition</div>
+        <div style={{ color: C.cream, fontSize: 16, lineHeight: 1.6, fontFamily: FONT.display, fontStyle: 'italic' }}>{word.definition}</div>
+      </div>
+
+      {!revealed ? (
+        <>
+          {hintShown && (
+            <div style={{ padding: '8px 12px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 10, marginBottom: 10, color: C.amber, fontSize: 12.5, fontFamily: FONT.ui, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Sparkles size={12} />
+              Hint: starts with <strong style={{ fontFamily: FONT.mono, fontSize: 14 }}>{hint}</strong>
+            </div>
+          )}
+          <input
+            ref={inputRef}
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && input.trim()) check() }}
+            placeholder="Type the word"
+            style={{
+              width: '100%',
+              boxSizing: 'border-box',
+              background: C.cardHi,
+              border: `1px solid ${C.borderHi}`,
+              borderRadius: 12,
+              padding: '14px 16px',
+              color: C.text,
+              fontSize: 15,
+              fontFamily: FONT.ui,
+              outline: 'none',
+              marginBottom: 12,
+            }}
+          />
+          <Btn onClick={check} disabled={!input.trim()} style={{ width: '100%' }}>Check</Btn>
+        </>
+      ) : (
+        <>
+          <div style={{ padding: '12px 14px', background: `${lastAttemptCorrect ? C.green : C.red}14`, border: `1px solid ${lastAttemptCorrect ? C.green : C.red}33`, borderRadius: 10, color: lastAttemptCorrect ? C.green : C.red, fontSize: 13, fontFamily: FONT.ui, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+            {lastAttemptCorrect ? <Check size={14} /> : <X size={14} />}
+            {lastAttemptCorrect
+              ? (hintShown ? 'Got it with the hint' : 'Exactly right')
+              : `The word was "${word.word}"`}
+          </div>
+          <div style={{ borderRadius: 14, overflow: 'hidden', marginBottom: 12, border: '1px solid rgba(0,0,0,0.07)' }}>
+            <div style={{ padding: '14px 16px', background: `${C.gold}10`, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontFamily: FONT.display, fontSize: 22, fontWeight: 700, color: C.cream }}>{word.word}</div>
+                {word.phonetic && <div style={{ color: C.muted, fontSize: 12, fontFamily: FONT.mono, marginTop: 2 }}>{word.phonetic}</div>}
+              </div>
+              <AudioBtn text={word.word} />
+            </div>
+            {word.sentence && (
+              <div style={{ background: 'rgba(0,0,0,0.03)', borderLeft: `3px solid ${C.gold}`, padding: '10px 14px' }}>
+                <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{word.book}</div>
+                <div style={{ color: C.text, fontSize: 14, lineHeight: 1.6, fontFamily: FONT.display, fontStyle: 'italic' }}>"{word.sentence}"</div>
+              </div>
+            )}
+          </div>
+          <Btn onClick={handleContinue} style={{ width: '100%' }}>Continue →</Btn>
+        </>
+      )}
     </div>
   )
 }
@@ -807,33 +1116,44 @@ function ExerciseRecall({ word, onComplete }: { word: PracticeWord; onComplete: 
 }
 
 function ExerciseWriteSentence({ word, onComplete }: { word: PracticeWord; onComplete: (result: StepCompletePayload) => void }) {
+  return word.stage === 'review'
+    ? <WriteSentenceProduction word={word} onComplete={onComplete} />
+    : <WriteSentenceCoached word={word} onComplete={onComplete} />
+}
+
+function lineMatchesTarget(line: string, target: string, stem: string): boolean {
+  const lower = line.toLowerCase()
+  return lower.includes(target) || lower.includes(stem)
+}
+
+function WriteSentenceProduction({ word, onComplete }: { word: PracticeWord; onComplete: (result: StepCompletePayload) => void }) {
   const [text, setText] = useState('')
   const [submitted, setSubmitted] = useState(false)
-  const [check, setCheck] = useState<VocabCheck | null>(null)
+  const [production, setProduction] = useState<ProductionResponse | null>(null)
   const [checking, setChecking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const ref = useRef<HTMLTextAreaElement>(null)
   useEffect(() => { ref.current?.focus() }, [])
+
   const target = word.word.toLowerCase()
   const stem = target.slice(0, Math.max(3, Math.min(5, target.length)))
-  const wordUsed = text.toLowerCase().includes(target) || text.toLowerCase().includes(stem)
-  const longEnough = text.trim().split(/\s+/).filter(Boolean).length >= 4
-  const valid = wordUsed && longEnough
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  const lineChecks = lines.map((line) => ({
+    line,
+    usesWord: lineMatchesTarget(line, target, stem),
+    longEnough: line.split(/\s+/).filter(Boolean).length >= 4,
+  }))
+  const haveThree = lines.length >= 3
+  const allValid = haveThree && lineChecks.slice(0, 3).every(c => c.usesWord && c.longEnough)
 
   async function submit() {
-    if (!valid || checking) return
+    if (!allValid || checking) return
     setSubmitted(true)
     setChecking(true)
     setError(null)
     try {
-      const result = await aiCheckVocab({
-        mode: 'sentence',
-        word: word.word,
-        definition: word.definition,
-        userInput: text,
-        bookSentence: word.sentence,
-      })
-      setCheck(result)
+      const result = await submitCardProduction(word.id, lines.slice(0, 3))
+      setProduction(result)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'AI check unavailable.')
     } finally {
@@ -841,14 +1161,183 @@ function ExerciseWriteSentence({ word, onComplete }: { word: PracticeWord; onCom
     }
   }
 
+  function handleContinue(forceRating?: Rating) {
+    if (!production) {
+      onComplete({ correct: false, typedResponse: text })
+      return
+    }
+    const rating: Rating = forceRating ?? (production.accepted ? 'good' : 'hard')
+    onComplete({
+      correct: production.accepted,
+      rating,
+      typedResponse: lines.slice(0, 3).join('\n'),
+    })
+  }
+
+  return (
+    <div>
+      <ExerciseHeader title="Production Checkpoint" subtitle="Write 3 sentences in your own words" word={word.word} />
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: '14px 16px', marginTop: 14, marginBottom: 14 }}>
+        <div style={{ fontFamily: FONT.display, fontSize: 22, fontWeight: 700, color: C.cream }}>{word.word}</div>
+        <div style={{ color: C.gold, fontSize: 13, fontFamily: FONT.display, fontStyle: 'italic', marginTop: 2 }}>{word.definition}</div>
+      </div>
+      {!submitted ? (
+        <>
+          <textarea
+            ref={ref}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={`Three sentences using "${word.word}", one per line`}
+            rows={6}
+            style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.borderHi}`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.display, outline: 'none', resize: 'none', marginBottom: 8, lineHeight: 1.6 }}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12, fontSize: 11, fontFamily: FONT.ui }}>
+            {[0, 1, 2].map((i) => {
+              const c = lineChecks[i]
+              const ok = c?.usesWord && c?.longEnough
+              return (
+                <span key={i} style={{ color: ok ? C.green : C.muted, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  {ok ? <Check size={12} /> : <Circle size={12} />}
+                  Sentence {i + 1}
+                  {c && !ok && (
+                    <span style={{ color: C.muted, fontSize: 10.5 }}>
+                      {!c.usesWord ? '— uses the word' : ''}
+                      {c.usesWord && !c.longEnough ? '— 4+ words' : ''}
+                    </span>
+                  )}
+                </span>
+              )
+            })}
+          </div>
+          <Btn onClick={() => void submit()} disabled={!allValid} style={{ width: '100%' }}>Check with AI</Btn>
+        </>
+      ) : (
+        <>
+          {checking && <AICheckingBadge />}
+          {!checking && production && (
+            <>
+              <div style={{
+                padding: '12px 14px',
+                background: production.accepted ? `${C.green}10` : `${C.amber}10`,
+                border: `1px solid ${production.accepted ? C.green : C.amber}3A`,
+                borderRadius: 12,
+                marginBottom: 12,
+                color: production.accepted ? C.green : C.amber,
+                fontSize: 13,
+                fontWeight: 600,
+                fontFamily: FONT.ui,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+              }}>
+                {production.accepted ? <Check size={14} /> : <Circle size={14} />}
+                {production.accepted ? 'Accepted — strong production' : 'Needs work — see notes below'}
+              </div>
+              {production.feedback && (
+                <div style={{ padding: '10px 14px', background: 'rgba(0,0,0,0.03)', border: `1px solid rgba(0,0,0,0.07)`, borderRadius: 10, marginBottom: 12, color: C.text, fontSize: 13, lineHeight: 1.5 }}>
+                  {production.feedback}
+                </div>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                {production.sentenceNotes.map((sn, i) => {
+                  const tone = sn.accepted ? C.green : C.amber
+                  return (
+                    <div key={i} style={{ padding: '10px 14px', background: `${tone}10`, border: `1px solid ${tone}3A`, borderRadius: 10 }}>
+                      <div style={{ color: tone, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {sn.accepted ? <Check size={11} /> : <Circle size={11} />}
+                        Sentence {i + 1}
+                      </div>
+                      <div style={{ color: C.text, fontSize: 13.5, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.5, marginBottom: sn.note ? 4 : 0 }}>"{sn.sentence}"</div>
+                      {sn.note && <div style={{ color: C.mutedHi, fontSize: 12, lineHeight: 1.45 }}>{sn.note}</div>}
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
+          {!checking && error && (
+            <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 12, color: C.amber, fontSize: 12.5 }}>
+              {error} You can still continue and self-rate.
+            </div>
+          )}
+          {!checking && !production && error ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <Btn variant="warn" onClick={() => onComplete({ correct: false, typedResponse: text })}>Not quite</Btn>
+              <Btn variant="success" onClick={() => onComplete({ correct: true, typedResponse: text })}>Yes, good</Btn>
+            </div>
+          ) : !checking && production ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <Btn variant="danger" onClick={() => handleContinue('again')}>Again</Btn>
+              <Btn onClick={() => handleContinue()} disabled={checking}>{production.accepted ? 'Mark good →' : 'Continue →'}</Btn>
+            </div>
+          ) : null}
+        </>
+      )}
+    </div>
+  )
+}
+
+function WriteSentenceCoached({ word, onComplete }: { word: PracticeWord; onComplete: (result: StepCompletePayload) => void }) {
+  const [text, setText] = useState('')
+  const [submitted, setSubmitted] = useState(false)
+  const [coach, setCoach] = useState<CoachResponse | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [turnIndex, setTurnIndex] = useState(1)
+  const [history, setHistory] = useState<CoachHistoryItem[]>([])
+  const ref = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => { ref.current?.focus() }, [])
+
+  const target = word.word.toLowerCase()
+  const stem = target.slice(0, Math.max(3, Math.min(5, target.length)))
+  const wordUsed = lineMatchesTarget(text, target, stem)
+  const longEnough = text.trim().split(/\s+/).filter(Boolean).length >= 4
+  const valid = wordUsed && longEnough
+  const canRetry = !!coach && coach.verdict !== 'correct' && turnIndex < 2 && !checking
+
+  async function submit() {
+    if (!valid || checking) return
+    setSubmitted(true)
+    setChecking(true)
+    setError(null)
+    try {
+      const step = turnIndex === 1 ? 'answer' : 'retry'
+      const result = await coachCard(word.id, {
+        mode: 'review',
+        step,
+        turnIndex,
+        learnerResponse: text,
+        history,
+      })
+      setCoach(result)
+      setHistory((h) => [
+        ...h,
+        { role: 'learner', text, step },
+        { role: 'assistant', text: result.feedbackBody, step },
+      ])
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'AI check unavailable.')
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  function startRetry() {
+    setSubmitted(false)
+    setText('')
+    setCoach(null)
+    setTurnIndex(2)
+    setTimeout(() => ref.current?.focus(), 0)
+  }
+
   function handleContinue() {
-    if (!check) {
+    if (!coach) {
       onComplete({ correct: wordUsed, typedResponse: text })
       return
     }
     onComplete({
-      correct: check.verdict === 'correct',
-      rating: verdictToRating(check.verdict),
+      correct: coach.verdict !== 'incorrect',
+      rating: coach.suggestedRating,
       typedResponse: text,
     })
   }
@@ -862,6 +1351,11 @@ function ExerciseWriteSentence({ word, onComplete }: { word: PracticeWord; onCom
       </div>
       {!submitted ? (
         <>
+          {turnIndex === 2 && coach === null && (
+            <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 10, color: C.amber, fontSize: 12.5, fontFamily: FONT.ui }}>
+              One more attempt — try a different angle this time.
+            </div>
+          )}
           <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} placeholder={`Write a sentence using "${word.word}"`} rows={3} style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.borderHi}`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.display, outline: 'none', resize: 'none', marginBottom: 8, lineHeight: 1.5 }} />
           <div style={{ display: 'flex', gap: 10, marginBottom: 12, fontSize: 11, fontFamily: FONT.ui }}>
             <span style={{ color: wordUsed ? C.green : C.muted, display: 'inline-flex', alignItems: 'center', gap: 4 }}>{wordUsed ? <Check size={12} /> : <Circle size={12} />} uses the word</span>
@@ -876,16 +1370,21 @@ function ExerciseWriteSentence({ word, onComplete }: { word: PracticeWord; onCom
             <div style={{ color: C.text, fontSize: 14.5, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.5 }}>"{text}"</div>
           </div>
           {checking && <AICheckingBadge />}
-          {!checking && check && <AIVerdictCard check={check} />}
+          {!checking && coach && <AIVerdictCard check={coachToVocabCheck(coach)} />}
           {!checking && error && (
             <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 12, color: C.amber, fontSize: 12.5 }}>
               {error} You can still continue and self-rate.
             </div>
           )}
-          {!checking && !check && error ? (
+          {!checking && !coach && error ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               <Btn variant="warn" onClick={() => onComplete({ correct: false, typedResponse: text })}>Not quite</Btn>
               <Btn variant="success" onClick={() => onComplete({ correct: true, typedResponse: text })}>Yes, good</Btn>
+            </div>
+          ) : canRetry ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <Btn variant="ghost" onClick={startRetry}>Try again</Btn>
+              <Btn onClick={handleContinue} disabled={checking}>Use this answer →</Btn>
             </div>
           ) : (
             <Btn onClick={handleContinue} disabled={checking} style={{ width: '100%' }}>Continue →</Btn>
@@ -899,11 +1398,15 @@ function ExerciseWriteSentence({ word, onComplete }: { word: PracticeWord; onCom
 function ExerciseWriteDefinition({ word, onComplete }: { word: PracticeWord; onComplete: (result: StepCompletePayload) => void }) {
   const [text, setText] = useState('')
   const [submitted, setSubmitted] = useState(false)
-  const [check, setCheck] = useState<VocabCheck | null>(null)
+  const [coach, setCoach] = useState<CoachResponse | null>(null)
   const [checking, setChecking] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [turnIndex, setTurnIndex] = useState(1)
+  const [history, setHistory] = useState<CoachHistoryItem[]>([])
   const ref = useRef<HTMLTextAreaElement>(null)
   useEffect(() => { ref.current?.focus() }, [])
+
+  const canRetry = !!coach && coach.verdict !== 'correct' && turnIndex < 2 && !checking
 
   async function submit() {
     if (!text.trim() || checking) return
@@ -911,13 +1414,20 @@ function ExerciseWriteDefinition({ word, onComplete }: { word: PracticeWord; onC
     setChecking(true)
     setError(null)
     try {
-      const result = await aiCheckVocab({
-        mode: 'definition',
-        word: word.word,
-        definition: word.definition,
-        userInput: text,
+      const step = turnIndex === 1 ? 'answer' : 'retry'
+      const result = await coachCard(word.id, {
+        mode: 'review',
+        step,
+        turnIndex,
+        learnerResponse: text,
+        history,
       })
-      setCheck(result)
+      setCoach(result)
+      setHistory((h) => [
+        ...h,
+        { role: 'learner', text, step },
+        { role: 'assistant', text: result.feedbackBody, step },
+      ])
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'AI check unavailable.')
     } finally {
@@ -925,14 +1435,22 @@ function ExerciseWriteDefinition({ word, onComplete }: { word: PracticeWord; onC
     }
   }
 
+  function startRetry() {
+    setSubmitted(false)
+    setText('')
+    setCoach(null)
+    setTurnIndex(2)
+    setTimeout(() => ref.current?.focus(), 0)
+  }
+
   function handleContinue() {
-    if (!check) {
+    if (!coach) {
       onComplete({ correct: true, typedResponse: text })
       return
     }
     onComplete({
-      correct: check.verdict !== 'incorrect',
-      rating: verdictToRating(check.verdict),
+      correct: coach.verdict !== 'incorrect',
+      rating: coach.suggestedRating,
       typedResponse: text,
     })
   }
@@ -946,6 +1464,11 @@ function ExerciseWriteDefinition({ word, onComplete }: { word: PracticeWord; onC
       </div>
       {!submitted ? (
         <>
+          {turnIndex === 2 && coach === null && (
+            <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 10, color: C.amber, fontSize: 12.5, fontFamily: FONT.ui }}>
+              One more attempt — try to be more precise this time.
+            </div>
+          )}
           <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} placeholder="What does this word mean?" rows={2} style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.borderHi}`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.ui, outline: 'none', resize: 'none', marginBottom: 10, lineHeight: 1.5 }} />
           <Btn onClick={() => void submit()} disabled={!text.trim()} style={{ width: '100%' }}>Check with AI</Btn>
         </>
@@ -962,17 +1485,22 @@ function ExerciseWriteDefinition({ word, onComplete }: { word: PracticeWord; onC
             </div>
           </div>
           {checking && <AICheckingBadge />}
-          {!checking && check && <AIVerdictCard check={check} />}
+          {!checking && coach && <AIVerdictCard check={coachToVocabCheck(coach)} />}
           {!checking && error && (
             <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 12, color: C.amber, fontSize: 12.5 }}>
               {error} You can still continue and self-rate.
             </div>
           )}
-          {!checking && !check && error ? (
+          {!checking && !coach && error ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
               <Btn variant="danger" onClick={() => onComplete({ rating: 'again', correct: false, typedResponse: text })}>Off</Btn>
               <Btn variant="warn" onClick={() => onComplete({ rating: 'hard', correct: true, typedResponse: text })}>Partial</Btn>
               <Btn variant="success" onClick={() => onComplete({ rating: 'good', correct: true, typedResponse: text })}>Spot on</Btn>
+            </div>
+          ) : canRetry ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <Btn variant="ghost" onClick={startRetry}>Try again</Btn>
+              <Btn onClick={handleContinue} disabled={checking}>Use this answer →</Btn>
             </div>
           ) : (
             <Btn onClick={handleContinue} disabled={checking} style={{ width: '100%' }}>Continue →</Btn>
@@ -1241,6 +1769,8 @@ function PracticeScreen({
         {step.exercise === 'mcq' && <ExerciseMCQ word={step.word} distractors={distractors} onComplete={handleComplete} />}
         {step.exercise === 'cloze' && <ExerciseCloze word={step.word} onComplete={handleComplete} />}
         {step.exercise === 'recall' && <ExerciseRecall word={step.word} onComplete={handleComplete} />}
+        {step.exercise === 'reverse-recall' && <ExerciseReverseRecall word={step.word} onComplete={handleComplete} />}
+        {step.exercise === 'listening' && <ExerciseListening word={step.word} distractors={distractors} onComplete={handleComplete} />}
         {step.exercise === 'write-sentence' && <ExerciseWriteSentence word={step.word} onComplete={handleComplete} />}
         {step.exercise === 'write-definition' && <ExerciseWriteDefinition word={step.word} onComplete={handleComplete} />}
         {step.exercise === 'mnemonic' && <ExerciseMnemonic word={step.word} onComplete={handleComplete} />}
@@ -1343,6 +1873,7 @@ function ResultsScreen({
 
 export function StudioRoute() {
   const queryClient = useQueryClient()
+  const summaryQuery = useStudioSummary(true)
   const [screen, setScreen] = useState<Screen>('dashboard')
   const [deckSummary, setDeckSummary] = useState<DeckSummary | null>(null)
   const [sessionPlan, setSessionPlan] = useState<PracticeStep[]>([])
@@ -1350,6 +1881,7 @@ export function StudioRoute() {
   const [stepIndex, setStepIndex] = useState(0)
   const [results, setResults] = useState<PracticeResult[]>([])
   const [ratedCardIds, setRatedCardIds] = useState<Set<string>>(() => new Set())
+  const [appendedRemedials, setAppendedRemedials] = useState(0)
   const [starting, setStarting] = useState(false)
   const [enrichProgress, setEnrichProgress] = useState<{ done: number; total: number } | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -1381,14 +1913,11 @@ export function StudioRoute() {
       .map(noteToSavedWord),
     [dashboard?.notes],
   )
-  const allDefinitions = useMemo(() => {
-    const fromSaved = savedWords.map((word) => word.definition)
-    const fromSession = practiceWords.map((word) => word.definition)
-    return Array.from(
-      new Set(
-        [...fromSaved, ...fromSession].filter((d) => d && !isPlaceholderDefinition(d)),
-      ),
-    )
+  const distractorCandidates = useMemo(() => {
+    const fromSaved = savedWords.map((w) => ({ word: w.word, definition: w.definition }))
+    const fromSession = practiceWords.map((w) => ({ word: w.word, definition: w.definition }))
+    return [...fromSaved, ...fromSession]
+      .filter((c) => c.word && c.definition && !isPlaceholderDefinition(c.definition))
   }, [practiceWords, savedWords])
   const currentStep = sessionPlan[stepIndex]
   const isLoading = decksLoading || (Boolean(deck?.id) && dashboardLoading)
@@ -1415,49 +1944,43 @@ export function StudioRoute() {
         return
       }
 
-      // Enrich words whose definition is missing or a placeholder string.
-      // Without this, MCQ shows "Saved from your reading" as the correct answer.
-      const needsDef = words.filter((w) => isPlaceholderDefinition(w.definition))
-      if (needsDef.length > 0) {
-        setEnrichProgress({ done: 0, total: needsDef.length })
-        const enrichedById = new Map<string, AIDefinition>()
-        let done = 0
-        await Promise.all(
-          needsDef.map(async (w) => {
-            try {
-              const sentence = isPlaceholderDefinition(w.sentence) ? null : w.sentence
-              const def = await aiDefineWord(w.word, sentence)
-              if (def.definition && !isPlaceholderDefinition(def.definition)) {
-                enrichedById.set(w.id, def)
-              }
-            } catch (err) {
-              console.warn('AI define failed for', w.word, err)
-            } finally {
-              done += 1
-              setEnrichProgress({ done, total: needsDef.length })
+      // Pre-fetch grounded context for every card. Server caches in card_context_cache
+      // so warm-cache sessions are instant; cold sessions still need the AI round-trip
+      // but pay the cost once per card (not per session).
+      setEnrichProgress({ done: 0, total: words.length })
+      const contextById = new Map<string, CardContext>()
+      let done = 0
+      await Promise.all(
+        words.map(async (w) => {
+          try {
+            const ctx = await fetchCardContext(w.id)
+            if (ctx.definition && !isPlaceholderDefinition(ctx.definition)) {
+              contextById.set(w.id, ctx)
             }
-          }),
-        )
-        if (enrichedById.size > 0) {
-          words = words.map((w) => {
-            const ai = enrichedById.get(w.id)
-            if (!ai) return w
-            const newDef = ai.definition
-            const newSentence = (
-              !w.sentence || isPlaceholderDefinition(w.sentence) || w.sentence === w.definition
-            )
-              ? (ai.example ?? `${w.word} — ${newDef}`)
-              : w.sentence
-            return {
-              ...w,
-              definition: newDef,
-              sentence: newSentence,
-              card: { ...w.card, productionTarget: w.word },
-            }
-          })
-        }
-        setEnrichProgress(null)
+          } catch (err) {
+            console.warn('Context fetch failed for', w.word, err)
+          } finally {
+            done += 1
+            setEnrichProgress({ done, total: words.length })
+          }
+        }),
+      )
+      if (contextById.size > 0) {
+        words = words.map((w) => {
+          const ctx = contextById.get(w.id)
+          if (!ctx) return w
+          const hadRealSentence = w.sentence && !isPlaceholderDefinition(w.sentence) && w.sentence !== w.definition
+          const newSentence = hadRealSentence ? w.sentence : (ctx.contextParagraph || `${w.word} — ${ctx.definition}`)
+          return {
+            ...w,
+            definition: ctx.definition,
+            sentence: newSentence,
+            phonetic: ctx.pronunciation ?? w.phonetic,
+            card: { ...w.card, productionTarget: w.word },
+          }
+        })
       }
+      setEnrichProgress(null)
 
       // Safety net: drop any word that still has a placeholder definition.
       // Better to skip it than show "Saved from reading" as the correct MCQ answer.
@@ -1485,6 +2008,7 @@ export function StudioRoute() {
       setStepIndex(0)
       setResults([])
       setRatedCardIds(new Set())
+      setAppendedRemedials(0)
       stepStartedAt.current = Date.now()
       setScreen('practice')
     } catch (error) {
@@ -1546,10 +2070,30 @@ export function StudioRoute() {
       ])
 
       const nextIndex = stepIndex + 1
-      if (nextIndex >= sessionPlan.length) {
+      const isLastStep = nextIndex >= sessionPlan.length
+      const failed = !payload.correct
+      // Adaptive re-queueing: append remedial step on the same word.
+      // Triggers: failed reverse-recall / write-definition (per spec) OR last-step failure (don't-end-on-failure).
+      const shouldAppendRemedial = failed && (
+        step.exercise === 'reverse-recall'
+        || step.exercise === 'write-definition'
+        || isLastStep
+      )
+      if (shouldAppendRemedial) {
+        const remedial = buildRemedialStep(step, AVAILABLE_EXERCISES, appendedRemedials)
+        if (remedial) {
+          setSessionPlan((p) => [...p, remedial as PracticeStep])
+          setAppendedRemedials((c) => c + 1)
+          setStepIndex(nextIndex)
+          stepStartedAt.current = Date.now()
+          return
+        }
+      }
+      if (isLastStep) {
         setScreen('results')
         queryClient.invalidateQueries({ queryKey: ['decks'] })
         queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
+        queryClient.invalidateQueries({ queryKey: ['learning-summary'] })
       } else {
         setStepIndex(nextIndex)
         stepStartedAt.current = Date.now()
@@ -1560,7 +2104,7 @@ export function StudioRoute() {
     } finally {
       setSubmitting(false)
     }
-  }, [persistMnemonic, queryClient, ratedCardIds, sessionPlan, stepIndex, submitting])
+  }, [appendedRemedials, persistMnemonic, queryClient, ratedCardIds, sessionPlan, stepIndex, submitting])
 
   function backToDashboard() {
     queryClient.invalidateQueries({ queryKey: ['decks'] })
@@ -1571,6 +2115,7 @@ export function StudioRoute() {
     setPracticeWords([])
     setStepIndex(0)
     setRatedCardIds(new Set())
+    setAppendedRemedials(0)
   }
 
   function practiceAgain() {
@@ -1612,6 +2157,9 @@ export function StudioRoute() {
         .studio-card { background: #fff; border-radius: 20px; box-shadow: ${CARD_SHADOW}; }
       `}</style>
       <div className="studio-scope" style={{ width: '100%', maxWidth: 560, padding: '20px 16px 80px' }}>
+        {(screen === 'dashboard' || screen === 'results') && activeDeck && (
+          <StudioHeader summary={summaryQuery.data} isLoading={summaryQuery.isLoading} />
+        )}
 
         {isLoading || (starting && screen === 'dashboard') ? (
           <div style={{ display: 'grid', gap: 12 }}>
@@ -1643,7 +2191,7 @@ export function StudioRoute() {
             step={currentStep}
             stepIndex={stepIndex}
             totalSteps={sessionPlan.length}
-            distractors={allDefinitions.filter((definition) => definition !== currentStep.word.definition)}
+            distractors={pickDistractors(currentStep.word.word, distractorCandidates, 3)}
             onComplete={completeStep}
             busy={submitting}
           />
