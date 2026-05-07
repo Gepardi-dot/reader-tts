@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, Fragment, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, memo, type ReactNode } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -419,16 +419,53 @@ function loadAppearance(): Appearance {
 }
 
 // Bionic reading: bold the initial ~45 % of each word to create fixation points.
+// Each word is wrapped in a span so getWordAtPoint can recover the full word across the <b> boundary.
 function toBionicNodes(text: string): ReactNode[] {
-  const parts = text.match(/[\p{L}\p{N}]+|[^\p{L}\p{N}]+/gu) ?? []
+  const parts = text.match(/[a-zA-Z0-9]+|[^a-zA-Z0-9]+/g) ?? []
   return parts.map((part, i) => {
-    if (/^\p{L}/u.test(part)) {
+    if (/^[a-zA-Z]/.test(part)) {
       const n = Math.max(1, Math.ceil(part.length * 0.45))
-      return <Fragment key={i}><b>{part.slice(0, n)}</b>{part.slice(n)}</Fragment>
+      return (
+        <span key={i} data-bionic-word="true" style={{ display: 'inline' }}>
+          <b>{part.slice(0, n)}</b>{part.slice(n)}
+        </span>
+      )
     }
     return part
   })
 }
+
+// Paragraph list, isolated from the parent's frequent state updates (audio ticks, scroll %, etc).
+// React.memo means audio/scroll re-renders skip the entire paragraph subtree as long as
+// `paragraphs` and `bionicNodes` keep stable references (both are useMemo-backed in the parent).
+//
+// `content-visibility: auto` is the actual heavy-lift fix for bionic mode: the browser skips
+// layout AND paint for paragraphs that are far from the viewport and treats them as
+// `contain-intrinsic-size`-sized placeholders. Without it, every paragraph in the entire book
+// pays full layout/paint cost — and bionic's per-word inline boxes make that cost ~3× higher.
+// `auto 6em` is a per-paragraph height estimate; the `auto` keyword tells the browser to remember
+// each paragraph's measured size after first render so the scrollbar stops jumping.
+const ReaderParagraphs = memo(function ReaderParagraphs({
+  paragraphs,
+  bionicNodes,
+}: {
+  paragraphs: ReaderParagraph[]
+  bionicNodes: ReactNode[][] | null
+}) {
+  return (
+    <>
+      {paragraphs.map((p, i) => (
+        <p
+          key={`${p.startOffset}-${i}`}
+          className="mb-[1.4em] [content-visibility:auto] [contain-intrinsic-size:auto_6em]"
+          data-reader-paragraph-start={p.startOffset}
+        >
+          {bionicNodes ? bionicNodes[i] : p.text}
+        </p>
+      ))}
+    </>
+  )
+})
 
 function findTextOffset(needle: string, haystack: string, approxPct: number): number {
   if (!haystack || !needle) return 0
@@ -468,11 +505,35 @@ function toSelectionRect(rect: DOMRect): SelectionRect {
 }
 
 function selectionRectsFromRange(range: Range, fallbackRect: DOMRect): SelectionRect[] {
-  const rects = Array.from(range.getClientRects())
+  const raw = Array.from(range.getClientRects())
     .filter(rect => rect.width > 0 && rect.height > 0)
-    .map(toSelectionRect)
 
-  return rects.length > 0 ? rects : [toSelectionRect(fallbackRect)]
+  if (raw.length === 0) return [toSelectionRect(fallbackRect)]
+
+  // Sort top-to-bottom, left-to-right so we can merge in one pass.
+  raw.sort((a, b) => a.top - b.top || a.left - b.left)
+
+  // Merge rects that share the same visual line (within 3 px vertically) and
+  // are adjacent / overlapping horizontally (gap ≤ 2 px).  This collapses the
+  // two per-word boxes that bionic reading creates (<b> + plain text) into a
+  // single rect, eliminating the seam/height-mismatch artifact.
+  const merged: SelectionRect[] = []
+  for (const rect of raw) {
+    const prev = merged[merged.length - 1]
+    if (prev && Math.abs(rect.top - prev.top) <= 3 && rect.left <= prev.left + prev.width + 2) {
+      const right  = Math.max(prev.left + prev.width, rect.left + rect.width)
+      const top    = Math.min(prev.top, rect.top)
+      const bottom = Math.max(prev.top + prev.height, rect.top + rect.height)
+      prev.left   = Math.min(prev.left, rect.left)
+      prev.top    = top
+      prev.width  = right - prev.left
+      prev.height = bottom - top
+    } else {
+      merged.push(toSelectionRect(rect))
+    }
+  }
+
+  return merged
 }
 
 function paragraphForNode(node: Node, root: HTMLElement): HTMLElement | null {
@@ -626,6 +687,18 @@ function getWordAtPoint(clientX: number, clientY: number): { text: string; rect:
   if (!cr) return null
   const node = cr.startContainer
   if (node.nodeType !== Node.TEXT_NODE) return null
+
+  // Bionic mode: if the caret landed inside a <b> fragment, use the parent word span
+  // so that the full word (e.g. "Introduction") is selected, not just the bold part ("Introd").
+  const bionicSpan = (node as Text).parentElement?.closest<HTMLElement>('[data-bionic-word]')
+  if (bionicSpan) {
+    const text = (bionicSpan.textContent ?? '').trim()
+    if (!text || text.length < 2) return null
+    const range = document.createRange()
+    range.selectNodeContents(bionicSpan)
+    return { text, rect: range.getBoundingClientRect(), range }
+  }
+
   const full   = node.textContent ?? ''
   const offset = cr.startOffset
 
@@ -2544,6 +2617,7 @@ function AudioContent({ colors, provider, onProviderChange, voice, onVoiceChange
 
     audioRef.current?.pause()
     const audio = new Audio(c.url)
+    audio.preservesPitch = true
     audio.playbackRate = rateRef.current
     audioRef.current  = audio
     setPhase('playing')
@@ -2859,16 +2933,28 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
             {voiceLabel}
           </button>
           <span style={{ color: `${colors.text}40`, fontSize: 10 }}>·</span>
-          {/* Speed — nudge with click, hold shift to bigger step */}
-          <button
-            className="text-[11px] tabular-nums transition-opacity hover:opacity-100"
-            style={{ color: `${colors.text}80` }}
-            onClick={(e) => nudgeRate(e.shiftKey ? 0.2 : 0.1)}
-            onContextMenu={(e) => { e.preventDefault(); nudgeRate(e.shiftKey ? -0.2 : -0.1) }}
-            title="Left-click +0.1×, right-click −0.1×"
-          >
-            {rate.toFixed(1)}×
-          </button>
+          {/* Speed — − / value / + */}
+          <div className="flex items-center gap-0.5">
+            <button
+              className="text-[12px] leading-none transition-opacity hover:opacity-100 px-0.5"
+              style={{ color: `${colors.text}80` }}
+              onClick={() => nudgeRate(-0.1)}
+              title="Decrease speed"
+            >
+              −
+            </button>
+            <span className="text-[11px] tabular-nums" style={{ color: `${colors.text}80` }}>
+              {rate.toFixed(1)}×
+            </span>
+            <button
+              className="text-[12px] leading-none transition-opacity hover:opacity-100 px-0.5"
+              style={{ color: `${colors.text}80` }}
+              onClick={() => nudgeRate(0.1)}
+              title="Increase speed"
+            >
+              +
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2954,6 +3040,8 @@ export function ReaderRoute() {
   const [ttsProvider,   setTtsProvider]   = useState(() => loadAudioPrefs().provider)
   const [ttsVoice,      setTtsVoice]      = useState<string | null>(() => loadAudioPrefs().voice)
   const [audioRate,     setAudioRate]     = useState(1.0)
+  const audioRateRef = useRef(1.0)
+  audioRateRef.current = audioRate
 
   const lastScrollY           = useRef(0)
   const latestScrollPct       = useRef(0)
@@ -3448,6 +3536,75 @@ export function ReaderRoute() {
     dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
   }, [])
 
+  // Apply playback rate changes mid-playback.
+  //
+  // HTMLAudioElement has preservesPitch — changing its rate is safe and stays
+  // natural-sounding. AudioBufferSourceNode does NOT preserve pitch (changing
+  // playbackRate produces a chipmunk/midget effect), so when the rate moves
+  // off 1.0 during Web Audio playback we swap to HTMLAudio at the current
+  // buffer position. Web Audio is only used at exactly 1.0× now.
+  useEffect(() => {
+    if (wordAudioRef.current) {
+      wordAudioRef.current.playbackRate = audioRate
+      return
+    }
+    if (audioRate === 1.0) return
+
+    const ctx = wordAudioCtxRef.current
+    const source = wordAudioSourceRef.current
+    const ctrl = wordAudioAbortRef.current
+    const idx = wordAudioCurIdxRef.current
+    const chunk = wordAudioChunksRef.current[idx]
+    if (!ctx || ctx.state === 'closed' || !source || !ctrl || ctrl.signal.aborted || !chunk?.url) {
+      return
+    }
+
+    // Current Web Audio source plays at unchanged rate 1.0, so wall-clock
+    // elapsed equals buffer-time elapsed.
+    const seekSec = wordAudioChunkSeekRef.current
+    const elapsed = Math.max(0, ctx.currentTime - wordAudioChunkStartRef.current)
+    const positionInChunk = Math.max(0, seekSec + elapsed)
+
+    try {
+      source.onended = null
+      source.stop()
+      source.disconnect()
+    } catch { /* already stopped */ }
+    wordAudioSourceRef.current = null
+    stopWordAudioCueRAF()
+
+    const word = wordAudio?.word ?? ''
+    const audio = new Audio(chunk.url)
+    audio.preservesPitch = true
+    audio.playbackRate = audioRate
+    wordAudioRef.current = audio
+
+    const start = () => {
+      try { audio.currentTime = positionInChunk } catch { /* ignore */ }
+      void audio.play().catch(() => { /* ignore */ })
+    }
+    if (audio.readyState >= 1) {
+      start()
+    } else {
+      audio.addEventListener('loadedmetadata', start, { once: true })
+    }
+
+    audio.ontimeupdate = () => {
+      if (ctrl.signal.aborted) return
+      syncAudioFollowCue(chunk, audio.currentTime, true)
+    }
+    audio.onended = () => {
+      if (ctrl.signal.aborted) return
+      void continueWordAudioPlayback(idx + 1, ctrl, word)
+    }
+    audio.onerror = () => {
+      if (ctrl.signal.aborted) return
+      showToast('Audio playback failed. Try starting it again.')
+      stopWordAudio()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioRate])
+
   // Non-passive touchmove — required so we can preventDefault to suppress page
   // scroll while the user is sweeping across a sentence.
   useEffect(() => {
@@ -3757,7 +3914,10 @@ export function ReaderRoute() {
     prefetchWordAudioAhead(idx, currentChunks, ctrl.signal)
 
     const ctx = wordAudioCtxRef.current
-    if (ctx && ctx.state !== 'closed' && chunk.buffer) {
+    // Web Audio path is gapless but its AudioBufferSourceNode shifts pitch
+    // when playbackRate changes (chipmunk effect). Restrict it to exactly 1.0×
+    // and route any non-1.0 rate through HTMLAudio (which preserves pitch).
+    if (audioRateRef.current === 1.0 && ctx && ctx.state !== 'closed' && chunk.buffer) {
       // ── Web Audio path — gapless scheduling ─────────────────────────
       if (ctx.state === 'suspended') void ctx.resume()
 
@@ -3773,6 +3933,7 @@ export function ReaderRoute() {
 
       const source = ctx.createBufferSource()
       source.buffer = chunk.buffer
+      source.playbackRate.value = audioRateRef.current
       source.connect(ctx.destination)
       wordAudioSourceRef.current = source
 
@@ -3787,7 +3948,7 @@ export function ReaderRoute() {
       const now = ctx.currentTime
       const startAt = Math.max(now + 0.002, wordAudioScheduledEndRef.current)
       source.start(startAt, seekSec > 0 ? seekSec : undefined)
-      wordAudioScheduledEndRef.current = startAt + chunk.buffer.duration - seekSec
+      wordAudioScheduledEndRef.current = startAt + (chunk.buffer.duration - seekSec) / audioRateRef.current
       wordAudioChunkStartRef.current = startAt
       syncAudioFollowCue(chunk, seekSec, true)
       startWordAudioCueRAF()
@@ -3798,9 +3959,12 @@ export function ReaderRoute() {
         void continueWordAudioPlayback(idx + 1, ctrl, word)
       }
     } else {
-      // ── HTMLAudio fallback ────────────────────────────────────────────
+      // ── HTMLAudio path (also used for any non-1.0 rate, since this
+      //    element preserves pitch when playbackRate changes) ────────────
       wordAudioRef.current?.pause()
       const audio = new Audio(chunk.url)
+      audio.preservesPitch = true
+      audio.playbackRate = audioRateRef.current
       wordAudioRef.current = audio
       syncAudioFollowCue(chunk, 0, true)
 
@@ -3927,7 +4091,11 @@ export function ReaderRoute() {
     if (wordAudio.status === 'loading') return
     if (wordAudio.status === 'playing') {
       const ctx = wordAudioCtxRef.current
-      if (ctx && ctx.state === 'running') {
+      const source = wordAudioSourceRef.current
+      // Only use AudioContext suspend when there is an active BufferSource node.
+      // After a rate-change engine swap, source is null but ctx is still running —
+      // in that case we must pause the HTMLAudio element directly.
+      if (ctx && source && ctx.state === 'running') {
         stopWordAudioCueRAF()
         void ctx.suspend().then(() => setWordAudio({ word: wordAudio.word, status: 'ready' }))
         return
@@ -3963,6 +4131,11 @@ export function ReaderRoute() {
   const paragraphs = useMemo(
     () => buildReaderParagraphs(payload?.text ?? ''),
     [payload?.text],
+  )
+  // Pre-compute bionic nodes once per paragraph set, not on every render.
+  const bionicNodes = useMemo(
+    () => appearance.bionic ? paragraphs.map(p => toBionicNodes(p.text)) : null,
+    [paragraphs, appearance.bionic],
   )
   const readPct = Math.round(scrollPct * 100)
   const activePlayBarPhase = wordAudioPhase
@@ -4114,15 +4287,7 @@ export function ReaderRoute() {
           </div>
         ) : (
           <div ref={readerTextRef} style={{ fontFamily, fontSize: `${appearance.fontSize}px`, lineHeight: appearance.lineHeight, textAlign: appearance.align, color: colors.text, overflowWrap: 'break-word', wordBreak: 'break-word' }}>
-            {paragraphs.map((p, i) => (
-              <p
-                key={`${p.startOffset}-${i}`}
-                className="mb-[1.4em]"
-                data-reader-paragraph-start={p.startOffset}
-              >
-                {appearance.bionic ? toBionicNodes(p.text) : p.text}
-              </p>
-            ))}
+            <ReaderParagraphs paragraphs={paragraphs} bionicNodes={bionicNodes} />
           </div>
         )}
       </div>

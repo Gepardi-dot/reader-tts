@@ -26,6 +26,9 @@ Per-process dicts/sets only persist within one lambda invocation. Any cache must
 **Vercel cannot run background work.**
 `threading.Thread(daemon=True)` dies when the lambda returns. Any "fire and forget" path on Vercel will be killed mid-flight. Per-chunk S3 caching still lands whatever completes before death.
 
+**Speed control must preserve pitch.**
+`AudioBufferSourceNode.playbackRate` shifts pitch with speed (chipmunk effect). Web Audio is therefore restricted to exactly 1.0×; any non-1.0 rate plays through `HTMLAudioElement` with `audio.preservesPitch = true`. Mid-chunk rate change while on the Web Audio path swaps engines at the current buffer position. Don't reintroduce `source.playbackRate.value = audioRate` on a bufferSource — pitch will distort.
+
 **Z-index ladder (bump one → check all).**
 
 | z-index | Element | Notes |
@@ -47,7 +50,7 @@ New element at `z-[6x]` or higher: add it to this table AND verify against sheet
 
 If a user reports a quality problem, suspect the implementation before defending it. Each item below is a choice that was made, not a law of nature.
 
-- **Gapless playback uses Web Audio API.** `ctx.createBufferSource` scheduled at `max(now+0.002, lastScheduledEnd)`. Requires the full WAV in memory before playback can start — this is why time-to-first-audio is high on cold starts.
+- **Gapless playback uses Web Audio API at 1.0× only.** `ctx.createBufferSource` scheduled at `max(now+0.002, lastScheduledEnd)`. Non-1.0 rates fall back to `HTMLAudioElement` (preservesPitch=true) — slight chunk-boundary gap, no pitch distortion. Requires the full WAV in memory before playback can start — this is why time-to-first-audio is high on cold starts.
 - **Per-page synthesis.** Each request synthesizes one page worth of chunks. Page boundaries come from `paginateReaderText()` upstream of TTS.
 - **Presynth marker is single-provider.** `.presynth-done.json` records ONE provider+voice (whichever finishes last). Voice switch → entire book re-warms.
 - **kokoro-onnx returns complete WAVs.** Streaming would require the Kokoro server (`scripts/kokoro_server.py`) to switch to chunked-transfer-encoding.
