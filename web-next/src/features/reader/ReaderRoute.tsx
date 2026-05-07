@@ -2179,10 +2179,20 @@ function AppearanceContent({ appearance, onChange }: {
           <button
             onClick={() => onChange({ bionic: !appearance.bionic })}
             title="Bionic Reading — bold initial letters for faster reading"
-            className={cn('px-3 py-2 rounded-lg border text-sm font-medium transition-all',
-              appearance.bionic ? 'border-primary bg-primary text-white shadow-sm' : 'border-border/60 opacity-55 hover:opacity-90')}
-            style={{ fontFamily: 'Inter, sans-serif', letterSpacing: '0.01em' }}>
-            <b>B</b>R
+            style={{
+              flexShrink: 0,
+              padding: '7px 15px',
+              borderRadius: 12,
+              fontSize: 13.5,
+              fontFamily: 'Inter, sans-serif',
+              cursor: 'pointer',
+              outline: 'none',
+              background: appearance.bionic ? '#2563eb' : '#ffffff',
+              border: '1px solid rgba(0,0,0,0.08)',
+              boxShadow: '0 1px 4px rgba(0,0,0,0.08)',
+            }}>
+            <b style={{ fontWeight: 900, color: appearance.bionic ? '#ffffff' : '#080808' }}>B</b>
+            <span style={{ color: appearance.bionic ? 'rgba(255,255,255,0.7)' : '#989695' }}>R</span>
           </button>
         </div>
       </div>
