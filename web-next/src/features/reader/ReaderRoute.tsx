@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment, type ReactNode } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -109,6 +109,7 @@ interface ProviderTestResult {
 interface Appearance {
   fontSize: number; lineHeight: number
   font: 'serif' | 'sans'
+  bionic: boolean
   width: 'narrow' | 'balanced' | 'wide'
   align: 'left' | 'center' | 'justify'
   theme: 'paper' | 'white' | 'dark'
@@ -147,7 +148,7 @@ type SecondaryPanel =
 
 const DEFAULT_APPEARANCE: Appearance = {
   fontSize: 17, lineHeight: 1.85,
-  font: 'serif', width: 'balanced',
+  font: 'serif', bionic: false, width: 'balanced',
   align: 'justify', theme: 'paper',
 }
 
@@ -415,6 +416,18 @@ function loadAppearance(): Appearance {
     const raw = localStorage.getItem(APPEARANCE_KEY)
     return raw ? { ...DEFAULT_APPEARANCE, ...JSON.parse(raw) } : DEFAULT_APPEARANCE
   } catch { return DEFAULT_APPEARANCE }
+}
+
+// Bionic reading: bold the initial ~45 % of each word to create fixation points.
+function toBionicNodes(text: string): ReactNode[] {
+  const parts = text.match(/[\p{L}\p{N}]+|[^\p{L}\p{N}]+/gu) ?? []
+  return parts.map((part, i) => {
+    if (/^\p{L}/u.test(part)) {
+      const n = Math.max(1, Math.ceil(part.length * 0.45))
+      return <Fragment key={i}><b>{part.slice(0, n)}</b>{part.slice(n)}</Fragment>
+    }
+    return part
+  })
 }
 
 function findTextOffset(needle: string, haystack: string, approxPct: number): number {
@@ -2163,6 +2176,14 @@ function AppearanceContent({ appearance, onChange }: {
               {f === 'serif' ? 'Serif' : 'Sans'}
             </button>
           ))}
+          <button
+            onClick={() => onChange({ bionic: !appearance.bionic })}
+            title="Bionic Reading — bold initial letters for faster reading"
+            className={cn('px-3 py-2 rounded-lg border text-sm font-medium transition-all',
+              appearance.bionic ? 'border-primary bg-primary text-white shadow-sm' : 'border-border/60 opacity-55 hover:opacity-90')}
+            style={{ fontFamily: 'Inter, sans-serif', letterSpacing: '0.01em' }}>
+            <b>B</b>R
+          </button>
         </div>
       </div>
 
@@ -4089,7 +4110,7 @@ export function ReaderRoute() {
                 className="mb-[1.4em]"
                 data-reader-paragraph-start={p.startOffset}
               >
-                {p.text}
+                {appearance.bionic ? toBionicNodes(p.text) : p.text}
               </p>
             ))}
           </div>
