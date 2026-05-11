@@ -19,6 +19,12 @@ def main() -> None:
         raise FileNotFoundError(f"Expected built frontend at {WEB_DIST}")
     shutil.copytree(WEB_DIST, PUBLIC_DIR)
 
+    # WASM files are large (~22 MB for ort-wasm-simd-threaded) and served by the
+    # Vercel CDN from outputDirectory (web-next/dist). The Python lambda never reads
+    # them; keeping them in public/ sweeps them into the 245 MB lambda bundle cap.
+    for wasm in PUBLIC_DIR.rglob("*.wasm"):
+        wasm.unlink()
+
     # Vercel bundles the entire project tree into the Python serverless function
     # AFTER install + build. Anything left on disk counts toward the 245 MB cap.
     # None of the following directories are needed by the Python runtime:
