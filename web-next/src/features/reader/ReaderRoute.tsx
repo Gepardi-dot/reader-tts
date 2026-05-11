@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { api, request, requestBlob, AuthError } from '@/shared/api/client'
 import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 import { getCachedDictionary, lookupStaticDictionary, putCachedDictionary } from '@/shared/storage/dictionaryCache'
+import { isModelReady, startWarmup, synthesizeLocal } from '@/shared/storage/modelCache'
 import { cn } from '@/lib/utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -277,6 +278,57 @@ async function loadLiveAudioBlob(result: LiveAudioResult, signal?: AbortSignal) 
     blob: cachedAudio?.blob ?? await fetchAndCacheLiveAudioBlob(result, signal),
     cues: (cachedAudio?.cues ?? result.cues ?? []) as LiveAudioCue[],
   }
+}
+
+// ── On-device Kokoro (transformers.js / kokoro-js) ──────────────────────────
+// Runs in a Web Worker after the model is downloaded post-upload. Cache keys
+// are namespaced `local:` so they never collide with server-cached audio (which
+// uses a SHA-1 hash key set by the backend).
+
+const LOCAL_KOKORO_CACHE_VERSION = 1
+
+async function localKokoroCacheKey(voice: string, speed: number, text: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(text))
+  const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
+  return `local:kokoro:v${LOCAL_KOKORO_CACHE_VERSION}:${voice}:${speed.toFixed(3)}:${hex}`
+}
+
+interface LocalKokoroBlob {
+  blob: Blob
+  duration: number | null
+  cacheKey: string
+}
+
+async function synthesizeKokoroLocal(
+  text: string,
+  voice: string,
+  speed: number,
+  signal: AbortSignal,
+): Promise<LocalKokoroBlob | null> {
+  if (!isModelReady()) return null
+  const cacheKey = await localKokoroCacheKey(voice, speed, text)
+  if (signal.aborted) return null
+
+  const hit = await getCachedAudio(cacheKey, LOCAL_KOKORO_CACHE_VERSION).catch(() => null)
+  if (hit) return { blob: hit.blob, duration: hit.duration, cacheKey }
+  if (signal.aborted) return null
+
+  const result = await synthesizeLocal(text, voice, speed)
+  if (!result || signal.aborted) return null
+
+  const blob = new Blob([result.wav], { type: 'audio/wav' })
+  await putCachedAudio({
+    cacheKey,
+    cacheVersion: LOCAL_KOKORO_CACHE_VERSION,
+    blob,
+    cues: [],
+    duration: result.durationSec,
+    contentType: 'audio/wav',
+    byteLength: blob.size,
+  }).catch(() => { /* cache write failures are non-fatal */ })
+
+  return { blob, duration: result.durationSec, cacheKey }
 }
 
 function audioSliceStart(textLength: number, scrollPct: number) {
@@ -3165,6 +3217,14 @@ export function ReaderRoute() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveTtsProvider, effectiveTtsVoice, Boolean(payload?.text)])
 
+  // On-device Kokoro warmup — downloads the ONNX model (~82 MB, q8) into the
+  // browser cache the moment the reader knows the user is using Kokoro. Idempotent
+  // and cached across sessions, so subsequent reader opens are noops.
+  useEffect(() => {
+    if (effectiveTtsProvider !== 'kokoro') return
+    startWarmup()
+  }, [effectiveTtsProvider])
+
   // Compute the presynthesis grid client-side the moment book text is available.
   // Prefers ending each chunk at a real sentence boundary (.!? + whitespace) within
   // ±40% of the target so the TTS engine doesn't render end-of-utterance prosody
@@ -3779,27 +3839,7 @@ export function ReaderRoute() {
 
     updateWordAudioChunk(idx, { status: 'fetching' })
     const fetchPromise = (async () => {
-      try {
-        const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
-        const liveAudio = await requestLiveAudio(bookId!, {
-          provider: effectiveTtsProvider,
-          voice: effectiveTtsVoice,
-          model: null,
-          output_format: 'mp3',
-          narration_style: '',
-          length_scale: lengthScale,
-          sentence_silence: sentenceSilence,
-          pageNumber: 1,
-          start: chunk.start,
-          end: chunk.end,
-          text: chunk.text,
-        })
-        if (signal.aborted) return null
-
-        // Download bytes once, persist them for reloads, then create a blob URL + decode for gapless playback.
-        const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
-        if (signal.aborted) return null
-
+      const finalizeBlob = async (blob: Blob, cues: LiveAudioCue[]): Promise<string | null> => {
         const blobUrl = URL.createObjectURL(blob)
         wordAudioObjectUrlsRef.current.add(blobUrl)
 
@@ -3820,6 +3860,39 @@ export function ReaderRoute() {
         })
         prefetchWordAudioAhead(wordAudioCurIdxRef.current, wordAudioChunksRef.current, signal)
         return blobUrl
+      }
+
+      try {
+        // ── Fast path: on-device Kokoro (zero network) ─────────────────
+        if (effectiveTtsProvider === 'kokoro' && isModelReady() && effectiveTtsVoice) {
+          const { lengthScale: localLs } = pacingFor('kokoro')
+          const localSpeed = localLs > 0 ? 1 / localLs : 1
+          const local = await synthesizeKokoroLocal(chunk.text, effectiveTtsVoice, localSpeed, signal)
+          if (signal.aborted) return null
+          if (local) return finalizeBlob(local.blob, [])
+          // Fall through to remote path if local synthesis returned null.
+        }
+
+        const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
+        const liveAudio = await requestLiveAudio(bookId!, {
+          provider: effectiveTtsProvider,
+          voice: effectiveTtsVoice,
+          model: null,
+          output_format: 'mp3',
+          narration_style: '',
+          length_scale: lengthScale,
+          sentence_silence: sentenceSilence,
+          pageNumber: 1,
+          start: chunk.start,
+          end: chunk.end,
+          text: chunk.text,
+        })
+        if (signal.aborted) return null
+
+        // Download bytes once, persist them for reloads, then create a blob URL + decode for gapless playback.
+        const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
+        if (signal.aborted) return null
+        return finalizeBlob(blob, cues)
       } catch (error) {
         if ((error as Error).name !== 'AbortError') {
           setWordAudio(null)

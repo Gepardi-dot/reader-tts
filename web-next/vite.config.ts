@@ -8,6 +8,12 @@ export default defineConfig({
   resolve: {
     alias: { '@': path.resolve(__dirname, './src') },
   },
+  worker: {
+    format: 'es',
+  },
+  optimizeDeps: {
+    exclude: ['@huggingface/transformers'],
+  },
   server: {
     host: true,
     port: 5175,

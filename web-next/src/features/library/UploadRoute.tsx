@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { Upload, FileText } from 'lucide-react'
@@ -6,15 +6,24 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { AuthError, BOOK_ACCEPT, isSupportedBookFile, uploadBook } from '@/shared/api/client'
 import { supabase } from '@/lib/supabase'
+import {
+  getModelStatus,
+  startWarmup,
+  subscribeModelStatus,
+  type ModelState,
+} from '@/shared/storage/modelCache'
 
 export function UploadRoute() {
   const [file, setFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
   const [drag, setDrag] = useState(false)
+  const [modelState, setModelState] = useState<ModelState>(() => getModelStatus())
   const inputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+
+  useEffect(() => subscribeModelStatus(setModelState), [])
 
   async function handleUpload() {
     if (!file) return
@@ -31,6 +40,9 @@ export function UploadRoute() {
         })]
       })
       queryClient.invalidateQueries({ queryKey: ['books'] })
+      // Start downloading the on-device TTS model in parallel with the user reaching
+      // the reader. Idempotent: noop if already downloaded.
+      startWarmup()
       navigate(`/book/${book.id}`)
     } catch (e) {
       if (e instanceof AuthError) {
@@ -136,6 +148,17 @@ export function UploadRoute() {
           </Button>
         )}
       </div>
+
+      {modelState.status === 'downloading' && (
+        <p className="text-xs text-muted-foreground mt-3">
+          Preparing on-device voice ({modelState.progress}%)…
+        </p>
+      )}
+      {modelState.status === 'ready' && (
+        <p className="text-xs text-muted-foreground mt-3">
+          On-device voice ready · audio will play instantly
+        </p>
+      )}
     </div>
   )
 }
