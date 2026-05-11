@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Search, Trash2, BookOpen, Upload } from 'lucide-react'
+import { Search, BookOpen, Upload, X } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -234,19 +234,19 @@ function BookCard({ book, progress, index, onDelete }: {
         </div>
       </Link>
 
-      {/* Delete — appears on hover */}
+      {/* Delete — always visible on mobile (low opacity), hover-only on desktop */}
       <button
         onClick={(e) => { e.preventDefault(); onDelete(book.id) }}
         className={cn(
-          'absolute top-2 right-2 w-7 h-7 rounded-md',
+          'absolute top-1.5 right-1.5 w-5 h-5 rounded-full',
           'flex items-center justify-center',
-          'border border-border bg-background/95',
-          'opacity-0 group-hover:opacity-100 transition-opacity',
-          'text-muted-foreground hover:text-destructive hover:border-destructive/30',
+          'bg-black/40',
+          'opacity-35 sm:opacity-0 group-hover:opacity-100 transition-opacity',
+          'text-white',
         )}
         aria-label="Delete book"
       >
-        <Trash2 size={13} />
+        <X size={10} strokeWidth={2.5} />
       </button>
     </div>
   )
