@@ -19,6 +19,13 @@ def main() -> None:
         raise FileNotFoundError(f"Expected built frontend at {WEB_DIST}")
     shutil.copytree(WEB_DIST, PUBLIC_DIR)
 
+    # Vercel bundles the entire project tree into the Python serverless function
+    # AFTER install + build. Anything left on disk counts toward the 245 MB
+    # function-size cap, and web-next/node_modules has ~250 MB of ONNX Runtime
+    # WASM + transformers.js source that the Python runtime never touches
+    # (the frontend build is self-contained in dist/ → public/). Drop it.
+    shutil.rmtree(ROOT / "web-next" / "node_modules", ignore_errors=True)
+
 
 if __name__ == "__main__":
     main()

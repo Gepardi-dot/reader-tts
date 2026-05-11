@@ -45,8 +45,7 @@ class MockWorker {
 
 class MockBroadcastChannel {
   posted: unknown[] = []
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  constructor(_name: string) {}
+  constructor(_name: string) { void _name }
   postMessage(msg: unknown) { this.posted.push(msg) }
   addEventListener() {}
   close() {}

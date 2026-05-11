@@ -806,15 +806,22 @@ function BottomSheet({ open, onClose, children, bg = '#ffffff' }: {
   const [mounted, setMounted] = useState(open)
   const [visible, setVisible] = useState(false)
 
+  // Animation choreography: open → mount, then on next paint flip visible so
+  // the CSS transform/opacity transitions run. close → hide first, unmount
+  // after the 260ms transition. The setState calls here coordinate with the
+  // browser paint cycle (rAF / setTimeout) and are the documented exception
+  // to react-hooks/set-state-in-effect.
   useEffect(() => {
     if (open) {
-      setMounted(true)
-      requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)))
-    } else {
-      setVisible(false)
-      const t = setTimeout(() => setMounted(false), 260)
-      return () => clearTimeout(t)
+      setMounted(true) // eslint-disable-line react-hooks/set-state-in-effect
+      const handle = requestAnimationFrame(() =>
+        requestAnimationFrame(() => setVisible(true)),
+      )
+      return () => cancelAnimationFrame(handle)
     }
+    setVisible(false)
+    const t = setTimeout(() => setMounted(false), 260)
+    return () => clearTimeout(t)
   }, [open])
 
   if (!mounted) return null
