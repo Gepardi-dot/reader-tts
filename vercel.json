@@ -3,11 +3,6 @@
   "installCommand": "python vercel_install.py",
   "buildCommand": "python vercel_build.py",
   "outputDirectory": "web-next/dist",
-  "functions": {
-    "app.py": {
-      "includeFiles": "server/**,pdf_to_audio.py"
-    }
-  },
   "headers": [
     {
       "source": "/(.*)",

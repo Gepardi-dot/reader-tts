@@ -20,11 +20,19 @@ def main() -> None:
     shutil.copytree(WEB_DIST, PUBLIC_DIR)
 
     # Vercel bundles the entire project tree into the Python serverless function
-    # AFTER install + build. Anything left on disk counts toward the 245 MB
-    # function-size cap, and web-next/node_modules has ~250 MB of ONNX Runtime
-    # WASM + transformers.js source that the Python runtime never touches
-    # (the frontend build is self-contained in dist/ → public/). Drop it.
+    # AFTER install + build. Anything left on disk counts toward the 245 MB cap.
+    # None of the following directories are needed by the Python runtime:
+    #   - web-next/node_modules  (~250 MB ONNX Runtime WASM + transformers.js)
+    #   - web-next/src           (~0.5 MB TypeScript source, compiled into dist/)
+    #   - web-next/e2e           Playwright tests
+    #   - web-rewrite            legacy app, not deployed
     shutil.rmtree(ROOT / "web-next" / "node_modules", ignore_errors=True)
+    shutil.rmtree(ROOT / "web-next" / "src", ignore_errors=True)
+    shutil.rmtree(ROOT / "web-next" / "e2e", ignore_errors=True)
+    shutil.rmtree(ROOT / "web-rewrite", ignore_errors=True)
+
+    # package-lock.json is large (~400 KB) and only needed for npm ci, not at runtime
+    (ROOT / "web-next" / "package-lock.json").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
