@@ -1,13 +1,19 @@
 const SHELL_CACHE = 'storybook-shell-v1'
 const PROVIDERS_CACHE = 'storybook-providers-v1'
 const MODEL_CACHE = 'kokoro-model-v1'
-const ACTIVE_CACHES = [SHELL_CACHE, PROVIDERS_CACHE, MODEL_CACHE]
+const COVER_CACHE = 'book-covers-v1'
+const ACTIVE_CACHES = [SHELL_CACHE, PROVIDERS_CACHE, MODEL_CACHE, COVER_CACHE]
 const SHELL_URLS = ['/', '/index.html', '/favicon.svg', '/icons.svg', '/dictionary-seed.json']
 const MODEL_HOSTS = new Set([
   'huggingface.co',
   'cdn-lfs.huggingface.co',
   'cdn-lfs-us-1.huggingface.co',
   'cdn-lfs-eu-1.huggingface.co',
+])
+const COVER_HOSTS = new Set([
+  'covers.openlibrary.org',
+  'books.google.com',
+  'books.googleusercontent.com',
 ])
 
 self.addEventListener('install', (event) => {
@@ -81,6 +87,27 @@ function withCorp(response) {
   })
 }
 
+// Cover thumbnails are small (~10–40 KB each) but show up across the whole
+// library grid; cache-first avoids hammering Open Library/Google Books on every
+// scroll. The injected CORP also belt-and-suspenders the <img crossorigin>
+// path in case a host's CORS response drops on a particular request.
+async function coverCacheFirst(request) {
+  const cache = await caches.open(COVER_CACHE)
+  const cached = await cache.match(request, { ignoreVary: true })
+  if (cached) return withCorp(cached)
+  let response
+  try {
+    response = await fetch(request, { mode: 'cors', credentials: 'omit' })
+  } catch (err) {
+    if (cached) return withCorp(cached)
+    throw err
+  }
+  if (response.ok) {
+    cache.put(request, response.clone()).catch(() => undefined)
+  }
+  return withCorp(response)
+}
+
 self.addEventListener('fetch', (event) => {
   const { request } = event
   if (request.method !== 'GET') return
@@ -89,6 +116,11 @@ self.addEventListener('fetch', (event) => {
 
   if (MODEL_HOSTS.has(url.hostname)) {
     event.respondWith(modelCacheFirst(request))
+    return
+  }
+
+  if (COVER_HOSTS.has(url.hostname)) {
+    event.respondWith(coverCacheFirst(request))
     return
   }
 

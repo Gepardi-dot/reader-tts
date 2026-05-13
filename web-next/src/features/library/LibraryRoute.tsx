@@ -185,6 +185,8 @@ function BookCard({ book, progress, index, onDelete }: {
             <img
               src={coverUrl}
               alt={book.title}
+              crossOrigin="anonymous"
+              referrerPolicy="no-referrer"
               className="w-full h-full object-cover"
               onError={() => setFailedCoverUrl(coverUrl)}
             />
