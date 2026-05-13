@@ -10,6 +10,7 @@ import { supabase } from '@/lib/supabase'
 import { setCachedToken } from '@/shared/api/client'
 import { setAudioCacheUserId } from '@/shared/storage/audioCache'
 import { setDictionaryCacheUserId } from '@/shared/storage/dictionaryCache'
+import { startWarmup } from '@/shared/storage/modelCache'
 import { router } from './app/router'
 
 const queryClient = new QueryClient({
@@ -74,6 +75,26 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {})
   })
+}
+
+// Cross-origin isolation is required for SharedArrayBuffer (multi-threaded ONNX
+// WASM). If headers are misconfigured we'll silently fall back to single-thread —
+// log so a regression is visible in DevTools.
+if (typeof window !== 'undefined' && !window.crossOriginIsolated) {
+  console.warn('[tts] crossOriginIsolated is false — WASM threads disabled; check COOP/COEP headers.')
+}
+
+// Request persistent storage early so the 82 MB Kokoro model in Cache Storage
+// isn't evicted under quota pressure. Best effort — browsers may decline.
+if (typeof navigator !== 'undefined' && 'storage' in navigator && 'persist' in navigator.storage) {
+  navigator.storage.persist().catch(() => undefined)
+}
+
+// Begin model download + warmup as soon as the app loads. Idempotent —
+// triggers regardless of route. By the time the user navigates to /book/:id,
+// the pipeline is downloaded (or close to it) and the warmup synth has run.
+if (typeof Worker !== 'undefined') {
+  startWarmup()
 }
 
 createRoot(document.getElementById('root')!).render(

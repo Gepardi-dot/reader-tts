@@ -8,7 +8,6 @@ import { AuthError, BOOK_ACCEPT, isSupportedBookFile, uploadBook } from '@/share
 import { supabase } from '@/lib/supabase'
 import {
   getModelStatus,
-  startWarmup,
   subscribeModelStatus,
   type ModelState,
 } from '@/shared/storage/modelCache'
@@ -40,9 +39,6 @@ export function UploadRoute() {
         })]
       })
       queryClient.invalidateQueries({ queryKey: ['books'] })
-      // Start downloading the on-device TTS model in parallel with the user reaching
-      // the reader. Idempotent: noop if already downloaded.
-      startWarmup()
       navigate(`/book/${book.id}`)
     } catch (e) {
       if (e instanceof AuthError) {

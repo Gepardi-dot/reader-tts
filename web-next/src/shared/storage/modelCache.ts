@@ -2,14 +2,17 @@
 //
 // Responsibilities:
 //   - Lazy-spawn the worker on first warmup call.
-//   - Track download progress and surface a small reactive store to the UI.
+//   - Track download + warmup progress; surface a small reactive store to the UI.
 //   - Correlate synthesize requests/responses via a message id.
+//   - Expose a streaming API so the reader can schedule sentence-level PCM as it
+//     arrives (sub-200 ms time-to-first-audio after warmup).
 //   - Cross-tab status sync via BroadcastChannel (best effort).
 //
-// The model itself is cached by transformers.js (browser Cache API), so a fresh
-// tab/session reuses the bytes downloaded by any prior tab without re-fetching.
+// The model itself is cached by the service worker (kokoro-model-v1 Cache
+// Storage bucket — see web-next/public/sw.js), so a fresh tab/session reuses
+// the bytes downloaded by any prior tab without re-fetching.
 
-export type ModelStatus = 'idle' | 'downloading' | 'ready' | 'error'
+export type ModelStatus = 'idle' | 'downloading' | 'warming' | 'ready' | 'error'
 
 export interface ModelState {
   status: ModelStatus
@@ -17,15 +20,32 @@ export interface ModelState {
   error: string | null
 }
 
-interface SynthResult {
+export interface SynthResult {
   wav: ArrayBuffer
   sampleRate: number
   durationSec: number
 }
 
+export interface StreamHandle {
+  /** Sentence-level PCM chunk; schedule it on Web Audio immediately. */
+  onChunk?: (pcm: Float32Array, sampleRate: number, index: number) => void
+  /** Full assembled WAV — persist to IndexedDB so repeats hit cache. */
+  onComplete: (result: SynthResult) => void
+  /** Synthesis failed. Caller may fall back to the remote API. */
+  onError: (err: Error) => void
+}
+
 type ProgressMsg = { type: 'progress'; progress: number; file?: string }
+type WarmingMsg = { type: 'warming' }
 type ReadyMsg = { type: 'ready' }
 type WarmupErrorMsg = { type: 'warmup:error'; message: string }
+type ChunkMsg = {
+  type: 'chunk'
+  id: string
+  index: number
+  pcm: Float32Array
+  sampleRate: number
+}
 type ResultMsg = {
   type: 'result'
   id: string
@@ -34,17 +54,21 @@ type ResultMsg = {
   durationSec: number
 }
 type SynthErrorMsg = { type: 'error'; id: string; message: string }
-type WorkerMsg = ProgressMsg | ReadyMsg | WarmupErrorMsg | ResultMsg | SynthErrorMsg
+type WorkerMsg =
+  | ProgressMsg
+  | WarmingMsg
+  | ReadyMsg
+  | WarmupErrorMsg
+  | ChunkMsg
+  | ResultMsg
+  | SynthErrorMsg
 
 const BROADCAST_NAME = 'kokoro-model-status'
 
 let worker: Worker | null = null
 let state: ModelState = { status: 'idle', progress: 0, error: null }
 const listeners = new Set<(state: ModelState) => void>()
-const pending = new Map<string, {
-  resolve: (value: SynthResult) => void
-  reject: (reason: Error) => void
-}>()
+const pending = new Map<string, StreamHandle>()
 let nextId = 1
 
 let broadcast: BroadcastChannel | null = null
@@ -52,11 +76,16 @@ try {
   if (typeof BroadcastChannel !== 'undefined') {
     broadcast = new BroadcastChannel(BROADCAST_NAME)
     broadcast.addEventListener('message', (event: MessageEvent<ModelState>) => {
-      // Adopt sibling-tab state only when ours is less progressed.
+      // Adopt sibling-tab state when ours is less progressed.
       const remote = event.data
       if (!remote || typeof remote !== 'object') return
       if (state.status === 'ready') return
-      if (remote.status === 'ready' || remote.progress > state.progress) {
+      const statusRank: Record<ModelStatus, number> = {
+        idle: 0, error: 0, downloading: 1, warming: 2, ready: 3,
+      }
+      const remoteRank = statusRank[remote.status] ?? 0
+      const localRank = statusRank[state.status] ?? 0
+      if (remoteRank > localRank || (remoteRank === localRank && remote.progress > state.progress)) {
         setState({ ...remote }, /* broadcast */ false)
       }
     })
@@ -91,20 +120,30 @@ function handleWorkerMessage(event: MessageEvent<WorkerMsg>) {
     case 'progress':
       setState({ status: 'downloading', progress: Math.max(state.progress, msg.progress) })
       break
+    case 'warming':
+      setState({ status: 'warming', progress: 100, error: null })
+      break
     case 'ready':
       setState({ status: 'ready', progress: 100, error: null })
       break
     case 'warmup:error':
       setState({ status: 'error', error: msg.message })
-      // Allow retry on next startWarmup call.
       worker?.terminate()
       worker = null
       break
+    case 'chunk': {
+      const slot = pending.get(msg.id)
+      if (slot?.onChunk) {
+        try { slot.onChunk(msg.pcm, msg.sampleRate, msg.index) }
+        catch { /* listener fault shouldn't kill the stream */ }
+      }
+      break
+    }
     case 'result': {
       const slot = pending.get(msg.id)
       if (slot) {
         pending.delete(msg.id)
-        slot.resolve({ wav: msg.wav, sampleRate: msg.sampleRate, durationSec: msg.durationSec })
+        slot.onComplete({ wav: msg.wav, sampleRate: msg.sampleRate, durationSec: msg.durationSec })
       }
       break
     }
@@ -112,7 +151,7 @@ function handleWorkerMessage(event: MessageEvent<WorkerMsg>) {
       const slot = pending.get(msg.id)
       if (slot) {
         pending.delete(msg.id)
-        slot.reject(new Error(msg.message))
+        slot.onError(new Error(msg.message))
       }
       break
     }
@@ -141,8 +180,8 @@ function ensureWorker(): Worker | null {
 }
 
 export function startWarmup(): void {
-  // Idempotent: already running or finished → noop.
-  if (state.status === 'downloading' || state.status === 'ready') return
+  // Idempotent: already in flight or finished → noop.
+  if (state.status === 'downloading' || state.status === 'warming' || state.status === 'ready') return
   const w = ensureWorker()
   if (!w) return
   setState({ status: 'downloading', progress: 0, error: null })
@@ -153,32 +192,64 @@ export function isModelReady(): boolean {
   return state.status === 'ready'
 }
 
-export async function synthesizeLocal(
+/**
+ * Streaming synthesis. Resolves the worker handle synchronously so the caller
+ * can start scheduling audio chunks as they arrive. `onComplete` fires once
+ * the full WAV is assembled (use it for IndexedDB persistence). Returns a
+ * cancel handle so the caller can abort if the user navigates away.
+ *
+ * Returns null when the model isn't ready — caller should fall back to remote
+ * synthesis or display a "Preparing voice…" state.
+ */
+export function synthesizeLocalStreaming(
   text: string,
   voice: string,
   speed: number,
-): Promise<SynthResult | null> {
+  handle: StreamHandle,
+): { cancel: () => void } | null {
   if (state.status !== 'ready') return null
   const w = worker
   if (!w) return null
 
   const id = String(nextId++)
-  return new Promise<SynthResult | null>((resolve, reject) => {
-    pending.set(id, {
-      resolve: (value) => resolve(value),
-      reject: (reason) => reject(reason),
-    })
-    try {
-      w.postMessage({ type: 'synthesize', id, text, voice, speed })
-    } catch (err) {
-      pending.delete(id)
-      reject(err instanceof Error ? err : new Error(String(err)))
-    }
-  }).catch((err) => {
-    // Swallow errors → caller falls back to the remote API path.
-    if (typeof console !== 'undefined') {
-      console.warn('[kokoro] local synthesis failed:', err)
-    }
+  pending.set(id, handle)
+  try {
+    w.postMessage({ type: 'synthesize', id, text, voice, speed })
+  } catch (err) {
+    pending.delete(id)
+    handle.onError(err instanceof Error ? err : new Error(String(err)))
     return null
+  }
+
+  return {
+    cancel: () => {
+      if (!pending.has(id)) return
+      pending.delete(id)
+      try { w.postMessage({ type: 'cancel', id }) } catch { /* best effort */ }
+    },
+  }
+}
+
+/**
+ * Legacy single-shot API. Resolves with the full WAV (or null if the model
+ * isn't ready). Use synthesizeLocalStreaming() when you want sentence-level
+ * audio chunks for low-latency playback.
+ */
+export async function synthesizeLocal(
+  text: string,
+  voice: string,
+  speed: number,
+): Promise<SynthResult | null> {
+  return new Promise<SynthResult | null>((resolve) => {
+    const stream = synthesizeLocalStreaming(text, voice, speed, {
+      onComplete: (result) => resolve(result),
+      onError: (err) => {
+        if (typeof console !== 'undefined') {
+          console.warn('[kokoro] local synthesis failed:', err)
+        }
+        resolve(null)
+      },
+    })
+    if (!stream) resolve(null)
   })
 }

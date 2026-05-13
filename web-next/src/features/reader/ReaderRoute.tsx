@@ -14,7 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { api, request, requestBlob, AuthError } from '@/shared/api/client'
 import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 import { getCachedDictionary, lookupStaticDictionary, putCachedDictionary } from '@/shared/storage/dictionaryCache'
-import { isModelReady, startWarmup, synthesizeLocal } from '@/shared/storage/modelCache'
+import { isModelReady, synthesizeLocal } from '@/shared/storage/modelCache'
 import { cn } from '@/lib/utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -3223,14 +3223,6 @@ export function ReaderRoute() {
       .catch(() => { /* silent — warmup is best-effort */ })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveTtsProvider, effectiveTtsVoice, Boolean(payload?.text)])
-
-  // On-device Kokoro warmup — downloads the ONNX model (~82 MB, q8) into the
-  // browser cache the moment the reader knows the user is using Kokoro. Idempotent
-  // and cached across sessions, so subsequent reader opens are noops.
-  useEffect(() => {
-    if (effectiveTtsProvider !== 'kokoro') return
-    startWarmup()
-  }, [effectiveTtsProvider])
 
   // Compute the presynthesis grid client-side the moment book text is available.
   // Prefers ending each chunk at a real sentence boundary (.!? + whitespace) within
