@@ -2691,12 +2691,33 @@ function AudioContent({
 
   // ── Play a chunk, prefetch next, chain onended ──────────────────────────────
 
+  // Synchronously create + .play() an audio element during a user gesture so
+  // iOS Safari (and increasingly Chrome on mobile) treats it as unlocked. After
+  // the async sample fetch completes, swapping .src on the SAME element keeps
+  // the unlock, avoiding "Playback was blocked by the browser" errors.
+  function primeAudioElement(): HTMLAudioElement {
+    let audio = audioRef.current
+    if (!audio) {
+      audio = new Audio()
+      audio.preservesPitch = true
+      audioRef.current = audio
+    }
+    audio.muted = true
+    const playPromise = audio.play()
+    if (playPromise && typeof playPromise.then === 'function') {
+      playPromise.catch(() => undefined)
+    }
+    return audio
+  }
+
   function playChunkAt(idx: number, currentChunks: AudioChunk[], ctrl: AbortController) {
     const c = currentChunks[idx]
     if (!c?.url) return
 
-    audioRef.current?.pause()
-    const audio = new Audio(c.url)
+    const audio = audioRef.current ?? new Audio()
+    audio.pause()
+    audio.src = c.url
+    audio.muted = false
     audio.preservesPitch = true
     audio.playbackRate = rateRef.current
     audioRef.current  = audio
@@ -2776,14 +2797,18 @@ function AudioContent({
       setPhase('paused')
     } else if (phase === 'paused') {
       setErrorMsg(null)
-      audioRef.current?.play()
+      const audio = audioRef.current
+      if (!audio) return
+      audio.muted = false
+      audio.play()
         .then(() => setPhase('playing'))
         .catch(() => {
           setErrorMsg('Playback was blocked by the browser. Tap play again.')
           setPhase('paused')
         })
     } else if (phase === 'idle') {
-      startPlayback()
+      primeAudioElement()
+      void startPlayback()
     }
     // 'buffering' → ignore taps
   }
