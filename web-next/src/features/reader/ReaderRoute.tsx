@@ -3214,6 +3214,23 @@ export function ReaderRoute() {
     localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify({ provider: effectiveTtsProvider, voice: effectiveTtsVoice }))
   }, [effectiveTtsProvider, effectiveTtsVoice])
 
+  // Voice/provider switch during reader playback: the chunks already in
+  // wordAudioChunksRef were synthesized under the OLD voice, and prefetched
+  // chunks keep playing it. Restart from the current chunk under the new voice
+  // so the switch is audible immediately.
+  useEffect(() => {
+    const current = wordAudio
+    if (!current || current.status === 'loading') return
+    const chunks = wordAudioChunksRef.current
+    const curIdx = wordAudioCurIdxRef.current
+    const currentChunk = chunks[curIdx]
+    if (!currentChunk) return
+    void playWord(current.word, currentChunk.start)
+  // playWord, wordAudio are intentionally not deps — we only want this to fire
+  // when the user changes provider/voice, not on every other state mutation.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveTtsProvider, effectiveTtsVoice])
+
   // Background warmup — fire as soon as a local provider is selected so the model is
   // loaded by the time the user opens the audio sheet. Fire-and-forget, no UI blocking.
   useEffect(() => {
