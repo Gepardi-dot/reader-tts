@@ -14,7 +14,21 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { api, request, requestBlob, AuthError } from '@/shared/api/client'
 import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 import { getCachedDictionary, lookupStaticDictionary, putCachedDictionary } from '@/shared/storage/dictionaryCache'
-import { isModelReady, synthesizeLocal } from '@/shared/storage/modelCache'
+import {
+  isModelReady,
+  synthesizeLocal,
+  localKokoroCacheKey,
+  LOCAL_KOKORO_CACHE_VERSION,
+} from '@/shared/storage/modelCache'
+import {
+  startRollingCache,
+  cancelRollingCache,
+  subscribeRollingCache,
+  getRollingCacheState,
+  notePlaybackFetchStart,
+  notePlaybackFetchEnd,
+  type RollingCacheState,
+} from '@/shared/storage/rollingVoiceCache'
 import { cn } from '@/lib/utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -283,16 +297,8 @@ async function loadLiveAudioBlob(result: LiveAudioResult, signal?: AbortSignal) 
 // ── On-device Kokoro (transformers.js / kokoro-js) ──────────────────────────
 // Runs in a Web Worker after the model is downloaded post-upload. Cache keys
 // are namespaced `local:` so they never collide with server-cached audio (which
-// uses a SHA-1 hash key set by the backend).
-
-const LOCAL_KOKORO_CACHE_VERSION = 1
-
-async function localKokoroCacheKey(voice: string, speed: number, text: string): Promise<string> {
-  const encoder = new TextEncoder()
-  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(text))
-  const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
-  return `local:kokoro:v${LOCAL_KOKORO_CACHE_VERSION}:${voice}:${speed.toFixed(3)}:${hex}`
-}
+// uses a SHA-1 hash key set by the backend). Key + version live in modelCache.ts
+// so the rolling background queue and the playback path use the same shape.
 
 interface LocalKokoroBlob {
   blob: Blob
@@ -314,7 +320,16 @@ async function synthesizeKokoroLocal(
   if (hit) return { blob: hit.blob, duration: hit.duration, cacheKey }
   if (signal.aborted) return null
 
-  const result = await synthesizeLocal(text, voice, speed)
+  // Cache miss → the worker has to actually synth. Tell the rolling queue to
+  // yield so its in-flight chunk is cancelled and this playback request gets
+  // the worker immediately.
+  notePlaybackFetchStart()
+  let result
+  try {
+    result = await synthesizeLocal(text, voice, speed)
+  } finally {
+    notePlaybackFetchEnd()
+  }
   if (!result || signal.aborted) return null
 
   const blob = new Blob([result.wav], { type: 'audio/wav' })
@@ -2516,12 +2531,18 @@ export interface AudioHandle {
   stop:   () => void
 }
 
-function AudioContent({ colors, provider, onProviderChange, voice, onVoiceChange, onError, rate: rateProp, onRateChange }: {
+function AudioContent({
+  colors, provider, onProviderChange, voice, onVoiceChange, onError, rate: rateProp, onRateChange,
+  onCommitVoice, rollingCacheState, currentBookId,
+}: {
   colors: typeof THEMES['paper']
   provider: string; onProviderChange: (p: string) => void
   voice: string | null; onVoiceChange: (v: string | null) => void
   onError?: (message: string) => void
   rate?: number; onRateChange?: (r: number) => void
+  onCommitVoice?: () => boolean
+  rollingCacheState?: RollingCacheState
+  currentBookId?: string | null
 }) {
   const [phase,   setPhase]   = useState<'idle' | 'buffering' | 'playing' | 'paused'>('idle')
   const [chunks,  setChunks]  = useState<AudioChunk[]>([])
@@ -2835,6 +2856,46 @@ function AudioContent({ colors, provider, onProviderChange, voice, onVoiceChange
               ))}
             </SelectContent>
           </Select>
+
+          {/* Commit: pre-cache this voice for the whole book so later plays are instant. */}
+          {provider === 'kokoro' && onCommitVoice && currentBookId && (() => {
+            const rcs = rollingCacheState
+            const isThisBookVoice = rcs?.bookId === currentBookId && rcs?.voice === voice
+            const isActive = Boolean(isThisBookVoice && rcs?.active)
+            const completed = isThisBookVoice ? (rcs?.completed ?? 0) : 0
+            const total = isThisBookVoice ? (rcs?.total ?? 0) : 0
+            const pct = total > 0 ? Math.round((completed / total) * 100) : 0
+            const isDone = isThisBookVoice && !rcs?.active && total > 0 && completed >= total
+            return (
+              <div className="mt-2">
+                <button
+                  type="button"
+                  onClick={() => { onCommitVoice() }}
+                  disabled={isActive}
+                  className="w-full h-9 rounded-md text-[12px] font-medium transition-all active:scale-[0.99] disabled:cursor-not-allowed"
+                  style={{
+                    border: `1px solid ${colors.text}18`,
+                    background: isActive ? `${colors.text}06` : `${colors.text}0a`,
+                    color: isActive ? `${colors.text}90` : colors.text,
+                  }}
+                >
+                  {isActive
+                    ? `Preparing voice… ${pct}%`
+                    : isDone
+                      ? 'Voice ready · re-cache'
+                      : 'Use this voice for this book'}
+                </button>
+                {isActive && (
+                  <div className="mt-1.5 h-1 rounded-full overflow-hidden" style={{ background: `${colors.text}12` }}>
+                    <div
+                      className="h-full rounded-full transition-all duration-300"
+                      style={{ width: `${pct}%`, background: colors.text, opacity: 0.4 }}
+                    />
+                  </div>
+                )}
+              </div>
+            )
+          })()}
         </div>
       )}
 
@@ -3096,6 +3157,7 @@ export function ReaderRoute() {
   const [audioFollowRects, setAudioFollowRects] = useState<SelectionRect[]>([])
   const [presynthJobId,    setPresynthJobId]    = useState<string | null>(null)
   const [presynthProgress, setPresynthProgress] = useState<{ completed: number; total: number } | null>(null)
+  const [rollingCacheState, setRollingCacheState] = useState<RollingCacheState>(() => getRollingCacheState())
   const [ttsProvider,   setTtsProvider]   = useState(() => loadAudioPrefs().provider)
   const [ttsVoice,      setTtsVoice]      = useState<string | null>(() => loadAudioPrefs().voice)
   const [audioRate,     setAudioRate]     = useState(1.0)
@@ -3230,6 +3292,49 @@ export function ReaderRoute() {
   // when the user changes provider/voice, not on every other state mutation.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveTtsProvider, effectiveTtsVoice])
+
+  // Rolling cache: subscribe to its progress for inline UI in the audio panel.
+  useEffect(() => {
+    return subscribeRollingCache(setRollingCacheState)
+  }, [])
+
+  // Voice or provider changed → the rolling cache was filling the OLD voice's
+  // chunks. Stop it; the user will hit "Use this voice" again if they want the
+  // new one cached. The cleanup also runs on unmount (route change), so the
+  // queue never outlives the reader screen.
+  useEffect(() => {
+    return () => { cancelRollingCache() }
+  }, [effectiveTtsProvider, effectiveTtsVoice, bookId])
+
+  // "Use this voice" — start the background queue that walks the whole book
+  // synth-and-persisting every chunk to IndexedDB. Voice-agnostic from the
+  // worker's perspective; pacingFor gives Kokoro a slight stretch so prosody
+  // doesn't sound rushed.
+  const commitVoiceForBook = useCallback(() => {
+    if (!bookId || !payload?.text) return false
+    if (effectiveTtsProvider !== 'kokoro') return false
+    if (!effectiveTtsVoice) return false
+    if (!isModelReady()) return false
+    const grid = presynthGridRef.current
+    if (!grid || !grid.length) return false
+    const { lengthScale } = pacingFor('kokoro')
+    const speed = lengthScale > 0 ? 1 / lengthScale : 1
+    // Start from the chunk the user is currently reading so the next plays
+    // benefit first; the loop continues to the end of the book.
+    const offset = Math.max(0, Math.floor(latestScrollPct.current * payload.text.length))
+    let fromIdx = 0
+    for (let i = 0; i < grid.length; i += 1) {
+      if (grid[i].end > offset) { fromIdx = i; break }
+    }
+    return startRollingCache({
+      bookId,
+      voice: effectiveTtsVoice,
+      speed,
+      text: payload.text,
+      grid,
+      fromIdx,
+    })
+  }, [bookId, payload?.text, effectiveTtsProvider, effectiveTtsVoice])
 
   // Background warmup — fire as soon as a local provider is selected so the model is
   // loaded by the time the user opens the audio sheet. Fire-and-forget, no UI blocking.
@@ -4564,6 +4669,9 @@ export function ReaderRoute() {
                       onError={showToast}
                       rate={audioRate}
                       onRateChange={setAudioRate}
+                      onCommitVoice={commitVoiceForBook}
+                      rollingCacheState={rollingCacheState}
+                      currentBookId={bookId ?? null}
                     />
                   </div>
                   <div style={{ display: sheet === 'appearance' ? 'block' : 'none' }}>

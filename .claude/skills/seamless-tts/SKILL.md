@@ -10,7 +10,8 @@ Line numbers drift — grep for symbols. This file separates correctness rules (
 ## Hot files
 - `web-next/src/features/reader/ReaderRoute.tsx` — playback state, prefetch, gapless scheduling
 - `web-next/src/workers/kokoroWorker.ts` — on-device ONNX/Kokoro inference (Web Worker)
-- `web-next/src/shared/storage/modelCache.ts` — worker lifecycle, status broadcast, `synthesizeLocal` + `synthesizeLocalStreaming`
+- `web-next/src/shared/storage/modelCache.ts` — worker lifecycle, status broadcast, `synthesizeLocal` + `synthesizeLocalStreaming`, shared `localKokoroCacheKey`
+- `web-next/src/shared/storage/rollingVoiceCache.ts` — "Use this voice" background queue that walks the presynth grid, synth-and-persists every chunk to IndexedDB, and yields the worker to playback synths via `notePlaybackFetchStart`/`End`
 - `web-next/public/sw.js` — service worker; caches Hugging Face Hub model bytes (`kokoro-model-v1`) and injects CORP for COEP compliance
 - `vercel.json` + `web-next/vite.config.ts` — COOP/COEP headers; required for SharedArrayBuffer (multi-threaded WASM)
 - `server/app.py` — `/api/books/{id}/live-audio`, `/api/books/{id}/presynthesize`, cache, providers

@@ -231,6 +231,21 @@ export function synthesizeLocalStreaming(
 }
 
 /**
+ * IndexedDB cache key for on-device Kokoro WAV output. Voice + speed are part
+ * of the key because they change the audio bytes; text is hashed (SHA-256) to
+ * keep keys short. Bump LOCAL_KOKORO_CACHE_VERSION if the synth contract
+ * changes (e.g. different sample rate, different post-processing).
+ */
+export const LOCAL_KOKORO_CACHE_VERSION = 1
+
+export async function localKokoroCacheKey(voice: string, speed: number, text: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(text))
+  const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
+  return `local:kokoro:v${LOCAL_KOKORO_CACHE_VERSION}:${voice}:${speed.toFixed(3)}:${hex}`
+}
+
+/**
  * Legacy single-shot API. Resolves with the full WAV (or null if the model
  * isn't ready). Use synthesizeLocalStreaming() when you want sentence-level
  * audio chunks for low-latency playback.
