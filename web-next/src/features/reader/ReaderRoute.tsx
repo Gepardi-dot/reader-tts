@@ -201,6 +201,12 @@ const PROVIDER_PREVIEW_TEXT = (
   + 'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
 )
 
+// 44-byte silent WAV (RIFF header + 0 PCM samples). Used as a synchronous
+// primer source so .play() during a user gesture actually succeeds, unlocking
+// the audio element on iOS Safari and Chrome mobile for later async-loaded
+// content.
+const SILENT_WAV_DATA_URL = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
+
 // How many chunks to fire in parallel right when playback begins.
 // The first chunk we'll await before starting audio; the rest stream in the background.
 const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
@@ -2695,6 +2701,10 @@ function AudioContent({
   // iOS Safari (and increasingly Chrome on mobile) treats it as unlocked. After
   // the async sample fetch completes, swapping .src on the SAME element keeps
   // the unlock, avoiding "Playback was blocked by the browser" errors.
+  //
+  // Empty src → .play() rejects → element stays locked. So we feed it a tiny
+  // valid silent WAV (44-byte header, 0 PCM samples) so .play() actually
+  // succeeds and the element is genuinely activated.
   function primeAudioElement(): HTMLAudioElement {
     let audio = audioRef.current
     if (!audio) {
@@ -2703,6 +2713,8 @@ function AudioContent({
       audioRef.current = audio
     }
     audio.muted = true
+    audio.loop = false
+    audio.src = SILENT_WAV_DATA_URL
     const playPromise = audio.play()
     if (playPromise && typeof playPromise.then === 'function') {
       playPromise.catch(() => undefined)
