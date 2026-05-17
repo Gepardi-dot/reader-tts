@@ -549,6 +549,16 @@ class PresynthesizeRequest(BaseModel):
     start_from: int = Field(default=0, ge=0)
 
 
+class AudioManifestRequest(BaseModel):
+    provider: TTSProviderId = "kokoro"
+    voice: str | None = None
+    model: str | None = None
+    narration_style: str = Field(default="", max_length=1500)
+    length_scale: float = Field(default=1.0, ge=0.6, le=1.5)
+    sentence_silence: float = Field(default=0.2, ge=0.0, le=1.0)
+    chunk_size: int = Field(default=420, ge=150, le=2000)
+
+
 class HighlightCreateRequest(BaseModel):
     start: int = Field(ge=0)
     end: int = Field(gt=0)
@@ -1967,6 +1977,57 @@ _SCHEMA_MIGRATIONS: list[list[str]] = [
         "drop policy if exists card_context_cache_owner on card_context_cache; create policy card_context_cache_owner on card_context_cache for all using (auth.uid() = user_id)",
         "drop policy if exists practice_attempts_owner on practice_attempts; create policy practice_attempts_owner on practice_attempts for all using (auth.uid() = user_id)",
         "drop policy if exists learning_events_owner on learning_events; create policy learning_events_owner on learning_events for all using (auth.uid() = user_id)",
+    ],
+    # Version 8 — durable per-book TTS manifest foundation.
+    [
+        """
+        create table if not exists audio_manifests (
+            id               text        primary key,
+            book_id          text        not null references books(id) on delete cascade,
+            user_id          uuid        not null references auth.users(id) on delete cascade,
+            provider         text        not null,
+            voice            text,
+            model            text,
+            output_format    text        not null,
+            narration_style  text        not null default '',
+            length_scale     double precision not null,
+            sentence_silence double precision not null,
+            chunk_size       integer     not null,
+            grid_hash        text        not null,
+            cache_version    integer     not null,
+            status           text        not null default 'pending',
+            total_chunks     integer     not null default 0,
+            ready_chunks     integer     not null default 0,
+            created_at       timestamptz not null default now(),
+            updated_at       timestamptz not null default now(),
+            unique (
+                book_id, user_id, provider, voice, model, output_format,
+                narration_style, length_scale, sentence_silence, chunk_size,
+                grid_hash, cache_version
+            )
+        )
+        """,
+        "create index if not exists audio_manifests_book_user on audio_manifests(book_id, user_id, updated_at desc)",
+        """
+        create table if not exists audio_manifest_chunks (
+            manifest_id  text        not null references audio_manifests(id) on delete cascade,
+            chunk_index  integer     not null,
+            start_pos    integer     not null,
+            end_pos      integer     not null,
+            text_hash    text        not null,
+            cache_key    text        not null,
+            storage_key  text,
+            status       text        not null default 'pending',
+            duration     double precision,
+            content_type text,
+            byte_length  bigint,
+            error        text,
+            updated_at   timestamptz not null default now(),
+            primary key (manifest_id, chunk_index)
+        )
+        """,
+        "create index if not exists audio_manifest_chunks_cache_key on audio_manifest_chunks(cache_key)",
+        "create index if not exists audio_manifest_chunks_manifest_status on audio_manifest_chunks(manifest_id, status)",
     ],
 ]
 
@@ -3618,6 +3679,335 @@ def _chunk_text_for_presynth(text: str, chunk_size: int = 420) -> list[dict[str,
     return [c for c in chunks if c["text"].strip()]
 
 
+def resolve_live_audio_voice_model(
+    provider_id: TTSProviderId,
+    provider: dict[str, Any],
+    voice: str | None,
+    model: str | None,
+) -> tuple[str | None, str | None]:
+    chosen_model: str | None = None
+    chosen_voice = voice or provider.get("defaultVoice")
+    if provider_id == "google":
+        chosen_model = resolve_google_tts_model(model)
+    elif provider_id == "kokoro":
+        chosen_voice = chosen_voice or "af_heart"
+    return chosen_voice, chosen_model
+
+
+def build_live_audio_cache_identity(
+    *,
+    book_id: str,
+    provider_id: TTSProviderId,
+    voice: str | None,
+    model: str | None,
+    narration_style: str,
+    length_scale: float,
+    sentence_silence: float,
+    start: int,
+    end: int,
+    canonical_text: str,
+) -> dict[str, Any]:
+    playback_format = "wav"
+    text_hash = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+    cache_key_payload = {
+        "version": LIVE_AUDIO_CACHE_VERSION,
+        "bookId": book_id,
+        "provider": provider_id,
+        "voice": voice,
+        "model": model,
+        "outputFormat": playback_format,
+        # Kokoro is an ONNX model that ignores narration_style; normalize to "" so
+        # cache keys are provider-agnostic with respect to this field.
+        "narrationStyle": "" if provider_id == "kokoro" else narration_style,
+        "lengthScale": length_scale,
+        "sentenceSilence": sentence_silence,
+        "start": start,
+        "end": end,
+        "textHash": text_hash,
+    }
+    digest = hashlib.sha1(json.dumps(cache_key_payload, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    file_name = f"{provider_id}-{digest}.{playback_format}"
+    return {
+        "digest": digest,
+        "fileName": file_name,
+        "format": playback_format,
+        "cacheKey": f"live-audio:v{LIVE_AUDIO_CACHE_VERSION}:{digest}",
+        "textHash": text_hash,
+        "cachePayload": cache_key_payload,
+    }
+
+
+def storage_object_exists(key: str) -> bool:
+    if not BOOK_STORAGE_BUCKET:
+        return False
+    client = create_book_storage_client()
+    try:
+        client.head_object(Bucket=BOOK_STORAGE_BUCKET, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def audio_manifest_file_path(book_id: str, manifest_id: str) -> Path:
+    return book_live_audio_dir(book_id) / f".audio-manifest-{manifest_id}.json"
+
+
+def audio_manifest_grid_hash(chunks: list[dict[str, Any]]) -> str:
+    grid = [{"start": c["start"], "end": c["end"], "textHash": hashlib.sha256(c["text"].encode("utf-8")).hexdigest()} for c in chunks]
+    return hashlib.sha256(json.dumps(grid, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def audio_manifest_status(ready_chunks: int, total_chunks: int) -> str:
+    if total_chunks <= 0:
+        return "empty"
+    if ready_chunks >= total_chunks:
+        return "ready"
+    if ready_chunks > 0:
+        return "partial"
+    return "pending"
+
+
+def build_audio_manifest_payload(book_id: str, request: AudioManifestRequest) -> dict[str, Any]:
+    load_book_or_404(book_id)
+    provider = provider_details(request.provider)
+    if not provider["available"]:
+        raise HTTPException(status_code=400, detail=f"{provider['name']} is not available.")
+
+    text = read_book_text(book_id)
+    chunks = _chunk_text_for_presynth(text, request.chunk_size)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Book has no synthesizable text.")
+
+    chosen_voice, chosen_model = resolve_live_audio_voice_model(request.provider, provider, request.voice, request.model)
+    normalized_style = "" if request.provider == "kokoro" else request.narration_style
+    grid_hash = audio_manifest_grid_hash(chunks)
+    uid = _current_user_id.get() or LOCAL_DEV_USER_ID
+    manifest_seed = {
+        "bookId": book_id,
+        "userId": uid,
+        "provider": request.provider,
+        "voice": chosen_voice,
+        "model": chosen_model or request.model,
+        "outputFormat": "wav",
+        "narrationStyle": normalized_style,
+        "lengthScale": request.length_scale,
+        "sentenceSilence": request.sentence_silence,
+        "chunkSize": request.chunk_size,
+        "gridHash": grid_hash,
+        "cacheVersion": LIVE_AUDIO_CACHE_VERSION,
+    }
+    manifest_id = hashlib.sha256(json.dumps(manifest_seed, sort_keys=True).encode("utf-8")).hexdigest()[:32]
+    output_dir = book_live_audio_dir(book_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_chunks: list[dict[str, Any]] = []
+    ready_chunks = 0
+    for idx, chunk in enumerate(chunks):
+        canonical_text = normalize_highlight_text(chunk["text"])
+        identity = build_live_audio_cache_identity(
+            book_id=book_id,
+            provider_id=request.provider,
+            voice=chosen_voice,
+            model=chosen_model or request.model,
+            narration_style=request.narration_style,
+            length_scale=request.length_scale,
+            sentence_silence=request.sentence_silence,
+            start=chunk["start"],
+            end=chunk["end"],
+            canonical_text=canonical_text,
+        )
+        output_path = output_dir / identity["fileName"]
+        storage_key = book_live_audio_storage_key(book_id, identity["fileName"]) if book_storage_enabled() else None
+        timing_path = output_dir / f"{identity['fileName']}.timing.json"
+        timing_storage_key = book_live_audio_storage_key(book_id, timing_path.name) if book_storage_enabled() else None
+        timing_manifest = read_json(timing_path) if timing_path.exists() else None
+        if timing_manifest is None and timing_storage_key:
+            try:
+                timing_manifest = read_storage_json(timing_storage_key)
+            except Exception:
+                timing_manifest = None
+        local_ready = output_path.exists() and output_path.stat().st_size > 0
+        remote_ready = bool(storage_key and storage_object_exists(storage_key))
+        is_ready = local_ready or remote_ready
+        if is_ready:
+            ready_chunks += 1
+        manifest_chunks.append({
+            "index": idx,
+            "start": chunk["start"],
+            "end": chunk["end"],
+            "textHash": identity["textHash"],
+            "cacheKey": identity["cacheKey"],
+            "storageKey": storage_key,
+            "status": "ready" if is_ready else "pending",
+            "duration": timing_manifest.get("duration") if timing_manifest else None,
+            "contentType": "audio/wav" if is_ready else None,
+            "byteLength": output_path.stat().st_size if local_ready else None,
+        })
+
+    status = audio_manifest_status(ready_chunks, len(manifest_chunks))
+    now = utc_now()
+    return {
+        "id": manifest_id,
+        "bookId": book_id,
+        "provider": request.provider,
+        "voice": chosen_voice,
+        "model": chosen_model or request.model,
+        "outputFormat": "wav",
+        "narrationStyle": normalized_style,
+        "lengthScale": request.length_scale,
+        "sentenceSilence": request.sentence_silence,
+        "chunkSize": request.chunk_size,
+        "gridHash": grid_hash,
+        "cacheVersion": LIVE_AUDIO_CACHE_VERSION,
+        "status": status,
+        "totalChunks": len(manifest_chunks),
+        "readyChunks": ready_chunks,
+        "createdAt": now,
+        "updatedAt": now,
+        "chunks": manifest_chunks,
+    }
+
+
+def write_audio_manifest_local(book_id: str, payload: dict[str, Any]) -> None:
+    write_json(audio_manifest_file_path(book_id, payload["id"]), payload)
+
+
+def upsert_audio_manifest_sql(payload: dict[str, Any], uid: str) -> None:
+    with progress_store_cursor() as cur:
+        cur.execute(
+            """
+            insert into audio_manifests (
+                id, book_id, user_id, provider, voice, model, output_format,
+                narration_style, length_scale, sentence_silence, chunk_size,
+                grid_hash, cache_version, status, total_chunks, ready_chunks,
+                updated_at
+            )
+            values (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s, %s,
+                now()
+            )
+            on conflict (id) do update set
+                status = excluded.status,
+                total_chunks = excluded.total_chunks,
+                ready_chunks = excluded.ready_chunks,
+                updated_at = now()
+            """,
+            (
+                payload["id"], payload["bookId"], uid, payload["provider"], payload.get("voice"),
+                payload.get("model"), payload["outputFormat"], payload["narrationStyle"],
+                payload["lengthScale"], payload["sentenceSilence"], payload["chunkSize"],
+                payload["gridHash"], payload["cacheVersion"], payload["status"],
+                payload["totalChunks"], payload["readyChunks"],
+            ),
+        )
+        for chunk in payload["chunks"]:
+            cur.execute(
+                """
+                insert into audio_manifest_chunks (
+                    manifest_id, chunk_index, start_pos, end_pos, text_hash, cache_key,
+                    storage_key, status, duration, content_type, byte_length, updated_at
+                )
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                on conflict (manifest_id, chunk_index) do update set
+                    start_pos = excluded.start_pos,
+                    end_pos = excluded.end_pos,
+                    text_hash = excluded.text_hash,
+                    cache_key = excluded.cache_key,
+                    storage_key = excluded.storage_key,
+                    status = excluded.status,
+                    duration = excluded.duration,
+                    content_type = excluded.content_type,
+                    byte_length = excluded.byte_length,
+                    updated_at = now()
+                """,
+                (
+                    payload["id"], chunk["index"], chunk["start"], chunk["end"],
+                    chunk["textHash"], chunk["cacheKey"], chunk.get("storageKey"),
+                    chunk["status"], chunk.get("duration"), chunk.get("contentType"),
+                    chunk.get("byteLength"),
+                ),
+            )
+
+
+def ensure_audio_manifest_payload(book_id: str, request: AudioManifestRequest) -> dict[str, Any]:
+    payload = build_audio_manifest_payload(book_id, request)
+    if progress_store_configured():
+        upsert_audio_manifest_sql(payload, current_user_id())
+    else:
+        write_audio_manifest_local(book_id, payload)
+    return payload
+
+
+def mark_audio_manifest_chunk_ready(book_id: str, cache_key: str, *, duration: float | None, byte_length: int | None, content_type: str) -> None:
+    if progress_store_configured():
+        try:
+            with progress_store_cursor() as cur:
+                cur.execute(
+                    """
+                    update audio_manifest_chunks
+                    set status = 'ready',
+                        duration = %s,
+                        byte_length = %s,
+                        content_type = %s,
+                        updated_at = now()
+                    where cache_key = %s
+                    """,
+                    (duration, byte_length, content_type, cache_key),
+                )
+                cur.execute(
+                    """
+                    update audio_manifests m
+                    set ready_chunks = sub.ready_count,
+                        status = case
+                            when sub.total_count = 0 then 'empty'
+                            when sub.ready_count >= sub.total_count then 'ready'
+                            when sub.ready_count > 0 then 'partial'
+                            else 'pending'
+                        end,
+                        updated_at = now()
+                    from (
+                        select manifest_id,
+                               count(*) as total_count,
+                               count(*) filter (where status = 'ready') as ready_count
+                        from audio_manifest_chunks
+                        group by manifest_id
+                    ) sub
+                    where m.id = sub.manifest_id
+                      and exists (
+                          select 1 from audio_manifest_chunks c
+                          where c.manifest_id = m.id and c.cache_key = %s
+                      )
+                    """,
+                    (cache_key,),
+                )
+        except Exception:
+            logger.exception("Failed to update audio manifest readiness for book %s", book_id)
+        return
+
+    for manifest_path in book_live_audio_dir(book_id).glob(".audio-manifest-*.json"):
+        try:
+            payload = read_json(manifest_path)
+            changed = False
+            for chunk in payload.get("chunks", []):
+                if chunk.get("cacheKey") == cache_key:
+                    chunk["status"] = "ready"
+                    chunk["duration"] = duration
+                    chunk["byteLength"] = byte_length
+                    chunk["contentType"] = content_type
+                    changed = True
+            if changed:
+                ready = sum(1 for chunk in payload.get("chunks", []) if chunk.get("status") == "ready")
+                total = len(payload.get("chunks", []))
+                payload["readyChunks"] = ready
+                payload["status"] = audio_manifest_status(ready, total)
+                payload["updatedAt"] = utc_now()
+                write_json(manifest_path, payload)
+        except Exception:
+            logger.exception("Failed to update local audio manifest %s", manifest_path)
+
+
 def gemini_error_detail(response: httpx.Response) -> str:
     try:
         payload = response.json()
@@ -4768,6 +5158,18 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         if timing_storage_key:
             write_storage_json(timing_storage_key, timing_manifest)
 
+    duration = timing_manifest.get("duration") if timing_manifest else None
+    try:
+        mark_audio_manifest_chunk_ready(
+            book_id,
+            client_cache_key,
+            duration=duration,
+            byte_length=output_path.stat().st_size if output_path.exists() else None,
+            content_type="audio/wav",
+        )
+    except Exception:
+        logger.exception("Failed to mark live audio chunk ready in manifest for book %s", book_id)
+
     return {
         "provider": request.provider,
         "voice": chosen_voice,
@@ -4782,7 +5184,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         "end": request.end,
         "pageNumber": request.pageNumber,
         "cached": cached,
-        "duration": timing_manifest.get("duration") if timing_manifest else None,
+        "duration": duration,
         "cues": timing_manifest.get("cues", []) if timing_manifest else [],
     }
 
@@ -5809,6 +6211,16 @@ def create_live_audio(book_id: str, request: LiveAudioRequest) -> dict[str, Any]
         except Exception:
             detail = None
         raise HTTPException(status_code=400, detail=detail or str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/books/{book_id}/audio-manifest")
+def ensure_audio_manifest(book_id: str, request: AudioManifestRequest) -> dict[str, Any]:
+    try:
+        return ensure_audio_manifest_payload(book_id, request)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

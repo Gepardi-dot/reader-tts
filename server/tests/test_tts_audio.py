@@ -130,6 +130,100 @@ class TtsAudioTestCase(unittest.TestCase):
 
         self.assertNotEqual(first["cacheKey"], second["cacheKey"])
 
+    def test_audio_manifest_builds_chunk_grid_without_synthesizing(self) -> None:
+        book_text = (
+            "First sentence for narration. Second sentence follows with enough text to chunk. "
+            "Third sentence keeps going so the manifest has more than one planned audio chunk. "
+            "Fourth sentence adds a little more material for the sentence-aware grid."
+        )
+        live_audio_dir = self.tempdir / "manifest_audio"
+
+        with (
+            patch.object(server_app, "load_book_or_404", return_value={"id": "book-1"}),
+            patch.object(server_app, "read_book_text", return_value=book_text),
+            patch.object(server_app, "book_live_audio_dir", return_value=live_audio_dir),
+            patch.object(server_app, "book_storage_enabled", return_value=False),
+            patch.object(server_app, "progress_store_configured", return_value=False),
+            patch.object(
+                server_app,
+                "provider_details",
+                return_value={
+                    "id": "kokoro",
+                    "name": "Kokoro TTS",
+                    "available": True,
+                    "defaultVoice": "af_heart",
+                },
+            ),
+        ):
+            payload = server_app.ensure_audio_manifest_payload(
+                "book-1",
+                server_app.AudioManifestRequest(
+                    provider="kokoro",
+                    voice=None,
+                    length_scale=0.93,
+                    sentence_silence=0.38,
+                    chunk_size=150,
+                ),
+            )
+
+        self.assertEqual(payload["provider"], "kokoro")
+        self.assertEqual(payload["voice"], "af_heart")
+        self.assertEqual(payload["status"], "pending")
+        self.assertEqual(payload["readyChunks"], 0)
+        self.assertGreater(payload["totalChunks"], 1)
+        self.assertTrue(payload["chunks"][0]["cacheKey"].startswith(f"live-audio:v{server_app.LIVE_AUDIO_CACHE_VERSION}:"))
+        self.assertTrue((live_audio_dir / f".audio-manifest-{payload['id']}.json").exists())
+
+    def test_audio_manifest_marks_existing_chunk_ready(self) -> None:
+        book_text = "One complete narration chunk."
+        live_audio_dir = self.tempdir / "manifest_ready_audio"
+        provider = {
+            "id": "kokoro",
+            "name": "Kokoro TTS",
+            "available": True,
+            "defaultVoice": "af_heart",
+        }
+        chosen_voice, chosen_model = server_app.resolve_live_audio_voice_model("kokoro", provider, None, None)
+        identity = server_app.build_live_audio_cache_identity(
+            book_id="book-1",
+            provider_id="kokoro",
+            voice=chosen_voice,
+            model=chosen_model,
+            narration_style="",
+            length_scale=0.93,
+            sentence_silence=0.38,
+            start=0,
+            end=len(book_text),
+            canonical_text=server_app.normalize_highlight_text(book_text),
+        )
+        live_audio_dir.mkdir(parents=True, exist_ok=True)
+        write_demo_wav(live_audio_dir / identity["fileName"])
+
+        with (
+            patch.object(server_app, "load_book_or_404", return_value={"id": "book-1"}),
+            patch.object(server_app, "read_book_text", return_value=book_text),
+            patch.object(server_app, "book_live_audio_dir", return_value=live_audio_dir),
+            patch.object(server_app, "book_storage_enabled", return_value=False),
+            patch.object(server_app, "progress_store_configured", return_value=False),
+            patch.object(server_app, "provider_details", return_value=provider),
+        ):
+            payload = server_app.ensure_audio_manifest_payload(
+                "book-1",
+                server_app.AudioManifestRequest(
+                    provider="kokoro",
+                    voice=None,
+                    length_scale=0.93,
+                    sentence_silence=0.38,
+                    chunk_size=420,
+                ),
+            )
+
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["readyChunks"], 1)
+        self.assertEqual(payload["totalChunks"], 1)
+        self.assertEqual(payload["chunks"][0]["status"], "ready")
+        self.assertEqual(payload["chunks"][0]["cacheKey"], identity["cacheKey"])
+
 
 if __name__ == "__main__":
     unittest.main()
