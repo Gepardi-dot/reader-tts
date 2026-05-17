@@ -16,9 +16,10 @@ import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 import { getCachedDictionary, lookupStaticDictionary, putCachedDictionary } from '@/shared/storage/dictionaryCache'
 import {
   isModelReady,
-  synthesizeLocal,
+  synthesizeLocalStreaming,
   localKokoroCacheKey,
   LOCAL_KOKORO_CACHE_VERSION,
+  subscribeModelStatus,
 } from '@/shared/storage/modelCache'
 import {
   startRollingCache,
@@ -312,6 +313,43 @@ interface LocalKokoroBlob {
   cacheKey: string
 }
 
+const KOKORO_STREAM_URL = 'stream:kokoro'
+
+interface KokoroStreamState {
+  buffers: AudioBuffer[]
+  completed: boolean
+  error: boolean
+  waiters: Set<() => void>
+  cancel?: () => void
+}
+
+function audioBufferFromPcm(ctx: AudioContext, pcm: Float32Array, sampleRate: number): AudioBuffer {
+  const buffer = ctx.createBuffer(1, pcm.length, sampleRate)
+  buffer.copyToChannel(new Float32Array(pcm), 0)
+  return buffer
+}
+
+function notifyKokoroStream(stream: KokoroStreamState) {
+  const waiters = Array.from(stream.waiters)
+  stream.waiters.clear()
+  for (const wake of waiters) {
+    try { wake() } catch { /* listener fault should not break playback */ }
+  }
+}
+
+function waitForKokoroStreamBuffer(stream: KokoroStreamState, index: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted || stream.buffers[index] || stream.completed || stream.error) return Promise.resolve()
+  return new Promise((resolve) => {
+    const wake = () => {
+      stream.waiters.delete(wake)
+      signal.removeEventListener('abort', wake)
+      resolve()
+    }
+    stream.waiters.add(wake)
+    signal.addEventListener('abort', wake, { once: true })
+  })
+}
+
 async function synthesizeKokoroLocal(
   text: string,
   voice: string,
@@ -332,7 +370,24 @@ async function synthesizeKokoroLocal(
   notePlaybackFetchStart()
   let result
   try {
-    result = await synthesizeLocal(text, voice, speed)
+    result = await new Promise<{
+      wav: ArrayBuffer
+      sampleRate: number
+      durationSec: number
+    } | null>((resolve) => {
+      const handle = synthesizeLocalStreaming(text, voice, speed, {
+        onComplete: (res) => resolve(res),
+        onError: () => resolve(null),
+      })
+      if (!handle) {
+        resolve(null)
+        return
+      }
+      signal.addEventListener('abort', () => {
+        try { handle.cancel() } catch { /* best effort */ }
+        resolve(null)
+      }, { once: true })
+    })
   } finally {
     notePlaybackFetchEnd()
   }
@@ -2516,6 +2571,7 @@ interface AudioChunk {
   url: string | null
   buffer: AudioBuffer | null
   status: ChunkStatus
+  stream?: KokoroStreamState
   cues?: LiveAudioCue[]
   tapOffset?: number  // char offset to seek to on first chunk (grid-aligned playback)
 }
@@ -3373,6 +3429,47 @@ export function ReaderRoute() {
     })
   }, [bookId, payload?.text, effectiveTtsProvider, effectiveTtsVoice])
 
+  // Kokoro should be ready before the user presses play. Start the in-browser
+  // rolling cache automatically as soon as the ONNX model is warm, prioritizing
+  // the current reading position.
+  useEffect(() => {
+    if (!bookId || !payload?.text || effectiveTtsProvider !== 'kokoro' || !effectiveTtsVoice) return
+
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let unsubscribe: (() => void) | null = null
+
+    const tryStart = () => {
+      if (stopped) return
+      if (commitVoiceForBook()) {
+        if (timer) {
+          clearTimeout(timer)
+          timer = null
+        }
+        unsubscribe?.()
+        unsubscribe = null
+        return
+      }
+      if (!timer) {
+        timer = setTimeout(() => {
+          timer = null
+          tryStart()
+        }, 1500)
+      }
+    }
+
+    tryStart()
+    unsubscribe = subscribeModelStatus((state) => {
+      if (state.status === 'ready') tryStart()
+    })
+
+    return () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+      unsubscribe?.()
+    }
+  }, [bookId, payload?.text, effectiveTtsProvider, effectiveTtsVoice, commitVoiceForBook])
+
   // Background warmup — fire as soon as a local provider is selected so the model is
   // loaded by the time the user opens the audio sheet. Fire-and-forget, no UI blocking.
   useEffect(() => {
@@ -3504,6 +3601,16 @@ export function ReaderRoute() {
         FIRST_AUDIO_CHARS[effectiveTtsProvider] ?? DEFAULT_FIRST_AUDIO_CHARS,
       ).slice(0, PREFETCH_CHUNK_LIMIT)
       if (chunkDefs.length === 0) return
+
+      if (effectiveTtsProvider === 'kokoro' && isModelReady() && effectiveTtsVoice) {
+        const localSpeed = lengthScale > 0 ? 1 / lengthScale : 1
+        void Promise.all(chunkDefs.map((chunk) =>
+          synthesizeKokoroLocal(chunk.text, effectiveTtsVoice, localSpeed, ctrl.signal)
+            .then(() => null)
+            .catch(() => null)
+        ))
+        return
+      }
 
       // Prefetch chunks in parallel - by the time the user hits play they're persisted locally.
       void Promise.all(chunkDefs.map((chunk) =>
@@ -3776,6 +3883,12 @@ export function ReaderRoute() {
     if (!ctx || ctx.state === 'closed' || !source || !ctrl || ctrl.signal.aborted || !chunk?.url) {
       return
     }
+    if (chunk.url === KOKORO_STREAM_URL) {
+      // Streaming Kokoro chunks have no seekable media URL yet. Let the active
+      // Web Audio buffer finish at 1.0x; the next cache miss will synthesize a
+      // full WAV if the user keeps a non-1.0 rate.
+      return
+    }
 
     // Current Web Audio source plays at unchanged rate 1.0, so wall-clock
     // elapsed equals buffer-time elapsed.
@@ -3989,6 +4102,111 @@ export function ReaderRoute() {
     showAudioFollow(startOffset, endOffset, follow)
   }
 
+  function streamKokoroAudioChunk(
+    idx: number,
+    chunk: AudioChunk,
+    signal: AbortSignal,
+    voice: string,
+    speed: number,
+    cacheKey: string,
+  ): Promise<string | null> {
+    const ctx = wordAudioCtxRef.current
+    if (!ctx || ctx.state === 'closed') return Promise.resolve(null)
+
+    return new Promise((resolve) => {
+      const stream: KokoroStreamState = {
+        buffers: [],
+        completed: false,
+        error: false,
+        waiters: new Set(),
+      }
+      let resolved = false
+      let playbackFetchEnded = false
+
+      const resolveOnce = (value: string | null) => {
+        if (resolved) return
+        resolved = true
+        resolve(value)
+      }
+      const endPlaybackFetch = () => {
+        if (playbackFetchEnded) return
+        playbackFetchEnded = true
+        notePlaybackFetchEnd()
+      }
+
+      updateWordAudioChunk(idx, { stream })
+      notePlaybackFetchStart()
+
+      const handle = synthesizeLocalStreaming(chunk.text, voice, speed, {
+        onChunk: (pcm, sampleRate) => {
+          if (signal.aborted) return
+          const currentCtx = wordAudioCtxRef.current
+          if (!currentCtx || currentCtx.state === 'closed') return
+          const buffer = audioBufferFromPcm(currentCtx, pcm, sampleRate)
+          stream.buffers.push(buffer)
+          if (stream.buffers.length === 1) {
+            updateWordAudioChunk(idx, {
+              status: 'ready',
+              url: KOKORO_STREAM_URL,
+              buffer,
+              stream,
+              cues: [],
+            })
+            prefetchWordAudioAhead(wordAudioCurIdxRef.current, wordAudioChunksRef.current, signal)
+            resolveOnce(KOKORO_STREAM_URL)
+          } else {
+            updateWordAudioChunk(idx, { stream })
+          }
+          notifyKokoroStream(stream)
+        },
+        onComplete: async (result) => {
+          endPlaybackFetch()
+          stream.completed = true
+          notifyKokoroStream(stream)
+          if (!signal.aborted) {
+            try {
+              const blob = new Blob([result.wav], { type: 'audio/wav' })
+              await putCachedAudio({
+                cacheKey,
+                cacheVersion: LOCAL_KOKORO_CACHE_VERSION,
+                blob,
+                cues: [],
+                duration: result.durationSec,
+                contentType: 'audio/wav',
+                byteLength: blob.size,
+              })
+            } catch { /* cache write failures are non-fatal */ }
+          }
+          resolveOnce(stream.buffers.length ? KOKORO_STREAM_URL : null)
+        },
+        onError: () => {
+          endPlaybackFetch()
+          stream.error = true
+          notifyKokoroStream(stream)
+          updateWordAudioChunk(idx, { status: 'error' })
+          resolveOnce(null)
+        },
+      })
+
+      if (!handle) {
+        endPlaybackFetch()
+        stream.error = true
+        notifyKokoroStream(stream)
+        resolveOnce(null)
+        return
+      }
+
+      stream.cancel = handle.cancel
+      signal.addEventListener('abort', () => {
+        try { handle.cancel() } catch { /* best effort */ }
+        endPlaybackFetch()
+        stream.error = true
+        notifyKokoroStream(stream)
+        resolveOnce(null)
+      }, { once: true })
+    })
+  }
+
   async function fetchWordAudioChunk(idx: number, chunk: AudioChunk, signal: AbortSignal): Promise<string | null> {
     const existingChunk = wordAudioChunksRef.current[idx]
     if (existingChunk?.url) return existingChunk.url
@@ -4025,6 +4243,17 @@ export function ReaderRoute() {
         if (effectiveTtsProvider === 'kokoro' && isModelReady() && effectiveTtsVoice) {
           const { lengthScale: localLs } = pacingFor('kokoro')
           const localSpeed = localLs > 0 ? 1 / localLs : 1
+          const cacheKey = await localKokoroCacheKey(effectiveTtsVoice, localSpeed, chunk.text)
+          if (signal.aborted) return null
+
+          const hit = await getCachedAudio(cacheKey, LOCAL_KOKORO_CACHE_VERSION).catch(() => null)
+          if (hit) return finalizeBlob(hit.blob, (hit.cues ?? []) as LiveAudioCue[])
+
+          if (audioRateRef.current === 1.0) {
+            const streamed = await streamKokoroAudioChunk(idx, chunk, signal, effectiveTtsVoice, localSpeed, cacheKey)
+            if (streamed) return streamed
+          }
+
           const local = await synthesizeKokoroLocal(chunk.text, effectiveTtsVoice, localSpeed, signal)
           if (signal.aborted) return null
           if (local) return finalizeBlob(local.blob, [])
@@ -4134,6 +4363,82 @@ export function ReaderRoute() {
     playWordAudioChunkAt(nextIdx, wordAudioChunksRef.current, ctrl, word)
   }
 
+  function playWordAudioStreamBufferAt(
+    idx: number,
+    streamIndex: number,
+    currentChunks: AudioChunk[],
+    ctrl: AbortController,
+    word: string,
+  ) {
+    const chunk = currentChunks[idx]
+    const stream = chunk?.stream
+    const ctx = wordAudioCtxRef.current
+    if (!chunk || !stream || !ctx || ctx.state === 'closed') return
+
+    const buffer = stream.buffers[streamIndex]
+    if (!buffer) {
+      if (stream.completed || stream.error) {
+        void continueWordAudioPlayback(idx + 1, ctrl, word)
+        return
+      }
+      setWordAudio({ word, status: 'loading' })
+      void waitForKokoroStreamBuffer(stream, streamIndex, ctrl.signal).then(() => {
+        if (ctrl.signal.aborted) return
+        playWordAudioStreamBufferAt(idx, streamIndex, wordAudioChunksRef.current, ctrl, word)
+      })
+      return
+    }
+
+    stopWordAudioCueRAF()
+    wordAudioCurIdxRef.current = idx
+    setWordAudioCurIdx(idx)
+    setWordAudio({ word, status: 'playing' })
+    prefetchWordAudioAhead(idx, currentChunks, ctrl.signal)
+
+    if (ctx.state === 'suspended') void ctx.resume()
+
+    try {
+      if (wordAudioSourceRef.current) {
+        wordAudioSourceRef.current.onended = null
+        wordAudioSourceRef.current.disconnect()
+      }
+    } catch { /* ignore */ }
+    wordAudioRef.current?.pause()
+    wordAudioRef.current = null
+
+    const source = ctx.createBufferSource()
+    source.buffer = buffer
+    source.connect(ctx.destination)
+    wordAudioSourceRef.current = source
+
+    wordAudioChunkSeekRef.current = 0
+    const now = ctx.currentTime
+    const startAt = Math.max(now + 0.002, wordAudioScheduledEndRef.current)
+    source.start(startAt)
+    wordAudioScheduledEndRef.current = startAt + buffer.duration
+    wordAudioChunkStartRef.current = startAt
+    syncAudioFollowCue(chunk, 0, true)
+    startWordAudioCueRAF()
+
+    source.onended = () => {
+      if (ctrl.signal.aborted) return
+      stopWordAudioCueRAF()
+      const nextStreamIndex = streamIndex + 1
+      if (stream.buffers[nextStreamIndex]) {
+        playWordAudioStreamBufferAt(idx, nextStreamIndex, wordAudioChunksRef.current, ctrl, word)
+        return
+      }
+      if (!stream.completed && !stream.error) {
+        void waitForKokoroStreamBuffer(stream, nextStreamIndex, ctrl.signal).then(() => {
+          if (ctrl.signal.aborted) return
+          playWordAudioStreamBufferAt(idx, nextStreamIndex, wordAudioChunksRef.current, ctrl, word)
+        })
+        return
+      }
+      void continueWordAudioPlayback(idx + 1, ctrl, word)
+    }
+  }
+
   function playWordAudioChunkAt(idx: number, currentChunks: AudioChunk[], ctrl: AbortController, word: string) {
     const chunk = currentChunks[idx]
     if (!chunk?.url) return
@@ -4145,6 +4450,35 @@ export function ReaderRoute() {
     prefetchWordAudioAhead(idx, currentChunks, ctrl.signal)
 
     const ctx = wordAudioCtxRef.current
+    if (chunk.url === KOKORO_STREAM_URL && audioRateRef.current !== 1.0) {
+      updateWordAudioChunk(idx, {
+        status: 'idle',
+        url: null,
+        buffer: null,
+        stream: undefined,
+      })
+      setWordAudio({ word, status: 'loading' })
+      void fetchWordAudioChunk(idx, wordAudioChunksRef.current[idx], ctrl.signal).then((url) => {
+        if (ctrl.signal.aborted) return
+        if (!url) {
+          stopWordAudio()
+          return
+        }
+        playWordAudioChunkAt(idx, wordAudioChunksRef.current, ctrl, word)
+      })
+      return
+    }
+    if (
+      chunk.url === KOKORO_STREAM_URL &&
+      audioRateRef.current === 1.0 &&
+      ctx &&
+      ctx.state !== 'closed' &&
+      chunk.stream
+    ) {
+      playWordAudioStreamBufferAt(idx, 0, currentChunks, ctrl, word)
+      return
+    }
+
     // Web Audio path is gapless but its AudioBufferSourceNode shifts pitch
     // when playbackRate changes (chipmunk effect). Restrict it to exactly 1.0×
     // and route any non-1.0 rate through HTMLAudio (which preserves pitch).
@@ -4231,7 +4565,7 @@ export function ReaderRoute() {
     const start = Math.max(0, Math.min(startOffset, fullText.length))
 
     let initial: AudioChunk[]
-    const grid = effectiveTtsProvider === 'kokoro' ? presynthGridRef.current : null
+    const grid = effectiveTtsProvider === 'kokoro' && !isModelReady() ? presynthGridRef.current : null
     if (grid && grid.length > 0) {
       // Use the pre-computed word-boundary grid so every chunk is a cache hit
       const chunkIdx = findGridChunk(grid, start)
