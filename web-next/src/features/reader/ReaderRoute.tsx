@@ -2620,6 +2620,7 @@ function AudioContent({
   const abortRef    = useRef<AbortController | null>(null)
   const audioObjectUrlsRef = useRef<Set<string>>(new Set())
   const chunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
+  const primedAudioRef = useRef<HTMLAudioElement | null>(null)
   rateRef.current   = rate
   chunksRef.current = chunks
 
@@ -2635,6 +2636,7 @@ function AudioContent({
   useEffect(() => () => {
     abortRef.current?.abort()
     audioRef.current?.pause()
+    primedAudioRef.current = null
     chunkFetchesRef.current.clear()
     revokeAudioObjectUrls()
   }, [])
@@ -2771,6 +2773,7 @@ function AudioContent({
     audio.muted = true
     audio.loop = false
     audio.src = SILENT_WAV_DATA_URL
+    primedAudioRef.current = audio
     const playPromise = audio.play()
     if (playPromise && typeof playPromise.then === 'function') {
       playPromise.catch(() => undefined)
@@ -2783,12 +2786,14 @@ function AudioContent({
     if (!c?.url) return
 
     const audio = audioRef.current ?? new Audio()
-    audio.pause()
+    const wasPrimedForThisTap = primedAudioRef.current === audio
+    if (!wasPrimedForThisTap) audio.pause()
     audio.src = c.url
     audio.muted = false
     audio.preservesPitch = true
     audio.playbackRate = rateRef.current
     audioRef.current  = audio
+    primedAudioRef.current = null
     setPhase('playing')
     setCurIdx(idx)
     curIdxRef.current = idx
@@ -2817,7 +2822,10 @@ function AudioContent({
 
   async function startPlayback() {
     abortRef.current?.abort()
-    audioRef.current?.pause()
+    const primedAudio = primedAudioRef.current
+    if (audioRef.current && audioRef.current !== primedAudio) {
+      audioRef.current.pause()
+    }
     revokeAudioObjectUrls()
     chunkFetchesRef.current.clear()
     const ctrl = new AbortController()
@@ -2852,6 +2860,7 @@ function AudioContent({
   function stopPlayback() {
     abortRef.current?.abort()
     audioRef.current?.pause()
+    primedAudioRef.current = null
     revokeAudioObjectUrls()
     chunkFetchesRef.current.clear()
     setPhase('idle')
