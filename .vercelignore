@@ -7,7 +7,7 @@ web-next/node_modules/
 web/dist/
 web-rewrite/dist/
 web-next/dist/
-public/
+/public/
 
 # Local data / virtual envs
 /library/
