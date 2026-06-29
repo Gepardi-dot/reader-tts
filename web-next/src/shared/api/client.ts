@@ -13,8 +13,8 @@ function getToken() {
 
 async function readSessionToken() {
   if (typeof window === 'undefined') return getToken()
-  const { supabase } = await import('@/lib/supabase')
-  const { data } = await supabase.auth.getSession()
+  const { getAuthSession } = await import('@/lib/authSession')
+  const { data } = await getAuthSession()
   const token = data.session?.access_token ?? ''
   if (token !== _cachedToken) {
     setCachedToken(token)
@@ -24,8 +24,8 @@ async function readSessionToken() {
 
 async function refreshSessionToken(previousToken: string) {
   if (typeof window === 'undefined') return previousToken
-  const { supabase } = await import('@/lib/supabase')
-  const { data, error } = await supabase.auth.refreshSession()
+  const { refreshAuthSession } = await import('@/lib/authSession')
+  const { data, error } = await refreshAuthSession()
   if (error) {
     setCachedToken('')
     return ''

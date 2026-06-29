@@ -9,11 +9,17 @@ import { UploadRoute } from '@/features/library/UploadRoute'
 import { AudioSettingsRoute } from '@/features/reader/AudioSettingsRoute'
 import { ProgressRoute } from '@/features/progress/ProgressRoute'
 import { LoginRoute } from '@/features/auth/LoginRoute'
-import { supabase } from '@/lib/supabase'
+import { getAuthSession } from '@/lib/authSession'
 
 async function requireAuth() {
-  const { data } = await supabase.auth.getSession()
-  if (!data.session) throw redirect('/login')
+  try {
+    const { data } = await getAuthSession()
+    if (!data.session) throw redirect('/login')
+  } catch (error) {
+    if (error instanceof Response) throw error
+    console.warn('[auth] Failed to read session before route load.', error)
+    throw redirect('/login')
+  }
   return null
 }
 

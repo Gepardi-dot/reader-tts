@@ -1741,16 +1741,16 @@ async function streamSSE(
   onDelta: (d: string) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  const { supabase } = await import('@/lib/supabase')
+  const { getAuthSession, refreshAuthSession } = await import('@/lib/authSession')
   const base = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
   const target = url.startsWith('http') ? url : `${base}${url}`
 
   async function getToken(forceRefresh: boolean): Promise<string> {
     if (forceRefresh) {
-      const { data } = await supabase.auth.refreshSession()
+      const { data } = await refreshAuthSession()
       return data.session?.access_token ?? ''
     }
-    const { data } = await supabase.auth.getSession()
+    const { data } = await getAuthSession()
     return data.session?.access_token ?? ''
   }
 

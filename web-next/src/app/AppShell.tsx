@@ -3,6 +3,7 @@ import { SquarePen, Type, TrendingUp, LogOut, Sparkles, Library } from 'lucide-r
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
+import { getAuthSession } from '@/lib/authSession'
 import { api } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
 
@@ -63,8 +64,10 @@ export function AppShell() {
   const [userEmail, setUserEmail] = useState<string | null>(null)
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
+    getAuthSession().then(({ data }) => {
       setUserEmail(data.session?.user.email ?? null)
+    }).catch((error) => {
+      console.warn('[auth] Failed to read current user email.', error)
     })
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
       setUserEmail(session?.user.email ?? null)

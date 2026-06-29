@@ -7,6 +7,7 @@ import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client
 import { createSyncStoragePersister } from '@tanstack/query-sync-storage-persister'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { supabase } from '@/lib/supabase'
+import { getAuthSession } from '@/lib/authSession'
 import { setCachedToken } from '@/shared/api/client'
 import { setAudioCacheUserId } from '@/shared/storage/audioCache'
 import { setDictionaryCacheUserId } from '@/shared/storage/dictionaryCache'
@@ -62,13 +63,15 @@ supabase.auth.onAuthStateChange((_event, session) => {
 })
 
 // Restore token from existing session on app start (before any render)
-supabase.auth.getSession().then(({ data }) => {
+getAuthSession().then(({ data }) => {
   if (data.session?.access_token) {
     activeUserId = data.session.user.id
     void setAudioCacheUserId(data.session.user.id)
     void setDictionaryCacheUserId(data.session.user.id)
     setCachedToken(data.session.access_token)
   }
+}).catch((error) => {
+  console.warn('[auth] Failed to restore Supabase session.', error)
 })
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
