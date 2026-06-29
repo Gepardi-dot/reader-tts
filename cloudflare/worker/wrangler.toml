@@ -10,5 +10,4 @@ APP_NAME = "reader-tts"
 [[d1_databases]]
 binding = "DB"
 database_name = "reader_tts"
-# Replace after `wrangler d1 create reader_tts`.
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "c58a5509-40d7-439a-8bfb-42b8d990a245"

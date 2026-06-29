@@ -40,7 +40,7 @@ class ApiError extends Error {
 }
 
 const encoder = new TextEncoder()
-const PASSWORD_ITERATIONS = 180_000
+const PASSWORD_ITERATIONS = 100_000
 const DEFAULT_SESSION_DAYS = 30
 
 export default {
@@ -287,7 +287,7 @@ async function verifyPassword(password: string, encoded: string) {
   const [scheme, iterationRaw, saltRaw, digestRaw] = encoded.split('$')
   if (scheme !== 'pbkdf2-sha256') return false
   const iterations = Number(iterationRaw)
-  if (!Number.isFinite(iterations) || iterations < 100_000) return false
+  if (!Number.isFinite(iterations) || iterations < PASSWORD_ITERATIONS) return false
   const expected = base64UrlToBytes(digestRaw)
   const actual = await pbkdf2(password, base64UrlToBytes(saltRaw), iterations)
   return timingSafeEqual(actual, expected)
