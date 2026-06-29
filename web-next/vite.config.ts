@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
+const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? 'http://127.0.0.1:8787'
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -23,8 +25,8 @@ export default defineConfig({
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
     proxy: {
-      '/api': 'http://127.0.0.1:8000',
-      '/library': 'http://127.0.0.1:8000',
+      '/api': apiProxyTarget,
+      '/library': apiProxyTarget,
     },
   },
 })

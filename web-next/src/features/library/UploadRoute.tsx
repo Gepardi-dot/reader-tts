@@ -5,7 +5,7 @@ import { Upload, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { AuthError, BOOK_ACCEPT, isSupportedBookFile, uploadBook } from '@/shared/api/client'
-import { supabase } from '@/lib/supabase'
+import { signOut } from '@/lib/auth'
 import {
   getModelStatus,
   subscribeModelStatus,
@@ -42,7 +42,7 @@ export function UploadRoute() {
       navigate(`/book/${book.id}`)
     } catch (e) {
       if (e instanceof AuthError) {
-        await supabase.auth.signOut()
+        await signOut()
         navigate('/login', { replace: true })
         return
       }

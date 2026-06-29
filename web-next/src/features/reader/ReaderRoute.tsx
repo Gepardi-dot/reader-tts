@@ -1741,18 +1741,9 @@ async function streamSSE(
   onDelta: (d: string) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  const { getAuthSession, refreshAuthSession } = await import('@/lib/authSession')
+  const { getStoredAuthToken } = await import('@/lib/auth')
   const base = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? ''
   const target = url.startsWith('http') ? url : `${base}${url}`
-
-  async function getToken(forceRefresh: boolean): Promise<string> {
-    if (forceRefresh) {
-      const { data } = await refreshAuthSession()
-      return data.session?.access_token ?? ''
-    }
-    const { data } = await getAuthSession()
-    return data.session?.access_token ?? ''
-  }
 
   async function fire(token: string) {
     return fetch(target, {
@@ -1766,12 +1757,8 @@ async function streamSSE(
     })
   }
 
-  let token = await getToken(false)
-  let res = await fire(token)
-  if (res.status === 401) {
-    token = await getToken(true)
-    res = await fire(token)
-  }
+  const token = getStoredAuthToken()
+  const res = await fire(token)
 
   if (!res.ok) {
     const raw = await res.text()

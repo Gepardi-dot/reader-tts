@@ -1,6 +1,6 @@
 export class AuthError extends Error {}
 
-// Cached JWT, kept fresh by the Supabase auth state listener in main.tsx
+// Cached bearer token, kept fresh by the custom auth client.
 let _cachedToken = ''
 
 export function setCachedToken(token: string) {
@@ -13,9 +13,8 @@ function getToken() {
 
 async function readSessionToken() {
   if (typeof window === 'undefined') return getToken()
-  const { getAuthSession } = await import('@/lib/authSession')
-  const { data } = await getAuthSession()
-  const token = data.session?.access_token ?? ''
+  const { getStoredAuthToken } = await import('@/lib/auth')
+  const token = getStoredAuthToken()
   if (token !== _cachedToken) {
     setCachedToken(token)
   }
@@ -23,18 +22,7 @@ async function readSessionToken() {
 }
 
 async function refreshSessionToken(previousToken: string) {
-  if (typeof window === 'undefined') return previousToken
-  const { refreshAuthSession } = await import('@/lib/authSession')
-  const { data, error } = await refreshAuthSession()
-  if (error) {
-    setCachedToken('')
-    return ''
-  }
-  const token = data.session?.access_token ?? ''
-  if (token !== _cachedToken) {
-    setCachedToken(token)
-  }
-  return token
+  return previousToken
 }
 
 function configuredApiOrigin() {
@@ -107,19 +95,8 @@ export async function requestBlob(
   return res.blob()
 }
 
-function isLocalHostname(hostname: string) {
-  return (
-    hostname === 'localhost' ||
-    hostname === '127.0.0.1' ||
-    hostname === '0.0.0.0' ||
-    hostname === '::1' ||
-    hostname.endsWith('.local')
-  )
-}
-
 function shouldUseDirectBookUpload() {
-  if (typeof window === 'undefined') return false
-  return !isLocalHostname(window.location.hostname)
+  return import.meta.env.VITE_ENABLE_DIRECT_UPLOAD === 'true'
 }
 
 export const BOOK_ACCEPT = [

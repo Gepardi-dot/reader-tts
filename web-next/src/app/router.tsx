@@ -9,12 +9,12 @@ import { UploadRoute } from '@/features/library/UploadRoute'
 import { AudioSettingsRoute } from '@/features/reader/AudioSettingsRoute'
 import { ProgressRoute } from '@/features/progress/ProgressRoute'
 import { LoginRoute } from '@/features/auth/LoginRoute'
-import { getAuthSession } from '@/lib/authSession'
+import { restoreSession } from '@/lib/auth'
 
 async function requireAuth() {
   try {
-    const { data } = await getAuthSession()
-    if (!data.session) throw redirect('/login')
+    const user = await restoreSession()
+    if (!user) throw redirect('/login')
   } catch (error) {
     if (error instanceof Response) throw error
     console.warn('[auth] Failed to read session before route load.', error)

@@ -2,8 +2,7 @@ import { NavLink, Outlet, Link, useLocation, useNavigate } from 'react-router-do
 import { SquarePen, Type, TrendingUp, LogOut, Sparkles, Library } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { supabase } from '@/lib/supabase'
-import { getAuthSession } from '@/lib/authSession'
+import { getStoredUser, signOut, subscribeAuth } from '@/lib/auth'
 import { api } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
 
@@ -61,18 +60,10 @@ export function AppShell() {
   const location = useLocation()
   const navigate = useNavigate()
   const isReader = location.pathname.startsWith('/book/')
-  const [userEmail, setUserEmail] = useState<string | null>(null)
+  const [userEmail, setUserEmail] = useState<string | null>(() => getStoredUser()?.email ?? null)
 
   useEffect(() => {
-    getAuthSession().then(({ data }) => {
-      setUserEmail(data.session?.user.email ?? null)
-    }).catch((error) => {
-      console.warn('[auth] Failed to read current user email.', error)
-    })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
-      setUserEmail(session?.user.email ?? null)
-    })
-    return () => subscription.unsubscribe()
+    return subscribeAuth((user) => setUserEmail(user?.email ?? null))
   }, [])
 
   const { data: books = [] } = useQuery({
@@ -98,7 +89,7 @@ export function AppShell() {
   const dueCount = decks.reduce((sum, d) => sum + (d.dueNow ?? 0), 0)
 
   async function handleSignOut() {
-    await supabase.auth.signOut()
+    await signOut()
     navigate('/login', { replace: true })
   }
 

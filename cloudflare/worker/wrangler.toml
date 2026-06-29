@@ -1,0 +1,14 @@
+name = "reader-tts-api"
+main = "src/index.ts"
+compatibility_date = "2026-06-29"
+
+[vars]
+APP_NAME = "reader-tts"
+# Set this before production deploy:
+# wrangler secret put SIGNUP_INVITE_CODE --config cloudflare/worker/wrangler.toml
+
+[[d1_databases]]
+binding = "DB"
+database_name = "reader_tts"
+# Replace after `wrangler d1 create reader_tts`.
+database_id = "00000000-0000-0000-0000-000000000000"
