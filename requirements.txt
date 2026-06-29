@@ -10,7 +10,11 @@ python-dotenv
 python-multipart
 pypdf
 pymupdf
-pdfplumber
+# Optional local fallback for unusual PDFs. Do not install on Vercel by default:
+# it pulls in Pillow/pdfminer/pypdfium2/cryptography and can push the Python
+# function bundle over Vercel's size limit. pdf_to_audio.py falls back to pypdf
+# when this import is unavailable.
+# pdfplumber
 psycopg[binary]>=3.2,<4
 # sentry-sdk[fastapi]>=2.0,<3  — excluded: Vercel Lambda is at the 245 MB size limit.
 # To enable Sentry on Vercel, add it via Vercel's native Sentry integration instead
