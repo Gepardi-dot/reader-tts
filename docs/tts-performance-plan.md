@@ -42,4 +42,5 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - 2026-06-30: PR #10 added Gemini TTS provider support in the Worker.
 - 2026-06-30: R2 bucket creation failed with Cloudflare `10042`; R2 must be enabled in the Cloudflare dashboard before a bucket can be created.
 - 2026-06-30: PR #11 deployed Worker Cache API chunk caching for Gemini live-audio responses. This gives repeat-request wins without extra account setup, but it is not a durable replacement for R2.
-- Next: enable R2 in the Cloudflare dashboard, add `GEMINI_API_KEY` as a Worker secret, and run real Gemini cache-hit smoke tests.
+- 2026-06-30: Added a tested frontend startup policy so Gemini/cloud playback starts browser speech immediately while native chunks fetch, then switches at chunk boundaries when native audio is ready.
+- Next: enable R2 in the Cloudflare dashboard, add `GEMINI_API_KEY` as a Worker secret, run real Gemini cache-hit smoke tests, then continue extracting timing-sensitive playback scheduling out of `ReaderRoute.tsx`.

@@ -32,6 +32,23 @@ import {
   type RollingCacheState,
 } from '@/shared/storage/rollingVoiceCache'
 import { cn } from '@/lib/utils'
+import {
+  AUDIO_SLICE_CHARS,
+  BROWSER_TTS_PROVIDER_ID,
+  CHUNK_CHARS,
+  DEFAULT_AUDIO_CHARS,
+  DEFAULT_FIRST_AUDIO_CHARS,
+  DEFAULT_PREFETCH_AHEAD,
+  FIRST_AUDIO_CHARS,
+  PREFETCH_AHEAD_TARGET,
+  PREFETCH_CHUNK_LIMIT,
+  audioSliceStart,
+  buildAudioChunks,
+  buildPlaybackStartupPlan,
+  findGridChunk,
+  isChunking,
+  pacingFor,
+} from './audioPlayback'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -176,7 +193,6 @@ const THEMES    = {
   dark:  { bg: '#1a1a18', text: '#e8e6e1', bar: 'rgba(26,26,24,0.92)'   },
 }
 
-const BROWSER_TTS_PROVIDER_ID = 'browser'
 const BROWSER_TTS_PROVIDER: TtsProviderInfo = {
   id: BROWSER_TTS_PROVIDER_ID,
   name: 'Browser speech',
@@ -192,23 +208,7 @@ const TTS_PROVIDERS = [
   { id: 'google', label: 'Gemini Flash (cloud)' },
 ]
 
-// Streaming-style playback: keep the first request small so audio can start quickly,
-// then synthesize larger follow-up chunks while the first chunk is playing.
-const FIRST_AUDIO_CHARS: Record<string, number> = {
-  google: 240,
-  kokoro:  65,
-}
-
-const CHUNK_CHARS: Record<string, number> = {
-  google: 420,
-  kokoro: 420,
-}
-
-const DEFAULT_FIRST_AUDIO_CHARS = 180
-const DEFAULT_AUDIO_CHARS = 800
-const PREFETCH_CHUNK_LIMIT = 3
 const LIVE_AUDIO_MEMORY_TTL_MS = 10 * 60_000
-const AUDIO_SLICE_CHARS = 2200
 const PROVIDER_PREVIEW_TEXT = (
   'When the room quieted, the story finally found its rhythm. '
   + 'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
@@ -219,25 +219,6 @@ const PROVIDER_PREVIEW_TEXT = (
 // the audio element on iOS Safari and Chrome mobile for later async-loaded
 // content.
 const SILENT_WAV_DATA_URL = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
-
-// How many chunks to fire in parallel right when playback begins.
-// The first chunk we'll await before starting audio; the rest stream in the background.
-const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
-  google: 2,
-  kokoro: 2,
-}
-
-// How many ready chunks we wait for before pressing play. Set to 1 everywhere
-// so audio starts the instant the first slice is decoded.
-const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
-  kokoro: 1,
-}
-
-// Rolling window of chunks we keep in flight ahead of the cursor while playing.
-const PREFETCH_AHEAD_TARGET: Record<string, number> = {
-  kokoro: 3,
-}
-const DEFAULT_PREFETCH_AHEAD = 2
 
 const liveAudioMemoryCache = new Map<string, { expiresAt: number; promise: Promise<LiveAudioResult> }>()
 
@@ -326,8 +307,6 @@ interface LocalKokoroBlob {
 }
 
 const KOKORO_STREAM_URL = 'stream:kokoro'
-const BROWSER_SPEECH_URL = 'speech:browser'
-
 interface KokoroStreamState {
   buffers: AudioBuffer[]
   completed: boolean
@@ -418,23 +397,6 @@ async function synthesizeKokoroLocal(
   }).catch(() => { /* cache write failures are non-fatal */ })
 
   return { blob, duration: result.durationSec, cacheKey }
-}
-
-function audioSliceStart(textLength: number, scrollPct: number) {
-  if (textLength <= 0) return 0
-  const rawStart = Math.round(scrollPct * textLength) - 200
-  const maxStart = Math.max(0, textLength - AUDIO_SLICE_CHARS)
-  return Math.max(0, Math.min(rawStart, maxStart))
-}
-
-// Provider-tuned pacing
-function pacingFor(provider: string): { lengthScale: number; sentenceSilence: number } {
-  if (provider === 'kokoro') return { lengthScale: 0.93, sentenceSilence: 0.38 }
-  return { lengthScale: 1.0, sentenceSilence: 0.20 }
-}
-
-function isChunking(provider: string): boolean {
-  return provider in CHUNK_CHARS
 }
 
 const HIGHLIGHT_COLORS = [
@@ -2530,72 +2492,6 @@ function AppearanceContent({ appearance, onChange }: {
 
 // ── Audio Content ─────────────────────────────────────────────────────────────
 
-// ── Audio chunk helpers ───────────────────────────────────────────────────────
-
-/**
- * Split text into chunks at sentence boundaries.
- * Returns absolute offsets within the full book text so the backend can
- * validate each slice against the canonical book text.
- */
-function buildAudioChunks(
-  fullText: string,
-  globalStart: number,
-  targetChars: number,
-  firstTargetChars = targetChars,
-): Array<{ start: number; end: number; text: string }> {
-  const chunks: Array<{ start: number; end: number; text: string }> = []
-  let localPos = 0
-
-  while (localPos < fullText.length) {
-    const isFirstChunk = chunks.length === 0
-    const currentTarget = isFirstChunk ? firstTargetChars : targetChars
-    const remaining = fullText.length - localPos
-    if (remaining <= currentTarget) {
-      // Last (or only) chunk — take everything left
-      chunks.push({
-        start: globalStart + localPos,
-        end:   globalStart + fullText.length,
-        text:  fullText.slice(localPos),
-      })
-      break
-    }
-
-    const backtrack = isFirstChunk ? 60 : 100
-    const lookahead = isFirstChunk ? 60 : 200
-    const searchStart = Math.max(0, currentTarget - backtrack)
-    // Find the last sentence boundary near the target. The first chunk gets a
-    // narrow window so startup latency stays low even if it cuts earlier.
-    const searchWindow = fullText.slice(localPos + searchStart,
-                                        localPos + currentTarget + lookahead)
-    let boundary = -1
-    for (let i = searchWindow.length - 1; i >= 0; i--) {
-      if (/[.!?]/.test(searchWindow[i]) && /[\s"']/.test(searchWindow[i + 1] ?? ' ')) {
-        boundary = i + 1
-        break
-      }
-    }
-
-    const hardSlice = fullText.slice(localPos, localPos + currentTarget)
-    const lastSpace = Math.max(hardSlice.lastIndexOf(' '), hardSlice.lastIndexOf('\n'), hardSlice.lastIndexOf('\t'))
-    const chunkLen = boundary >= 0
-      ? searchStart + boundary
-      : (lastSpace > currentTarget * 0.6 ? lastSpace + 1 : currentTarget)
-
-    const localEnd = localPos + chunkLen
-    const slice = fullText.slice(localPos, localEnd)
-    if (slice.trim()) {
-      chunks.push({ start: globalStart + localPos, end: globalStart + localEnd, text: slice })
-    }
-    localPos = localEnd
-  }
-
-  return chunks.filter(c => c.text.trim())
-}
-
-// (chunk sizes live in CHUNK_CHARS above — kept here for legacy grep)
-
-// ── Audio Content ─────────────────────────────────────────────────────────────
-
 type AudioPhase = 'idle' | 'buffering' | 'playing' | 'paused'
 type ChunkStatus = 'idle' | 'fetching' | 'ready' | 'error'
 interface AudioChunk {
@@ -2608,18 +2504,6 @@ interface AudioChunk {
   stream?: KokoroStreamState
   cues?: LiveAudioCue[]
   tapOffset?: number  // char offset to seek to on first chunk (grid-aligned playback)
-}
-
-// Binary search: find the grid chunk whose range contains `offset`.
-function findGridChunk(grid: Array<{ start: number; end: number }>, offset: number): number {
-  let lo = 0
-  let hi = grid.length - 1
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1
-    if (grid[mid].end <= offset) lo = mid + 1
-    else hi = mid
-  }
-  return lo
 }
 
 export interface AudioHandle {
@@ -4110,7 +3994,13 @@ export function ReaderRoute() {
     return { start, end: start + match[0].length }
   }
 
-  function playBrowserSpeechChunkAt(idx: number, currentChunks: AudioChunk[], ctrl: AbortController, word: string) {
+  function playBrowserSpeechChunkAt(
+    idx: number,
+    currentChunks: AudioChunk[],
+    ctrl: AbortController,
+    word: string,
+    options: { switchToNativeWhenReady?: boolean } = {},
+  ) {
     if (!canUseBrowserSpeech()) return false
     const chunk = currentChunks[idx]
     if (!chunk) {
@@ -4123,7 +4013,10 @@ export function ReaderRoute() {
     wordAudioCurIdxRef.current = idx
     setWordAudioCurIdx(idx)
     setWordAudio({ word, status: 'playing' })
-    updateWordAudioChunk(idx, { status: 'ready', url: BROWSER_SPEECH_URL, cues: [] })
+    updateWordAudioChunk(idx, { status: 'ready', cues: [] })
+    if (options.switchToNativeWhenReady) {
+      prefetchWordAudioAhead(idx, currentChunks, ctrl.signal)
+    }
     syncAudioFollowCue(chunk, 0, true)
 
     window.speechSynthesis.cancel()
@@ -4149,7 +4042,20 @@ export function ReaderRoute() {
         stopWordAudio()
         return
       }
-      playBrowserSpeechChunkAt(nextIdx, wordAudioChunksRef.current, ctrl, word)
+      if (options.switchToNativeWhenReady) {
+        const latest = wordAudioChunksRef.current
+        const nextChunk = latest[nextIdx]
+        if (nextChunk?.url) {
+          browserSpeechActiveRef.current = false
+          browserSpeechUtteranceRef.current = null
+          playWordAudioChunkAt(nextIdx, latest, ctrl, word)
+          return
+        }
+        if (nextChunk?.status === 'idle') {
+          void fetchWordAudioChunk(nextIdx, nextChunk, ctrl.signal, { background: true })
+        }
+      }
+      playBrowserSpeechChunkAt(nextIdx, wordAudioChunksRef.current, ctrl, word, options)
     }
     utterance.onerror = (event) => {
       if (ctrl.signal.aborted || !browserSpeechActiveRef.current || event.error === 'interrupted') return
@@ -4354,7 +4260,12 @@ export function ReaderRoute() {
     })
   }
 
-  async function fetchWordAudioChunk(idx: number, chunk: AudioChunk, signal: AbortSignal): Promise<string | null> {
+  async function fetchWordAudioChunk(
+    idx: number,
+    chunk: AudioChunk,
+    signal: AbortSignal,
+    options: { background?: boolean } = {},
+  ): Promise<string | null> {
     const existingChunk = wordAudioChunksRef.current[idx]
     if (existingChunk?.url) return existingChunk.url
     const existingFetch = wordAudioChunkFetchesRef.current.get(idx)
@@ -4433,9 +4344,13 @@ export function ReaderRoute() {
         return finalizeBlob(blob, cues)
       } catch (error) {
         if ((error as Error).name !== 'AbortError') {
-          setWordAudio(null)
-          showToast(audioErrorMessage(error))
-          updateWordAudioChunk(idx, { status: 'error' })
+          if (options.background) {
+            updateWordAudioChunk(idx, { status: 'idle' })
+          } else {
+            setWordAudio(null)
+            showToast(audioErrorMessage(error))
+            updateWordAudioChunk(idx, { status: 'error' })
+          }
         }
         return null
       } finally {
@@ -4457,7 +4372,7 @@ export function ReaderRoute() {
       if (!chunk) break
       if (chunk.url || chunk.status === 'fetching') continue
       if (chunk.status === 'idle') {
-        void fetchWordAudioChunk(idx, chunk, signal)
+        void fetchWordAudioChunk(idx, chunk, signal, { background: true })
       }
     }
   }
@@ -4717,9 +4632,10 @@ export function ReaderRoute() {
     setWordAudio({ word, status: 'loading' })
     const fullText = payload?.text ?? ''
     const start = Math.max(0, Math.min(startOffset, fullText.length))
+    const kokoroModelReady = isModelReady()
 
     let initial: AudioChunk[]
-    const grid = effectiveTtsProvider === 'kokoro' && !isModelReady() ? presynthGridRef.current : null
+    const grid = effectiveTtsProvider === 'kokoro' && !kokoroModelReady ? presynthGridRef.current : null
     if (grid && grid.length > 0) {
       // Use the pre-computed word-boundary grid so every chunk is a cache hit
       const chunkIdx = findGridChunk(grid, start)
@@ -4761,11 +4677,26 @@ export function ReaderRoute() {
     const ctrl = new AbortController()
     wordAudioAbortRef.current = ctrl
 
-    const shouldUseBrowserSpeech =
-      effectiveTtsProvider === BROWSER_TTS_PROVIDER_ID ||
-      (effectiveTtsProvider === 'kokoro' && !isModelReady())
-    if (shouldUseBrowserSpeech) {
-      if (playBrowserSpeechChunkAt(0, initial, ctrl, word)) return
+    const startupPlan = buildPlaybackStartupPlan({
+      provider: effectiveTtsProvider,
+      chunkCount: initial.length,
+      browserSpeechSupported: canUseBrowserSpeech(),
+      kokoroModelReady,
+    })
+
+    const shouldBootstrapNativeAudio = !startupPlan.useBrowserSpeech || startupPlan.fetchNativeInBackground
+    if (shouldBootstrapNativeAudio) {
+      for (let idx = 0; idx < startupPlan.bootstrapCount; idx += 1) {
+        void fetchWordAudioChunk(idx, initial[idx], ctrl.signal, {
+          background: startupPlan.fetchNativeInBackground || idx >= startupPlan.startReadyChunkCount,
+        })
+      }
+    }
+
+    if (startupPlan.useBrowserSpeech) {
+      if (playBrowserSpeechChunkAt(0, initial, ctrl, word, {
+        switchToNativeWhenReady: startupPlan.fetchNativeInBackground,
+      })) return
       if (effectiveTtsProvider === BROWSER_TTS_PROVIDER_ID) {
         stopWordAudio()
         showToast('Browser speech is not supported by this browser.')
@@ -4773,21 +4704,11 @@ export function ReaderRoute() {
       }
     }
 
-    const startReadyChunkCount = Math.min(
-      initial.length,
-      START_PLAYBACK_READY_CHUNKS[effectiveTtsProvider] ?? 1,
-    )
-    const bootstrapCount = Math.min(
-      initial.length,
-      Math.max(PLAYBACK_BOOTSTRAP_CHUNKS[effectiveTtsProvider] ?? 1, startReadyChunkCount),
-    )
-    for (let idx = 0; idx < bootstrapCount; idx += 1) {
-      void fetchWordAudioChunk(idx, initial[idx], ctrl.signal)
-    }
-
     try {
       const startupReady = await Promise.all(
-        initial.slice(0, startReadyChunkCount).map((chunk, idx) => fetchWordAudioChunk(idx, chunk, ctrl.signal)),
+        initial
+          .slice(0, startupPlan.startReadyChunkCount)
+          .map((chunk, idx) => fetchWordAudioChunk(idx, chunk, ctrl.signal)),
       )
       if (ctrl.signal.aborted || startupReady.some((url) => !url)) {
         stopWordAudio()
