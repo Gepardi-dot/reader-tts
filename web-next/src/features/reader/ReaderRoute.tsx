@@ -176,7 +176,7 @@ const THEMES    = {
 }
 
 const TTS_PROVIDERS = [
-  { id: 'kokoro', label: 'Kokoro (free, remote)' },
+  { id: 'kokoro', label: 'Kokoro (on-device)' },
   { id: 'google', label: 'Gemini Flash (cloud)' },
 ]
 
@@ -439,8 +439,8 @@ interface AudioPrefs { provider: string; voice: string | null }
 function loadAudioPrefs(): AudioPrefs {
   try {
     const raw = localStorage.getItem(AUDIO_PREFS_KEY)
-    return raw ? { provider: 'google', voice: null, ...JSON.parse(raw) } : { provider: 'google', voice: null }
-  } catch { return { provider: 'google', voice: null } }
+    return raw ? { provider: 'kokoro', voice: null, ...JSON.parse(raw) } : { provider: 'kokoro', voice: null }
+  } catch { return { provider: 'kokoro', voice: null } }
 }
 
 function providerOptionsFromCatalog(providers?: TtsProviderInfo[]) {
@@ -488,6 +488,9 @@ function audioErrorMessage(error: unknown) {
   }
   if (/not configured|configured yet/i.test(message)) {
     return message
+  }
+  if (/preparing|model is not ready|voice model/i.test(message)) {
+    return 'The on-device voice is still preparing. Try again in a moment.'
   }
   if (/text does not match|range/i.test(message)) {
     return 'Could not match this passage to the book text. Move slightly and try again.'
@@ -3244,8 +3247,6 @@ export function ReaderRoute() {
   const [wordAudioCurIdx, setWordAudioCurIdx] = useState(0)
   const [wordAudioTotal,  setWordAudioTotal]  = useState(0)
   const [audioFollowRects, setAudioFollowRects] = useState<SelectionRect[]>([])
-  const [presynthJobId,    setPresynthJobId]    = useState<string | null>(null)
-  const [presynthProgress, setPresynthProgress] = useState<{ completed: number; total: number } | null>(null)
   const [rollingCacheState, setRollingCacheState] = useState<RollingCacheState>(() => getRollingCacheState())
   const [ttsProvider,   setTtsProvider]   = useState(() => loadAudioPrefs().provider)
   const [ttsVoice,      setTtsVoice]      = useState<string | null>(() => loadAudioPrefs().voice)
@@ -3275,7 +3276,6 @@ export function ReaderRoute() {
   const activeAudioCueRangeRef  = useRef<{ start: number; end: number } | null>(null)
   const presynthGridRef         = useRef<Array<{ start: number; end: number }> | null>(null)
   const wordAudioChunkSeekRef   = useRef<number>(0)
-  const presynthPollRef         = useRef<ReturnType<typeof setTimeout> | null>(null)
   const readerTextRef         = useRef<HTMLDivElement | null>(null)
   const panelSnapshotRef      = useRef<SecondaryPanel | null>(null)
   const openPanel = useCallback((nextPanel: SecondaryPanel) => {
@@ -3521,55 +3521,6 @@ export function ReaderRoute() {
     presynthGridRef.current = grid
   }, [payload?.text, effectiveTtsProvider])
 
-  // Kokoro presynthesis — pre-generate the entire book's audio in the background
-  // so that tapping any word is an instant cache hit. Re-triggers when voice changes.
-  useEffect(() => {
-    if (effectiveTtsProvider !== 'kokoro' || !bookId || !payload?.text) return
-
-    if (presynthPollRef.current) clearTimeout(presynthPollRef.current)
-
-    const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
-    const startFrom = Math.round(scrollPct * (payload.text.length))
-    api.post<{ jobId: string; total: number; chunks: Array<{ start: number; end: number }>; alreadyDone?: boolean }>(
-      `/api/books/${bookId}/presynthesize`,
-      {
-        provider: 'kokoro',
-        voice: effectiveTtsVoice ?? null,
-        narration_style: '',
-        length_scale: lengthScale,
-        sentence_silence: sentenceSilence,
-        start_from: startFrom,
-      },
-    ).then((res) => {
-      // Grid was already computed client-side; server confirms the same grid
-      presynthGridRef.current = res.chunks
-      if (res.alreadyDone) {
-        setPresynthProgress({ completed: res.total, total: res.total })
-        return
-      }
-      setPresynthJobId(res.jobId)
-      setPresynthProgress({ completed: 0, total: res.total })
-    }).catch(() => { /* silent — presynthesis is best-effort */ })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveTtsProvider, effectiveTtsVoice, bookId, Boolean(payload?.text)])
-
-  // Poll presynthesis progress until done
-  useEffect(() => {
-    if (!presynthJobId || !bookId) return
-    const poll = () => {
-      api.get<{ status: string; completed: number; total: number }>(
-        `/api/books/${bookId}/presynthesize/status?jobId=${presynthJobId}`,
-      ).then((res) => {
-        setPresynthProgress({ completed: res.completed, total: res.total })
-        if (res.status !== 'done' && res.status !== 'error' && res.status !== 'not_found') {
-          presynthPollRef.current = setTimeout(poll, 3000)
-        }
-      }).catch(() => { /* silent */ })
-    }
-    presynthPollRef.current = setTimeout(poll, 3000)
-    return () => { if (presynthPollRef.current) clearTimeout(presynthPollRef.current) }
-  }, [presynthJobId, bookId])
-
   // Read-ahead prefetch — fires chunk-aligned live-audio requests after the user stops
   // scrolling (2 s debounce). Cache keys match exactly what the player will request,
   // so hitting play is often instant if you've been reading for a couple seconds.
@@ -3577,6 +3528,7 @@ export function ReaderRoute() {
   const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!isChunking(effectiveTtsProvider) || !bookId || !payload?.text) return
+    if (effectiveTtsProvider === 'kokoro' && (!isModelReady() || !effectiveTtsVoice)) return
 
     // Debounce: cancel previous timer on every scroll update
     if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
@@ -4253,7 +4205,11 @@ export function ReaderRoute() {
           const local = await synthesizeKokoroLocal(chunk.text, effectiveTtsVoice, localSpeed, signal)
           if (signal.aborted) return null
           if (local) return finalizeBlob(local.blob, [])
-          // Fall through to remote path if local synthesis returned null.
+          throw new Error('The on-device voice model is not ready.')
+        }
+
+        if (effectiveTtsProvider === 'kokoro') {
+          throw new Error('The on-device voice model is still preparing.')
         }
 
         const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
@@ -5069,19 +5025,6 @@ export function ReaderRoute() {
           </BottomSheet>
         )
       })()}
-
-      {/* ── Presynthesis progress (subtle, disappears when done) ─────── */}
-      {presynthProgress && presynthProgress.completed < presynthProgress.total && (
-        <div
-          style={{
-            position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)',
-            fontSize: 11, color: colors.text, opacity: 0.45, pointerEvents: 'none',
-            zIndex: 40, whiteSpace: 'nowrap',
-          }}
-        >
-          Preparing audio… {Math.round(presynthProgress.completed / presynthProgress.total * 100)}%
-        </div>
-      )}
 
       {/* ── Play bar (visible while audio is active) ──────────────────── */}
       <AnimatePresence>

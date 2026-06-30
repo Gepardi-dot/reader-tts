@@ -51,8 +51,8 @@ export function AudioSettingsRoute() {
   // Simple per-provider local preference (mirrors what the reader uses)
   const [selectedProvider, setSelectedProvider] = useState(
     () => localStorage.getItem('reader-audio-prefs')
-      ? JSON.parse(localStorage.getItem('reader-audio-prefs')!).provider ?? 'google'
-      : 'google'
+      ? JSON.parse(localStorage.getItem('reader-audio-prefs')!).provider ?? 'kokoro'
+      : 'kokoro'
   )
   const [selectedVoice, setSelectedVoice] = useState<string | null>(
     () => localStorage.getItem('reader-audio-prefs')
