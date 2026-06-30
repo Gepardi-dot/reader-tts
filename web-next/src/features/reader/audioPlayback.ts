@@ -51,6 +51,17 @@ export interface PlaybackStartupPlan {
   fetchNativeInBackground: boolean
 }
 
+export function patchAudioChunk<T extends object>(
+  chunks: T[],
+  idx: number,
+  patch: Partial<T>,
+): boolean {
+  const chunk = chunks[idx]
+  if (!chunk) return false
+  Object.assign(chunk, patch)
+  return true
+}
+
 export function isChunking(provider: string): boolean {
   return provider in CHUNK_CHARS
 }
