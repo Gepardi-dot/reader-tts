@@ -47,6 +47,7 @@ import {
   buildPlaybackStartupPlan,
   findGridChunk,
   isChunking,
+  patchAudioChunk,
   pacingFor,
 } from './audioPlayback'
 
@@ -4084,9 +4085,7 @@ export function ReaderRoute() {
   }
 
   function updateWordAudioChunk(idx: number, patch: Partial<AudioChunk>) {
-    const next = [...wordAudioChunksRef.current]
-    if (next[idx]) next[idx] = { ...next[idx], ...patch }
-    wordAudioChunksRef.current = next
+    patchAudioChunk(wordAudioChunksRef.current, idx, patch)
   }
 
   function clearAudioFollow() {

@@ -6,6 +6,7 @@ import {
   buildPlaybackStartupPlan,
   findGridChunk,
   isChunking,
+  patchAudioChunk,
   pacingFor,
 } from './audioPlayback'
 
@@ -116,5 +117,30 @@ describe('audio playback startup plan', () => {
     expect(isChunking(BROWSER_TTS_PROVIDER_ID)).toBe(false)
     expect(pacingFor('kokoro')).toEqual({ lengthScale: 0.93, sentenceSilence: 0.38 })
     expect(pacingFor('google')).toEqual({ lengthScale: 1.0, sentenceSilence: 0.20 })
+  })
+})
+
+describe('audio chunk patching', () => {
+  it('patches a chunk in place without replacing the chunk array', () => {
+    const chunks = [
+      { start: 0, end: 5, text: 'hello', status: 'idle' },
+      { start: 5, end: 11, text: ' world', status: 'idle' },
+    ]
+    const originalArray = chunks
+    const originalChunk = chunks[1]
+
+    const patched = patchAudioChunk(chunks, 1, { status: 'ready' })
+
+    expect(patched).toBe(true)
+    expect(chunks).toBe(originalArray)
+    expect(chunks[1]).toBe(originalChunk)
+    expect(chunks[1].status).toBe('ready')
+  })
+
+  it('returns false for a missing chunk', () => {
+    const chunks = [{ start: 0, end: 5, text: 'hello', status: 'idle' }]
+
+    expect(patchAudioChunk(chunks, 3, { status: 'ready' })).toBe(false)
+    expect(chunks).toEqual([{ start: 0, end: 5, text: 'hello', status: 'idle' }])
   })
 })
