@@ -1,40 +1,24 @@
+import { getCachedToken, setCachedToken } from '@/shared/api/authToken'
+import type { BookExtractionProgress } from '@/shared/books/extractBookText'
+
 export class AuthError extends Error {}
 
-// Cached JWT, kept fresh by the Supabase auth state listener in main.tsx
-let _cachedToken = ''
-
-export function setCachedToken(token: string) {
-  _cachedToken = token
-}
-
 function getToken() {
-  return _cachedToken
+  return getCachedToken()
 }
 
 async function readSessionToken() {
   if (typeof window === 'undefined') return getToken()
-  const { getAuthSession } = await import('@/lib/authSession')
-  const { data } = await getAuthSession()
-  const token = data.session?.access_token ?? ''
-  if (token !== _cachedToken) {
+  const { getStoredAuthToken } = await import('@/lib/auth')
+  const token = getStoredAuthToken()
+  if (token !== getCachedToken()) {
     setCachedToken(token)
   }
   return token
 }
 
 async function refreshSessionToken(previousToken: string) {
-  if (typeof window === 'undefined') return previousToken
-  const { refreshAuthSession } = await import('@/lib/authSession')
-  const { data, error } = await refreshAuthSession()
-  if (error) {
-    setCachedToken('')
-    return ''
-  }
-  const token = data.session?.access_token ?? ''
-  if (token !== _cachedToken) {
-    setCachedToken(token)
-  }
-  return token
+  return previousToken
 }
 
 function configuredApiOrigin() {
@@ -107,54 +91,29 @@ export async function requestBlob(
   return res.blob()
 }
 
-function isLocalHostname(hostname: string) {
-  return (
-    hostname === 'localhost' ||
-    hostname === '127.0.0.1' ||
-    hostname === '0.0.0.0' ||
-    hostname === '::1' ||
-    hostname.endsWith('.local')
-  )
-}
-
-function shouldUseDirectBookUpload() {
-  if (typeof window === 'undefined') return false
-  return !isLocalHostname(window.location.hostname)
-}
-
 export const BOOK_ACCEPT = [
   '.pdf',
-  '.epub',
   '.txt',
   '.md',
   '.markdown',
   '.html',
   '.htm',
   '.xhtml',
-  '.docx',
 ].join(',')
 
 const BOOK_CONTENT_TYPES: Record<string, string> = {
   pdf: 'application/pdf',
-  epub: 'application/epub+zip',
   txt: 'text/plain',
   md: 'text/markdown',
   markdown: 'text/markdown',
   html: 'text/html',
   htm: 'text/html',
   xhtml: 'application/xhtml+xml',
-  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 }
 
 export function isSupportedBookFile(file: File) {
   const extension = file.name.split('.').pop()?.toLowerCase() ?? ''
   return extension in BOOK_CONTENT_TYPES
-}
-
-function contentTypeForBook(file: File) {
-  if (file.type && file.type !== 'application/octet-stream') return file.type
-  const extension = file.name.split('.').pop()?.toLowerCase() ?? ''
-  return BOOK_CONTENT_TYPES[extension] ?? 'application/octet-stream'
 }
 
 interface Book {
@@ -169,48 +128,8 @@ interface Book {
   highlightCount: number
 }
 
-interface DirectBookUploadInitResponse {
-  bookId: string
-  upload: {
-    url: string
-    fields: Record<string, string>
-  }
-}
-
-async function uploadBookDirect(file: File, title?: string | null) {
-  const init = await request<DirectBookUploadInitResponse>('/api/books/direct-upload', {
-    method: 'POST',
-    body: JSON.stringify({
-      fileName: file.name,
-      contentType: contentTypeForBook(file),
-      size: file.size,
-      title: title?.trim() || null,
-    }),
-  })
-
-  const formData = new FormData()
-  for (const [key, value] of Object.entries(init.upload.fields)) {
-    formData.append(key, value)
-  }
-  formData.append('file', file)
-
-  const uploadResponse = await fetch(init.upload.url, {
-    method: 'POST',
-    body: formData,
-  })
-  if (!uploadResponse.ok) {
-    const detail = await uploadResponse.text().catch(() => uploadResponse.statusText)
-    throw new Error(`Direct upload failed (${uploadResponse.status}): ${detail || uploadResponse.statusText}`)
-  }
-
-  return request<Book>('/api/books/direct-upload/complete', {
-    method: 'POST',
-    body: JSON.stringify({
-      bookId: init.bookId,
-      fileName: file.name,
-      title: title?.trim() || null,
-    }),
-  })
+interface UploadBookOptions {
+  onProgress?: (progress: BookExtractionProgress) => void
 }
 
 export const api = {
@@ -224,19 +143,13 @@ export const api = {
     request<T>(url, { method: 'PATCH', body: JSON.stringify(body) }),
 }
 
-export async function uploadBook(file: File, title?: string | null) {
-  if (shouldUseDirectBookUpload()) {
-    return uploadBookDirect(file, title)
-  }
-
-  const formData = new FormData()
-  formData.append('file', file)
-  if (title?.trim()) {
-    formData.append('title', title.trim())
-  }
+export async function uploadBook(file: File, title?: string | null, options: UploadBookOptions = {}) {
+  const { extractBookText } = await import('@/shared/books/extractBookText')
+  const payload = await extractBookText(file, { title, onProgress: options.onProgress })
+  options.onProgress?.({ phase: 'uploading', progress: 100, message: 'Saving book...' })
 
   return request<Book>('/api/books', {
     method: 'POST',
-    body: formData,
+    body: JSON.stringify(payload),
   })
 }

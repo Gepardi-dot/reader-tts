@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { supabase } from '@/lib/supabase'
+import { signIn, signUp } from '@/lib/auth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -14,7 +14,6 @@ export function LoginRoute() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const [signupDone, setSignupDone] = useState(false)
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -22,35 +21,17 @@ export function LoginRoute() {
     setLoading(true)
     try {
       if (mode === 'signin') {
-        const { error } = await supabase.auth.signInWithPassword({ email, password })
-        if (error) throw error
+        await signIn(email, password)
         navigate('/library', { replace: true })
       } else {
-        const { error } = await supabase.auth.signUp({ email, password })
-        if (error) throw error
-        setSignupDone(true)
+        await signUp(email, password)
+        navigate('/library', { replace: true })
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Something went wrong.')
     } finally {
       setLoading(false)
     }
-  }
-
-  if (signupDone) {
-    return (
-      <div className="flex min-h-svh items-center justify-center bg-background px-4">
-        <div className="w-full max-w-sm text-center space-y-4">
-          <h1 className="text-xl font-semibold">Check your email</h1>
-          <p className="text-sm text-muted-foreground">
-            We sent a confirmation link to <strong>{email}</strong>. Click it to activate your account, then sign in.
-          </p>
-          <Button variant="outline" onClick={() => { setSignupDone(false); setMode('signin') }}>
-            Back to sign in
-          </Button>
-        </div>
-      </div>
-    )
   }
 
   return (

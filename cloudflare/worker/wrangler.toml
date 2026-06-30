@@ -1,0 +1,11 @@
+name = "reader-tts-api"
+main = "src/index.ts"
+compatibility_date = "2026-06-29"
+
+[vars]
+APP_NAME = "reader-tts"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "reader_tts"
+database_id = "c58a5509-40d7-439a-8bfb-42b8d990a245"
