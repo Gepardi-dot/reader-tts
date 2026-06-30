@@ -22,6 +22,8 @@ interface Env {
   DB: D1Database
   APP_ORIGIN?: string
   SESSION_DAYS?: string
+  GEMINI_API_KEY?: string
+  GEMINI_TTS_MODEL?: string
 }
 
 interface User {
@@ -41,6 +43,44 @@ class ApiError extends Error {
 const encoder = new TextEncoder()
 const PASSWORD_ITERATIONS = 100_000
 const DEFAULT_SESSION_DAYS = 30
+const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-preview-tts'
+const GEMINI_SAMPLE_RATE = 24_000
+const LIVE_AUDIO_CACHE_VERSION = 1
+const PROVIDER_PREVIEW_TEXT = (
+  'When the room quieted, the story finally found its rhythm. ' +
+  'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
+)
+
+const GEMINI_TTS_MODELS = [
+  {
+    id: 'gemini-3.1-flash-tts-preview',
+    label: 'Gemini 3.1 Flash TTS',
+    description: 'Current low-latency Gemini TTS preview model.',
+  },
+  {
+    id: 'gemini-2.5-flash-preview-tts',
+    label: 'Gemini 2.5 Flash TTS',
+    description: 'Fast Gemini TTS for short narration chunks.',
+  },
+  {
+    id: 'gemini-2.5-pro-preview-tts',
+    label: 'Gemini 2.5 Pro TTS',
+    description: 'Higher-capability Gemini TTS when quota allows.',
+  },
+]
+
+const GEMINI_VOICES = [
+  { id: 'Kore', label: 'Kore', gender: 'female', style: 'Firm', tags: ['Story'] },
+  { id: 'Sulafat', label: 'Sulafat', gender: 'female', style: 'Warm', tags: ['Story'] },
+  { id: 'Achernar', label: 'Achernar', gender: 'neutral', style: 'Soft', tags: ['Story'] },
+  { id: 'Gacrux', label: 'Gacrux', gender: 'neutral', style: 'Mature', tags: ['Story'] },
+  { id: 'Zephyr', label: 'Zephyr', gender: 'neutral', style: 'Bright' },
+  { id: 'Puck', label: 'Puck', gender: 'male', style: 'Upbeat' },
+  { id: 'Charon', label: 'Charon', gender: 'male', style: 'Informative' },
+  { id: 'Aoede', label: 'Aoede', gender: 'female', style: 'Breezy' },
+  { id: 'Algieba', label: 'Algieba', gender: 'neutral', style: 'Smooth' },
+  { id: 'Erinome', label: 'Erinome', gender: 'female', style: 'Clear' },
+]
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -67,11 +107,13 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
 
   if (path === '/api/health' && request.method === 'GET') return health(env)
   if (path.startsWith('/api/auth/')) return handleAuth(request, env, path)
-  if (path === '/api/providers' && request.method === 'GET') return providers()
+  if (path === '/api/providers' && request.method === 'GET') return providers(env)
   if (path === '/api/providers/warmup' && request.method === 'POST') return json({ ok: true })
   if (path === '/api/dictionary/lookup' && request.method === 'GET') return dictionaryLookup(url)
 
   const user = await requireUser(request, env)
+
+  if (path === '/api/providers/test' && request.method === 'POST') return testProvider(request, env)
 
   if (path === '/api/books' && request.method === 'GET') return listBooks(env, user)
   if (path === '/api/books' && request.method === 'POST') return createBook(request, env, user)
@@ -487,8 +529,11 @@ async function handleBookRoute(request: Request, env: Env, user: User, bookId: s
       .run()
     return json({ ok: true })
   }
-  if (rest === 'live-audio' || rest.startsWith('presynthesize')) {
-    return json({ detail: 'Cloud TTS is disabled in the zero-cost Cloudflare starter backend.' }, 501)
+  if (rest === 'live-audio' && request.method === 'POST') {
+    return liveAudio(request, env, user, bookId)
+  }
+  if (rest.startsWith('presynthesize')) {
+    return json({ detail: 'Server presynthesis is disabled. Use Browser speech or on-device Kokoro for instant playback.' }, 501)
   }
   throw new ApiError(404, 'Not found')
 }
@@ -519,6 +564,264 @@ async function bookProgress(env: Env, user: User, bookId: string) {
     .bind(bookId, user.id)
     .first<Record<string, unknown>>()
   return json({ reading: row ? serializeReadingProgress(row) : null, audio: null })
+}
+
+function configuredGeminiModel(env: Env, requested?: string | null) {
+  const requestedModel = requested?.trim()
+  if (requestedModel && GEMINI_TTS_MODELS.some((model) => model.id === requestedModel)) return requestedModel
+  if (requestedModel) throw new ApiError(400, `Unsupported Gemini TTS model: ${requestedModel}`)
+  const configured = env.GEMINI_TTS_MODEL?.trim()
+  return configured && GEMINI_TTS_MODELS.some((model) => model.id === configured)
+    ? configured
+    : GEMINI_DEFAULT_MODEL
+}
+
+function configuredGeminiVoice(requested?: string | null) {
+  const requestedVoice = requested?.trim()
+  if (requestedVoice && GEMINI_VOICES.some((voice) => voice.id === requestedVoice)) return requestedVoice
+  if (requestedVoice) throw new ApiError(400, `Unsupported Gemini voice: ${requestedVoice}`)
+  return 'Kore'
+}
+
+function normalizeSelectionText(value: string) {
+  return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/[ \t]+/g, ' ').trim()
+}
+
+function pacingInstruction(lengthScale: number) {
+  if (lengthScale >= 1.25) return 'Speak slower than normal conversation, with deliberate phrasing.'
+  if (lengthScale >= 1.08) return 'Speak slightly slower than normal conversation, with room at sentence endings.'
+  if (lengthScale <= 0.85) return 'Speak a bit faster than normal conversation while keeping the words clear.'
+  if (lengthScale <= 0.95) return 'Speak slightly faster than normal conversation while keeping phrasing controlled.'
+  return 'Speak at a natural audiobook pace.'
+}
+
+function pauseInstruction(sentenceSilence: number) {
+  const ms = Math.max(0, Math.round(sentenceSilence * 1000))
+  if (ms >= 450) return 'Use generous pauses after sentences.'
+  if (ms >= 250) return 'Use natural pauses after sentences.'
+  return 'Keep sentence pauses compact.'
+}
+
+function geminiDirectedText(text: string, narrationStyle: string, lengthScale: number, sentenceSilence: number) {
+  const style = narrationStyle.trim() || 'Read like a premium audiobook narrator. Keep the delivery natural, warm, and attentive.'
+  return [
+    style,
+    pacingInstruction(lengthScale),
+    pauseInstruction(sentenceSilence),
+    'Read only the passage below. Do not add introductions, labels, commentary, or sound effects.',
+    '',
+    text,
+  ].join('\n')
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
+  }
+  return btoa(binary)
+}
+
+function base64ToBytes(value: string) {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+function pcmToWav(pcm: Uint8Array, sampleRate = GEMINI_SAMPLE_RATE) {
+  const header = new ArrayBuffer(44)
+  const view = new DataView(header)
+  const writeAscii = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i))
+  }
+  writeAscii(0, 'RIFF')
+  view.setUint32(4, 36 + pcm.byteLength, true)
+  writeAscii(8, 'WAVE')
+  writeAscii(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  writeAscii(36, 'data')
+  view.setUint32(40, pcm.byteLength, true)
+
+  const wav = new Uint8Array(44 + pcm.byteLength)
+  wav.set(new Uint8Array(header), 0)
+  wav.set(pcm, 44)
+  return wav
+}
+
+function extractGeminiAudioBase64(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null
+  const root = payload as Record<string, unknown>
+  const candidates = Array.isArray(root.candidates) ? root.candidates : []
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue
+    const content = (candidate as Record<string, unknown>).content
+    const parts = content && typeof content === 'object'
+      ? (content as Record<string, unknown>).parts
+      : null
+    if (!Array.isArray(parts)) continue
+    for (const part of parts) {
+      if (!part || typeof part !== 'object') continue
+      const inlineData = (part as Record<string, unknown>).inlineData ?? (part as Record<string, unknown>).inline_data
+      if (!inlineData || typeof inlineData !== 'object') continue
+      const data = (inlineData as Record<string, unknown>).data
+      if (typeof data === 'string' && data) return data
+    }
+  }
+  return null
+}
+
+async function synthesizeGeminiAudio(env: Env, options: {
+  text: string
+  voice: string | null
+  model: string | null
+  narrationStyle: string
+  lengthScale: number
+  sentenceSilence: number
+}) {
+  const apiKey = env.GEMINI_API_KEY?.trim()
+  if (!apiKey) throw new ApiError(400, 'Gemini TTS is not configured yet. Add GEMINI_API_KEY to the Cloudflare Worker secrets.')
+
+  const model = configuredGeminiModel(env, options.model)
+  const voice = configuredGeminiVoice(options.voice)
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    },
+    body: JSON.stringify({
+      contents: [{
+        parts: [{
+          text: geminiDirectedText(
+            options.text,
+            options.narrationStyle,
+            options.lengthScale,
+            options.sentenceSilence,
+          ),
+        }],
+      }],
+      generationConfig: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: {
+              voiceName: voice,
+            },
+          },
+        },
+      },
+    }),
+  })
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => response.statusText)
+    throw new ApiError(response.status >= 500 ? 502 : 400, `Gemini TTS failed (${response.status}): ${detail.slice(0, 500)}`)
+  }
+
+  const payload = await response.json()
+  const audioBase64 = extractGeminiAudioBase64(payload)
+  if (!audioBase64) throw new ApiError(502, 'Gemini TTS returned no audio.')
+
+  const pcm = base64ToBytes(audioBase64)
+  const wav = pcmToWav(pcm)
+  return {
+    model,
+    voice,
+    wav,
+    duration: pcm.byteLength / 2 / GEMINI_SAMPLE_RATE,
+  }
+}
+
+async function liveAudio(request: Request, env: Env, user: User, bookId: string) {
+  const book = await bookRow(env, user, bookId)
+  const body = await readJson<Record<string, unknown>>(request)
+  const provider = stringField(body.provider)
+  if (provider !== 'google') {
+    throw new ApiError(400, 'Only Gemini TTS is supported by the Cloudflare cloud audio endpoint.')
+  }
+
+  const fullText = String(book.text ?? '')
+  const start = Number(body.start ?? 0)
+  const end = Number(body.end ?? 0)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > fullText.length) {
+    throw new ApiError(400, 'Invalid live audio range.')
+  }
+
+  const selectedText = fullText.slice(start, end)
+  const submittedText = stringField(body.text)
+  if (normalizeSelectionText(selectedText) !== normalizeSelectionText(submittedText)) {
+    throw new ApiError(400, 'Live audio text does not match the selected range.')
+  }
+
+  const synthesisText = selectedText.trim()
+  if (!synthesisText) throw new ApiError(400, 'Live audio selection cannot be empty.')
+
+  const lengthScale = Number(body.length_scale ?? body.lengthScale ?? 1)
+  const sentenceSilence = Number(body.sentence_silence ?? body.sentenceSilence ?? 0.2)
+  const result = await synthesizeGeminiAudio(env, {
+    text: synthesisText,
+    voice: stringField(body.voice) || null,
+    model: stringField(body.model) || null,
+    narrationStyle: stringField(body.narration_style ?? body.narrationStyle),
+    lengthScale: Number.isFinite(lengthScale) ? lengthScale : 1,
+    sentenceSilence: Number.isFinite(sentenceSilence) ? sentenceSilence : 0.2,
+  })
+  const data = bytesToBase64(result.wav)
+  const cacheDigest = await sha256Base64Url(JSON.stringify({
+    version: LIVE_AUDIO_CACHE_VERSION,
+    bookId,
+    provider,
+    voice: result.voice,
+    model: result.model,
+    start,
+    end,
+    text: normalizeSelectionText(synthesisText),
+  }))
+  return json({
+    url: `data:audio/wav;base64,${data}`,
+    duration: result.duration,
+    cues: [],
+    cacheKey: `live-audio:v${LIVE_AUDIO_CACHE_VERSION}:${cacheDigest}`,
+    cacheVersion: LIVE_AUDIO_CACHE_VERSION,
+    contentType: 'audio/wav',
+    byteLength: result.wav.byteLength,
+  })
+}
+
+async function testProvider(request: Request, env: Env) {
+  const body = await readJson<Record<string, unknown>>(request)
+  const provider = stringField(body.provider)
+  if (provider !== 'google') {
+    throw new ApiError(400, 'Only Gemini TTS preview is available from this endpoint.')
+  }
+
+  const lengthScale = Number(body.length_scale ?? body.lengthScale ?? 1)
+  const sentenceSilence = Number(body.sentence_silence ?? body.sentenceSilence ?? 0.2)
+  const result = await synthesizeGeminiAudio(env, {
+    text: PROVIDER_PREVIEW_TEXT,
+    voice: stringField(body.voice) || null,
+    model: stringField(body.model) || null,
+    narrationStyle: stringField(body.narration_style ?? body.narrationStyle),
+    lengthScale: Number.isFinite(lengthScale) ? lengthScale : 1,
+    sentenceSilence: Number.isFinite(sentenceSilence) ? sentenceSilence : 0.2,
+  })
+
+  return json({
+    provider,
+    voice: result.voice,
+    model: result.model,
+    sampleText: PROVIDER_PREVIEW_TEXT,
+    audioUrl: `data:audio/wav;base64,${bytesToBase64(result.wav)}`,
+    message: 'Gemini preview ready.',
+  })
 }
 
 async function updateReadingProgress(request: Request, env: Env, user: User, bookId: string) {
@@ -885,7 +1188,8 @@ async function reviewCard(request: Request, env: Env, user: User, cardId: string
   return json({ card: serializeCard(card), summary: await deckSummary(env, user, String(card.deck_id)) })
 }
 
-async function providers() {
+async function providers(env: Env) {
+  const geminiConfigured = Boolean(env.GEMINI_API_KEY?.trim())
   return json({
     defaultNarrationStyle: 'warm',
     providers: [
@@ -909,6 +1213,19 @@ async function providers() {
           { id: 'am_adam', label: 'Adam' },
         ],
         defaultVoice: 'af_heart',
+      },
+      {
+        id: 'google',
+        name: 'Gemini TTS',
+        available: geminiConfigured,
+        recommended: false,
+        voices: GEMINI_VOICES,
+        defaultVoice: 'Kore',
+        models: GEMINI_TTS_MODELS,
+        defaultModel: configuredGeminiModel(env, null),
+        description: geminiConfigured
+          ? 'Cloud Gemini TTS for higher quality narrated chunks.'
+          : 'Add GEMINI_API_KEY as a Cloudflare Worker secret to enable Gemini TTS.',
       },
     ],
   })

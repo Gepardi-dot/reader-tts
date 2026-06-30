@@ -3884,7 +3884,7 @@ export function ReaderRoute() {
     if (!state) return
 
     setSelection(state)
-    if (effectiveTtsProvider === BROWSER_TTS_PROVIDER_ID || effectiveTtsProvider === 'kokoro') {
+    if (effectiveTtsProvider === BROWSER_TTS_PROVIDER_ID || effectiveTtsProvider === 'kokoro' || effectiveTtsProvider === 'google') {
       void playWord(state.text, state.startOffset)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
