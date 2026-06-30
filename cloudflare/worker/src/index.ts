@@ -26,6 +26,10 @@ interface Env {
   GEMINI_TTS_MODEL?: string
 }
 
+interface ExecutionContext {
+  waitUntil(promise: Promise<unknown>): void
+}
+
 interface User {
   id: string
   email: string
@@ -46,6 +50,7 @@ const DEFAULT_SESSION_DAYS = 30
 const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-preview-tts'
 const GEMINI_SAMPLE_RATE = 24_000
 const LIVE_AUDIO_CACHE_VERSION = 1
+const EDGE_AUDIO_CACHE_SECONDS = 7 * 24 * 60 * 60
 const PROVIDER_PREVIEW_TEXT = (
   'When the room quieted, the story finally found its rhythm. ' +
   'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
@@ -83,14 +88,14 @@ const GEMINI_VOICES = [
 ]
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(request, env) })
     }
 
     try {
       const url = new URL(request.url)
-      const response = await route(request, env, url)
+      const response = await route(request, env, url, ctx)
       return withCors(response, request, env)
     } catch (error) {
       if (error instanceof ApiError) {
@@ -102,7 +107,7 @@ export default {
   },
 }
 
-async function route(request: Request, env: Env, url: URL): Promise<Response> {
+async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext): Promise<Response> {
   const path = normalizePath(url.pathname)
 
   if (path === '/api/health' && request.method === 'GET') return health(env)
@@ -125,7 +130,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
 
   const bookMatch = path.match(/^\/api\/books\/([^/]+)(?:\/(.*))?$/)
   if (bookMatch) {
-    return handleBookRoute(request, env, user, decodeURIComponent(bookMatch[1]), bookMatch[2] ?? '')
+    return handleBookRoute(request, env, user, decodeURIComponent(bookMatch[1]), bookMatch[2] ?? '', ctx)
   }
 
   const deckMatch = path.match(/^\/api\/vocabulary\/decks\/([^/]+)(?:\/(.*))?$/)
@@ -505,7 +510,7 @@ function requestedPageCount(value: unknown) {
   return Number.isFinite(pageCount) && pageCount > 0 ? Math.round(pageCount) : null
 }
 
-async function handleBookRoute(request: Request, env: Env, user: User, bookId: string, rest: string) {
+async function handleBookRoute(request: Request, env: Env, user: User, bookId: string, rest: string, ctx: ExecutionContext) {
   if (!rest && request.method === 'GET') return json(await getBook(env, user, bookId))
   if (!rest && request.method === 'DELETE') {
     await env.DB.prepare('DELETE FROM books WHERE id = ? AND user_id = ?').bind(bookId, user.id).run()
@@ -530,7 +535,7 @@ async function handleBookRoute(request: Request, env: Env, user: User, bookId: s
     return json({ ok: true })
   }
   if (rest === 'live-audio' && request.method === 'POST') {
-    return liveAudio(request, env, user, bookId)
+    return liveAudio(request, env, user, bookId, ctx)
   }
   if (rest.startsWith('presynthesize')) {
     return json({ detail: 'Server presynthesis is disabled. Use Browser speech or on-device Kokoro for instant playback.' }, 501)
@@ -656,6 +661,56 @@ function pcmToWav(pcm: Uint8Array, sampleRate = GEMINI_SAMPLE_RATE) {
   return wav
 }
 
+function edgeAudioCacheRequest(cacheDigest: string) {
+  return new Request(`https://reader-tts.internal/audio-cache/${cacheDigest}.json`, {
+    method: 'GET',
+  })
+}
+
+async function readEdgeAudioCache(cacheDigest: string): Promise<Record<string, JsonValue> | null> {
+  if (typeof caches === 'undefined') return null
+  try {
+    const cached = await caches.default.match(edgeAudioCacheRequest(cacheDigest))
+    if (!cached || !cached.ok) return null
+    const payload = await cached.json()
+    return payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? payload as Record<string, JsonValue>
+      : null
+  } catch {
+    return null
+  }
+}
+
+function writeEdgeAudioCache(ctx: ExecutionContext, cacheDigest: string, payload: Record<string, JsonValue>) {
+  if (typeof caches === 'undefined') return
+  const response = json(payload, 200, {
+    'Cache-Control': `public, max-age=${EDGE_AUDIO_CACHE_SECONDS}`,
+  })
+  ctx.waitUntil(
+    caches.default
+      .put(edgeAudioCacheRequest(cacheDigest), response)
+      .catch(() => undefined),
+  )
+}
+
+async function geminiLiveAudioCacheDigest(input: {
+  bookId: string
+  provider: string
+  voice: string
+  model: string
+  narrationStyle: string
+  lengthScale: number
+  sentenceSilence: number
+  start: number
+  end: number
+  text: string
+}) {
+  return sha256Base64Url(JSON.stringify({
+    version: LIVE_AUDIO_CACHE_VERSION,
+    ...input,
+  }))
+}
+
 function extractGeminiAudioBase64(payload: unknown): string | null {
   if (!payload || typeof payload !== 'object') return null
   const root = payload as Record<string, unknown>
@@ -740,7 +795,7 @@ async function synthesizeGeminiAudio(env: Env, options: {
   }
 }
 
-async function liveAudio(request: Request, env: Env, user: User, bookId: string) {
+async function liveAudio(request: Request, env: Env, user: User, bookId: string, ctx: ExecutionContext) {
   const book = await bookRow(env, user, bookId)
   const body = await readJson<Record<string, unknown>>(request)
   const provider = stringField(body.provider)
@@ -766,34 +821,51 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string)
 
   const lengthScale = Number(body.length_scale ?? body.lengthScale ?? 1)
   const sentenceSilence = Number(body.sentence_silence ?? body.sentenceSilence ?? 0.2)
-  const result = await synthesizeGeminiAudio(env, {
-    text: synthesisText,
-    voice: stringField(body.voice) || null,
-    model: stringField(body.model) || null,
-    narrationStyle: stringField(body.narration_style ?? body.narrationStyle),
-    lengthScale: Number.isFinite(lengthScale) ? lengthScale : 1,
-    sentenceSilence: Number.isFinite(sentenceSilence) ? sentenceSilence : 0.2,
-  })
-  const data = bytesToBase64(result.wav)
-  const cacheDigest = await sha256Base64Url(JSON.stringify({
-    version: LIVE_AUDIO_CACHE_VERSION,
+  const safeLengthScale = Number.isFinite(lengthScale) ? lengthScale : 1
+  const safeSentenceSilence = Number.isFinite(sentenceSilence) ? sentenceSilence : 0.2
+  const model = configuredGeminiModel(env, stringField(body.model) || null)
+  const voice = configuredGeminiVoice(stringField(body.voice) || null)
+  const narrationStyle = stringField(body.narration_style ?? body.narrationStyle)
+  const normalizedText = normalizeSelectionText(synthesisText)
+  const cacheDigest = await geminiLiveAudioCacheDigest({
     bookId,
     provider,
-    voice: result.voice,
-    model: result.model,
+    voice,
+    model,
+    narrationStyle,
+    lengthScale: safeLengthScale,
+    sentenceSilence: safeSentenceSilence,
     start,
     end,
-    text: normalizeSelectionText(synthesisText),
-  }))
-  return json({
+    text: normalizedText,
+  })
+  const cacheKey = `live-audio:v${LIVE_AUDIO_CACHE_VERSION}:${cacheDigest}`
+  const cached = await readEdgeAudioCache(cacheDigest)
+  if (cached) {
+    return json({ ...cached, cacheHit: true })
+  }
+
+  const result = await synthesizeGeminiAudio(env, {
+    text: synthesisText,
+    voice,
+    model,
+    narrationStyle,
+    lengthScale: safeLengthScale,
+    sentenceSilence: safeSentenceSilence,
+  })
+  const data = bytesToBase64(result.wav)
+  const payload: Record<string, JsonValue> = {
     url: `data:audio/wav;base64,${data}`,
     duration: result.duration,
     cues: [],
-    cacheKey: `live-audio:v${LIVE_AUDIO_CACHE_VERSION}:${cacheDigest}`,
+    cacheKey,
     cacheVersion: LIVE_AUDIO_CACHE_VERSION,
     contentType: 'audio/wav',
     byteLength: result.wav.byteLength,
-  })
+    cacheHit: false,
+  }
+  writeEdgeAudioCache(ctx, cacheDigest, payload)
+  return json(payload)
 }
 
 async function testProvider(request: Request, env: Env) {
