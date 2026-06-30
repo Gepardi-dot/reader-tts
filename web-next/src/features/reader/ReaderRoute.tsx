@@ -50,6 +50,11 @@ import {
   patchAudioChunk,
   pacingFor,
 } from './audioPlayback'
+import {
+  preferredBrowserSpeechVoice,
+  primeBrowserSpeechVoices,
+  supportsBrowserSpeech,
+} from './browserSpeech'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -793,21 +798,6 @@ function caretRangeAt(x: number, y: number): Range | null {
 
 const PUNCT = /[.,!?;:"'()[\]{}<>»«\u2019\u2018\u201C\u201D\u2026\-–—]/
 
-function supportsBrowserSpeech() {
-  return typeof window !== 'undefined' && 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window
-}
-
-function preferredBrowserSpeechVoice() {
-  if (!supportsBrowserSpeech()) return null
-  const voices = window.speechSynthesis.getVoices()
-  return (
-    voices.find((voice) => /^en[-_]/i.test(voice.lang) && /natural|premium|online|google/i.test(voice.name)) ??
-    voices.find((voice) => /^en[-_]/i.test(voice.lang)) ??
-    voices[0] ??
-    null
-  )
-}
-
 interface VocabularyDeckRef {
   id: string
 }
@@ -1339,9 +1329,12 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
   }, [hasOfflineDefs, offlineData, freeRaw, freeLoading, lookupWord])
 
   function speak() {
-    if (!window.speechSynthesis) return
+    if (!supportsBrowserSpeech()) return
     window.speechSynthesis.cancel()
     const utt = new SpeechSynthesisUtterance(displayData?.term ?? lookupWord)
+    const voice = preferredBrowserSpeechVoice()
+    if (voice) utt.voice = voice
+    utt.lang = voice?.lang || 'en-US'
     utt.rate = 0.88
     utt.onstart = () => setSpeaking(true)
     utt.onend   = () => setSpeaking(false)
@@ -3312,6 +3305,10 @@ export function ReaderRoute() {
         ? 'playing'
         : 'paused'
   const hasReaderText = Boolean(payload?.text)
+
+  useEffect(() => {
+    primeBrowserSpeechVoices()
+  }, [])
 
   // Restore scroll position — also handles ?offset= from notes navigation
   useEffect(() => {
