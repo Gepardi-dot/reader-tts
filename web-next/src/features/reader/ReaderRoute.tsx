@@ -43,6 +43,7 @@ import {
   PREFETCH_AHEAD_TARGET,
   PREFETCH_CHUNK_LIMIT,
   audioSliceStart,
+  browserSpeechQueueTarget,
   buildAudioChunks,
   buildPlaybackStartupPlan,
   findGridChunk,
@@ -3992,6 +3993,100 @@ export function ReaderRoute() {
     return { start, end: start + match[0].length }
   }
 
+  function createBrowserSpeechUtterance(
+    idx: number,
+    chunk: AudioChunk,
+    ctrl: AbortController,
+    word: string,
+    onEnd: () => void,
+  ) {
+    const utterance = new SpeechSynthesisUtterance(chunk.text)
+    const voice = browserSpeechVoice()
+    if (voice) utterance.voice = voice
+    utterance.lang = voice?.lang || 'en-US'
+    utterance.rate = Math.max(0.5, Math.min(audioRateRef.current, 2))
+    utterance.pitch = 1
+    utterance.volume = 1
+
+    utterance.onstart = () => {
+      if (ctrl.signal.aborted || !browserSpeechActiveRef.current) return
+      browserSpeechUtteranceRef.current = utterance
+      wordAudioCurIdxRef.current = idx
+      setWordAudioCurIdx(idx)
+      setWordAudio({ word, status: 'playing' })
+      updateWordAudioChunk(idx, { status: 'ready', cues: [] })
+      syncAudioFollowCue(chunk, 0, true)
+    }
+    utterance.onboundary = (event) => {
+      if (ctrl.signal.aborted || !browserSpeechActiveRef.current) return
+      const range = browserSpeechWordAt(chunk.text, event.charIndex)
+      if (!range) return
+      showAudioFollow(chunk.start + range.start, chunk.start + range.end, true)
+    }
+    utterance.onend = () => {
+      if (ctrl.signal.aborted || !browserSpeechActiveRef.current) return
+      onEnd()
+    }
+    utterance.onerror = (event) => {
+      if (ctrl.signal.aborted || !browserSpeechActiveRef.current || event.error === 'interrupted') return
+      showToast('Browser speech stopped. Tap a word to start again.')
+      stopWordAudio()
+    }
+
+    return utterance
+  }
+
+  function queueBrowserSpeechChunksAt(idx: number, currentChunks: AudioChunk[], ctrl: AbortController, word: string) {
+    if (!canUseBrowserSpeech()) return false
+    const chunk = currentChunks[idx]
+    if (!chunk) {
+      stopWordAudio()
+      return true
+    }
+
+    stopWordAudioCueRAF()
+    browserSpeechActiveRef.current = true
+    wordAudioCurIdxRef.current = idx
+    setWordAudioCurIdx(idx)
+    setWordAudio({ word, status: 'playing' })
+    updateWordAudioChunk(idx, { status: 'ready', cues: [] })
+    syncAudioFollowCue(chunk, 0, true)
+
+    window.speechSynthesis.cancel()
+    let queuedUntil = idx - 1
+    const enqueueThrough = (targetIdx: number) => {
+      const lastIdx = Math.min(targetIdx, currentChunks.length - 1)
+      while (queuedUntil < lastIdx) {
+        const queuedIdx = queuedUntil + 1
+        queuedUntil = queuedIdx
+        const queuedChunk = currentChunks[queuedIdx]
+        if (!queuedChunk) continue
+        const utterance = createBrowserSpeechUtterance(
+          queuedIdx,
+          queuedChunk,
+          ctrl,
+          word,
+          () => {
+            if (queuedIdx >= wordAudioChunksRef.current.length - 1) stopWordAudio()
+          },
+        )
+        const originalOnStart = utterance.onstart
+        utterance.onstart = (event) => {
+          if (typeof originalOnStart === 'function') originalOnStart.call(utterance, event)
+          if (!ctrl.signal.aborted && browserSpeechActiveRef.current) {
+            enqueueThrough(browserSpeechQueueTarget(queuedIdx, currentChunks.length))
+          }
+        }
+        window.speechSynthesis.speak(utterance)
+        if (queuedIdx === idx) browserSpeechUtteranceRef.current = utterance
+      }
+    }
+
+    enqueueThrough(browserSpeechQueueTarget(idx, currentChunks.length))
+
+    return true
+  }
+
   function playBrowserSpeechChunkAt(
     idx: number,
     currentChunks: AudioChunk[],
@@ -4018,23 +4113,7 @@ export function ReaderRoute() {
     syncAudioFollowCue(chunk, 0, true)
 
     window.speechSynthesis.cancel()
-    const utterance = new SpeechSynthesisUtterance(chunk.text)
-    const voice = browserSpeechVoice()
-    if (voice) utterance.voice = voice
-    utterance.lang = voice?.lang || 'en-US'
-    utterance.rate = Math.max(0.5, Math.min(audioRateRef.current, 2))
-    utterance.pitch = 1
-    utterance.volume = 1
-    browserSpeechUtteranceRef.current = utterance
-
-    utterance.onboundary = (event) => {
-      if (ctrl.signal.aborted || !browserSpeechActiveRef.current) return
-      const range = browserSpeechWordAt(chunk.text, event.charIndex)
-      if (!range) return
-      showAudioFollow(chunk.start + range.start, chunk.start + range.end, true)
-    }
-    utterance.onend = () => {
-      if (ctrl.signal.aborted || !browserSpeechActiveRef.current) return
+    const utterance = createBrowserSpeechUtterance(idx, chunk, ctrl, word, () => {
       const nextIdx = idx + 1
       if (nextIdx >= wordAudioChunksRef.current.length) {
         stopWordAudio()
@@ -4054,12 +4133,8 @@ export function ReaderRoute() {
         }
       }
       playBrowserSpeechChunkAt(nextIdx, wordAudioChunksRef.current, ctrl, word, options)
-    }
-    utterance.onerror = (event) => {
-      if (ctrl.signal.aborted || !browserSpeechActiveRef.current || event.error === 'interrupted') return
-      showToast('Browser speech stopped. Tap a word to start again.')
-      stopWordAudio()
-    }
+    })
+    browserSpeechUtteranceRef.current = utterance
 
     window.speechSynthesis.speak(utterance)
     return true
@@ -4690,9 +4765,10 @@ export function ReaderRoute() {
     }
 
     if (startupPlan.useBrowserSpeech) {
-      if (playBrowserSpeechChunkAt(0, initial, ctrl, word, {
-        switchToNativeWhenReady: startupPlan.fetchNativeInBackground,
-      })) return
+      const started = startupPlan.fetchNativeInBackground
+        ? playBrowserSpeechChunkAt(0, initial, ctrl, word, { switchToNativeWhenReady: true })
+        : queueBrowserSpeechChunksAt(0, initial, ctrl, word)
+      if (started) return
       if (effectiveTtsProvider === BROWSER_TTS_PROVIDER_ID) {
         stopWordAudio()
         showToast('Browser speech is not supported by this browser.')

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   BROWSER_TTS_PROVIDER_ID,
   audioSliceStart,
+  browserSpeechQueueTarget,
   buildAudioChunks,
   buildPlaybackStartupPlan,
   findGridChunk,
@@ -142,5 +143,21 @@ describe('audio chunk patching', () => {
 
     expect(patchAudioChunk(chunks, 3, { status: 'ready' })).toBe(false)
     expect(chunks).toEqual([{ start: 0, end: 5, text: 'hello', status: 'idle' }])
+  })
+})
+
+describe('browser speech queue target', () => {
+  it('keeps one utterance queued ahead by default', () => {
+    expect(browserSpeechQueueTarget(0, 4)).toBe(1)
+    expect(browserSpeechQueueTarget(1, 4)).toBe(2)
+  })
+
+  it('clamps to the last available chunk', () => {
+    expect(browserSpeechQueueTarget(2, 3)).toBe(2)
+    expect(browserSpeechQueueTarget(9, 3)).toBe(2)
+  })
+
+  it('returns -1 when there is nothing to queue', () => {
+    expect(browserSpeechQueueTarget(0, 0)).toBe(-1)
   })
 })
