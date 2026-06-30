@@ -890,10 +890,19 @@ async function providers() {
     defaultNarrationStyle: 'warm',
     providers: [
       {
+        id: 'browser',
+        name: 'Browser speech',
+        available: true,
+        recommended: true,
+        voices: [],
+        defaultVoice: null,
+        description: 'Instant local playback using the browser speech engine.',
+      },
+      {
         id: 'kokoro',
         name: 'Kokoro on-device',
         available: true,
-        recommended: true,
+        recommended: false,
         voices: [
           { id: 'af_heart', label: 'Heart' },
           { id: 'af_bella', label: 'Bella' },

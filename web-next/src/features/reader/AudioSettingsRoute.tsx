@@ -36,6 +36,41 @@ interface ProvidersResponse {
   defaultNarrationStyle: string
 }
 
+const BROWSER_PROVIDER_ID = 'browser'
+const AUDIO_PREFS_KEY = 'reader-audio-prefs'
+const AUDIO_PREFS_VERSION = 2
+const BROWSER_PROVIDER: ProviderInfo = {
+  id: BROWSER_PROVIDER_ID,
+  name: 'Browser speech',
+  available: true,
+  recommended: true,
+  voices: [],
+  defaultVoice: null,
+  description: 'Instant local playback using your browser voice. No server or model download required.',
+}
+
+function withBrowserProvider(providers?: ProviderInfo[]) {
+  const catalog = providers ?? []
+  return catalog.some((provider) => provider.id === BROWSER_PROVIDER_ID)
+    ? catalog
+    : [BROWSER_PROVIDER, ...catalog]
+}
+
+function loadAudioPrefs() {
+  const defaults = { provider: BROWSER_PROVIDER_ID, voice: null as string | null, version: AUDIO_PREFS_VERSION }
+  try {
+    const raw = localStorage.getItem(AUDIO_PREFS_KEY)
+    if (!raw) return defaults
+    const parsed = JSON.parse(raw) as Partial<typeof defaults>
+    if (parsed.version !== AUDIO_PREFS_VERSION && parsed.provider !== BROWSER_PROVIDER_ID) {
+      return defaults
+    }
+    return { ...defaults, ...parsed }
+  } catch {
+    return defaults
+  }
+}
+
 // ── Main settings page ────────────────────────────────────────────────────────
 
 export function AudioSettingsRoute() {
@@ -46,18 +81,15 @@ export function AudioSettingsRoute() {
     queryFn: () => api.get<ProvidersResponse>('/api/providers'),
   })
 
-  const providers = res?.providers ?? []
+  const providers = withBrowserProvider(res?.providers)
+  const initialPrefs = loadAudioPrefs()
 
   // Simple per-provider local preference (mirrors what the reader uses)
   const [selectedProvider, setSelectedProvider] = useState(
-    () => localStorage.getItem('reader-audio-prefs')
-      ? JSON.parse(localStorage.getItem('reader-audio-prefs')!).provider ?? 'kokoro'
-      : 'kokoro'
+    () => initialPrefs.provider
   )
   const [selectedVoice, setSelectedVoice] = useState<string | null>(
-    () => localStorage.getItem('reader-audio-prefs')
-      ? JSON.parse(localStorage.getItem('reader-audio-prefs')!).voice ?? null
-      : null
+    () => initialPrefs.voice
   )
   const [speed, setSpeed] = useState('1.0')
   const [saved, setSaved] = useState(false)
@@ -67,8 +99,8 @@ export function AudioSettingsRoute() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const prefs = { provider: selectedProvider, voice: selectedVoice }
-      localStorage.setItem('reader-audio-prefs', JSON.stringify(prefs))
+      const prefs = { provider: selectedProvider, voice: selectedVoice, version: AUDIO_PREFS_VERSION }
+      localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify(prefs))
       try { await api.patch('/api/settings/audio', { speed: parseFloat(speed) }) } catch { /* optional */ }
     },
     onSuccess: () => {

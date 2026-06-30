@@ -16,6 +16,7 @@ import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 import { getCachedDictionary, lookupStaticDictionary, putCachedDictionary } from '@/shared/storage/dictionaryCache'
 import {
   isModelReady,
+  startWarmup,
   synthesizeLocalStreaming,
   localKokoroCacheKey,
   LOCAL_KOKORO_CACHE_VERSION,
@@ -175,7 +176,18 @@ const THEMES    = {
   dark:  { bg: '#1a1a18', text: '#e8e6e1', bar: 'rgba(26,26,24,0.92)'   },
 }
 
+const BROWSER_TTS_PROVIDER_ID = 'browser'
+const BROWSER_TTS_PROVIDER: TtsProviderInfo = {
+  id: BROWSER_TTS_PROVIDER_ID,
+  name: 'Browser speech',
+  available: true,
+  recommended: true,
+  voices: [],
+  defaultVoice: null,
+}
+
 const TTS_PROVIDERS = [
+  { id: BROWSER_TTS_PROVIDER_ID, label: 'Browser speech' },
   { id: 'kokoro', label: 'Kokoro (on-device)' },
   { id: 'google', label: 'Gemini Flash (cloud)' },
 ]
@@ -314,6 +326,7 @@ interface LocalKokoroBlob {
 }
 
 const KOKORO_STREAM_URL = 'stream:kokoro'
+const BROWSER_SPEECH_URL = 'speech:browser'
 
 interface KokoroStreamState {
   buffers: AudioBuffer[]
@@ -433,19 +446,34 @@ const HIGHLIGHT_COLORS = [
 const APPEARANCE_KEY  = 'reader-appearance'
 const PROGRESS_KEY    = 'storybook-reader-progress'
 const AUDIO_PREFS_KEY = 'reader-audio-prefs'
+const AUDIO_PREFS_VERSION = 2
 
-interface AudioPrefs { provider: string; voice: string | null }
+interface AudioPrefs { provider: string; voice: string | null; version: number }
 
 function loadAudioPrefs(): AudioPrefs {
+  const defaults = { provider: BROWSER_TTS_PROVIDER_ID, voice: null, version: AUDIO_PREFS_VERSION }
   try {
     const raw = localStorage.getItem(AUDIO_PREFS_KEY)
-    return raw ? { provider: 'kokoro', voice: null, ...JSON.parse(raw) } : { provider: 'kokoro', voice: null }
-  } catch { return { provider: 'kokoro', voice: null } }
+    if (!raw) return defaults
+    const parsed = JSON.parse(raw) as Partial<AudioPrefs>
+    if (parsed.version !== AUDIO_PREFS_VERSION && parsed.provider !== BROWSER_TTS_PROVIDER_ID) {
+      return defaults
+    }
+    return { ...defaults, ...parsed }
+  } catch { return defaults }
+}
+
+function withBrowserProvider(providers?: TtsProviderInfo[]) {
+  const catalog = providers ?? []
+  return catalog.some((provider) => provider.id === BROWSER_TTS_PROVIDER_ID)
+    ? catalog
+    : [BROWSER_TTS_PROVIDER, ...catalog]
 }
 
 function providerOptionsFromCatalog(providers?: TtsProviderInfo[]) {
-  if (providers?.length) {
-    return providers.map((provider) => ({
+  const catalog = withBrowserProvider(providers)
+  if (catalog.length) {
+    return catalog.map((provider) => ({
       id: provider.id,
       label: provider.name,
       available: provider.available,
@@ -469,9 +497,10 @@ function defaultVoiceForProvider(provider: { voices: TtsVoiceOption[]; defaultVo
 }
 
 function pickFallbackProvider(providers: TtsProviderInfo[]) {
-  const available = providers.filter((provider) => provider.available)
+  const available = withBrowserProvider(providers).filter((provider) => provider.available)
   return (
     available.find((provider) => provider.recommended) ??
+    available.find((provider) => provider.id === BROWSER_TTS_PROVIDER_ID) ??
     available.find((provider) => provider.id === 'kokoro') ??
     available[0] ??
     null
@@ -800,6 +829,21 @@ function caretRangeAt(x: number, y: number): Range | null {
 }
 
 const PUNCT = /[.,!?;:"'()[\]{}<>»«\u2019\u2018\u201C\u201D\u2026\-–—]/
+
+function supportsBrowserSpeech() {
+  return typeof window !== 'undefined' && 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window
+}
+
+function preferredBrowserSpeechVoice() {
+  if (!supportsBrowserSpeech()) return null
+  const voices = window.speechSynthesis.getVoices()
+  return (
+    voices.find((voice) => /^en[-_]/i.test(voice.lang) && /natural|premium|online|google/i.test(voice.name)) ??
+    voices.find((voice) => /^en[-_]/i.test(voice.lang)) ??
+    voices[0] ??
+    null
+  )
+}
 
 interface VocabularyDeckRef {
   id: string
@@ -2611,6 +2655,7 @@ function AudioContent({
   const audioObjectUrlsRef = useRef<Set<string>>(new Set())
   const chunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
   const primedAudioRef = useRef<HTMLAudioElement | null>(null)
+  const speechPreviewRef = useRef<SpeechSynthesisUtterance | null>(null)
   rateRef.current   = rate
   chunksRef.current = chunks
 
@@ -2626,6 +2671,8 @@ function AudioContent({
   useEffect(() => () => {
     abortRef.current?.abort()
     audioRef.current?.pause()
+    if (supportsBrowserSpeech()) window.speechSynthesis.cancel()
+    speechPreviewRef.current = null
     primedAudioRef.current = null
     chunkFetchesRef.current.clear()
     revokeAudioObjectUrls()
@@ -2829,6 +2876,47 @@ function AudioContent({
       return
     }
 
+    if (provider === BROWSER_TTS_PROVIDER_ID) {
+      if (!supportsBrowserSpeech()) {
+        const message = 'Browser speech is not supported by this browser.'
+        setErrorMsg(message)
+        onError?.(message)
+        return
+      }
+
+      const utterance = new SpeechSynthesisUtterance(sampleText)
+      const voice = preferredBrowserSpeechVoice()
+      if (voice) utterance.voice = voice
+      utterance.lang = voice?.lang || 'en-US'
+      utterance.rate = Math.max(0.5, Math.min(rateRef.current, 2))
+      utterance.pitch = 1
+      utterance.volume = 1
+      utterance.onstart = () => setPhase('playing')
+      utterance.onend = () => {
+        if (speechPreviewRef.current === utterance) {
+          speechPreviewRef.current = null
+          setPhase('idle')
+        }
+      }
+      utterance.onerror = (event) => {
+        if (event.error === 'interrupted') return
+        speechPreviewRef.current = null
+        setErrorMsg('Browser speech stopped. Tap play to try again.')
+        setPhase('idle')
+      }
+
+      window.speechSynthesis.cancel()
+      speechPreviewRef.current = utterance
+      const initial: AudioChunk[] = [{ start: 0, end: sampleText.length, text: sampleText, url: null, buffer: null, status: 'ready' }]
+      setChunks(initial)
+      chunksRef.current = initial
+      setCurIdx(0)
+      curIdxRef.current = 0
+      setPhase('buffering')
+      window.speechSynthesis.speak(utterance)
+      return
+    }
+
     if (!selectedVoiceId) {
       setErrorMsg('Choose a voice to preview.')
       return
@@ -2850,6 +2938,8 @@ function AudioContent({
   function stopPlayback() {
     abortRef.current?.abort()
     audioRef.current?.pause()
+    if (supportsBrowserSpeech()) window.speechSynthesis.cancel()
+    speechPreviewRef.current = null
     primedAudioRef.current = null
     revokeAudioObjectUrls()
     chunkFetchesRef.current.clear()
@@ -2860,10 +2950,19 @@ function AudioContent({
 
   function togglePlay() {
     if (phase === 'playing') {
-      audioRef.current?.pause()
+      if (provider === BROWSER_TTS_PROVIDER_ID && supportsBrowserSpeech()) {
+        window.speechSynthesis.pause()
+      } else {
+        audioRef.current?.pause()
+      }
       setPhase('paused')
     } else if (phase === 'paused') {
       setErrorMsg(null)
+      if (provider === BROWSER_TTS_PROVIDER_ID && supportsBrowserSpeech()) {
+        window.speechSynthesis.resume()
+        setPhase('playing')
+        return
+      }
       const audio = audioRef.current
       if (!audio) return
       audio.muted = false
@@ -2872,9 +2971,9 @@ function AudioContent({
         .catch(() => {
           setErrorMsg('Playback was blocked by the browser. Tap play again.')
           setPhase('paused')
-        })
+      })
     } else if (phase === 'idle') {
-      primeAudioElement()
+      if (provider !== BROWSER_TTS_PROVIDER_ID) primeAudioElement()
       void startPlayback()
     }
     // 'buffering' → ignore taps
@@ -2885,7 +2984,7 @@ function AudioContent({
   const isBuffering = phase === 'buffering'
   const isPlaying   = phase === 'playing'
   const isPaused    = phase === 'paused'
-  const playDisabled = isBuffering || selectedProviderUnavailable || !selectedVoiceId
+  const playDisabled = isBuffering || selectedProviderUnavailable || (provider !== BROWSER_TTS_PROVIDER_ID && !selectedVoiceId)
 
   const totalChunks  = chunks.length
   const readyChunks  = chunks.filter(c => c.status === 'ready').length
@@ -3262,6 +3361,8 @@ export function ReaderRoute() {
   const scrolledToOffsetRef   = useRef(false)
   const wordAudioRef          = useRef<HTMLAudioElement | null>(null)
   const wordAudioAbortRef     = useRef<AbortController | null>(null)
+  const browserSpeechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null)
+  const browserSpeechActiveRef = useRef(false)
   const wordAudioCurIdxRef    = useRef(0)
   const wordAudioChunksRef    = useRef<AudioChunk[]>([])
   const wordAudioChunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
@@ -3306,17 +3407,18 @@ export function ReaderRoute() {
     queryFn:  () => api.get<ProvidersResponse>('/api/providers'),
     staleTime: 5 * 60_000,
   })
-  const activeProviderInfo = providersData?.providers?.find(p => p.id === ttsProvider)
-  const fallbackProviderInfo = providersData?.providers?.length
-    ? pickFallbackProvider(providersData.providers)
+  const providerCatalog = withBrowserProvider(providersData?.providers)
+  const activeProviderInfo = providerCatalog.find(p => p.id === ttsProvider)
+  const fallbackProviderInfo = providersData?.providers
+    ? pickFallbackProvider(providerCatalog)
     : null
-  const useProviderFallback = Boolean(providersData?.providers?.length && fallbackProviderInfo && (!activeProviderInfo || !activeProviderInfo.available))
+  const useProviderFallback = Boolean(providersData?.providers && fallbackProviderInfo && (!activeProviderInfo || !activeProviderInfo.available))
   const effectiveTtsProvider = useProviderFallback && fallbackProviderInfo ? fallbackProviderInfo.id : ttsProvider
   const effectiveTtsVoice = useProviderFallback && fallbackProviderInfo ? defaultVoiceForProvider(fallbackProviderInfo) : ttsVoice
-  const effectiveProviderInfo = providersData?.providers?.find(p => p.id === effectiveTtsProvider)
+  const effectiveProviderInfo = providerCatalog.find(p => p.id === effectiveTtsProvider)
   const playBarVoiceLabel = effectiveProviderInfo
     ?.voices.find(v => v.id === effectiveTtsVoice)
-    ?.label ?? effectiveTtsVoice ?? 'Voice'
+    ?.label ?? effectiveTtsVoice ?? effectiveProviderInfo?.name ?? 'Voice'
   const wordAudioPhase: AudioPhase = !wordAudio
     ? 'idle'
     : wordAudio.status === 'loading'
@@ -3324,6 +3426,7 @@ export function ReaderRoute() {
       : wordAudio.status === 'playing'
         ? 'playing'
         : 'paused'
+  const hasReaderText = Boolean(payload?.text)
 
   // Restore scroll position — also handles ?offset= from notes navigation
   useEffect(() => {
@@ -3362,7 +3465,11 @@ export function ReaderRoute() {
 
   // Persist audio prefs
   useEffect(() => {
-    localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify({ provider: effectiveTtsProvider, voice: effectiveTtsVoice }))
+    localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify({
+      provider: effectiveTtsProvider,
+      voice: effectiveTtsVoice,
+      version: AUDIO_PREFS_VERSION,
+    }))
   }, [effectiveTtsProvider, effectiveTtsVoice])
 
   // Voice/provider switch during reader playback: the chunks already in
@@ -3466,15 +3573,36 @@ export function ReaderRoute() {
     }
   }, [bookId, payload?.text, effectiveTtsProvider, effectiveTtsVoice, commitVoiceForBook])
 
+  useEffect(() => {
+    if (effectiveTtsProvider !== 'kokoro' || !hasReaderText) return
+    let cancelled = false
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    let idleId: number | null = null
+    const warm = () => {
+      if (!cancelled) startWarmup()
+    }
+
+    if ('requestIdleCallback' in window) {
+      idleId = window.requestIdleCallback(warm, { timeout: 4000 })
+    } else {
+      timeoutId = setTimeout(warm, 1800)
+    }
+
+    return () => {
+      cancelled = true
+      if (idleId !== null) window.cancelIdleCallback(idleId)
+      if (timeoutId) clearTimeout(timeoutId)
+    }
+  }, [effectiveTtsProvider, hasReaderText])
+
   // Background warmup — fire as soon as a local provider is selected so the model is
   // loaded by the time the user opens the audio sheet. Fire-and-forget, no UI blocking.
   useEffect(() => {
     if (!['neutts_local', 'qwen_local'].includes(effectiveTtsProvider)) return
-    if (!payload?.text) return   // wait until book is loaded
+    if (!hasReaderText) return   // wait until book is loaded
     api.post('/api/providers/warmup', { provider: effectiveTtsProvider, voice: effectiveTtsVoice ?? null, model: null })
       .catch(() => { /* silent — warmup is best-effort */ })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveTtsProvider, effectiveTtsVoice, Boolean(payload?.text)])
+  }, [effectiveTtsProvider, effectiveTtsVoice, hasReaderText])
 
   // Compute the presynthesis grid client-side the moment book text is available.
   // Prefers ending each chunk at a real sentence boundary (.!? + whitespace) within
@@ -3756,8 +3884,11 @@ export function ReaderRoute() {
     if (!state) return
 
     setSelection(state)
+    if (effectiveTtsProvider === BROWSER_TTS_PROVIDER_ID || effectiveTtsProvider === 'kokoro') {
+      void playWord(state.text, state.startOffset)
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection, payload?.text, scrollPct])
+  }, [selection, payload?.text, scrollPct, effectiveTtsProvider])
 
   // ── Mobile drag-to-select ─────────────────────────────────────────────────
   // Touch a word and slide your finger across the sentence to grow the
@@ -3960,6 +4091,74 @@ export function ReaderRoute() {
       cancelAnimationFrame(wordAudioRafRef.current)
       wordAudioRafRef.current = null
     }
+  }
+
+  function canUseBrowserSpeech() {
+    return supportsBrowserSpeech()
+  }
+
+  function browserSpeechVoice() {
+    return preferredBrowserSpeechVoice()
+  }
+
+  function browserSpeechWordAt(text: string, charIndex: number) {
+    const boundedIndex = Math.max(0, Math.min(charIndex, text.length))
+    const rest = text.slice(boundedIndex)
+    const match = rest.match(/\S+/)
+    if (!match || match.index == null) return null
+    const start = boundedIndex + match.index
+    return { start, end: start + match[0].length }
+  }
+
+  function playBrowserSpeechChunkAt(idx: number, currentChunks: AudioChunk[], ctrl: AbortController, word: string) {
+    if (!canUseBrowserSpeech()) return false
+    const chunk = currentChunks[idx]
+    if (!chunk) {
+      stopWordAudio()
+      return true
+    }
+
+    stopWordAudioCueRAF()
+    browserSpeechActiveRef.current = true
+    wordAudioCurIdxRef.current = idx
+    setWordAudioCurIdx(idx)
+    setWordAudio({ word, status: 'playing' })
+    updateWordAudioChunk(idx, { status: 'ready', url: BROWSER_SPEECH_URL, cues: [] })
+    syncAudioFollowCue(chunk, 0, true)
+
+    window.speechSynthesis.cancel()
+    const utterance = new SpeechSynthesisUtterance(chunk.text)
+    const voice = browserSpeechVoice()
+    if (voice) utterance.voice = voice
+    utterance.lang = voice?.lang || 'en-US'
+    utterance.rate = Math.max(0.5, Math.min(audioRateRef.current, 2))
+    utterance.pitch = 1
+    utterance.volume = 1
+    browserSpeechUtteranceRef.current = utterance
+
+    utterance.onboundary = (event) => {
+      if (ctrl.signal.aborted || !browserSpeechActiveRef.current) return
+      const range = browserSpeechWordAt(chunk.text, event.charIndex)
+      if (!range) return
+      showAudioFollow(chunk.start + range.start, chunk.start + range.end, true)
+    }
+    utterance.onend = () => {
+      if (ctrl.signal.aborted || !browserSpeechActiveRef.current) return
+      const nextIdx = idx + 1
+      if (nextIdx >= wordAudioChunksRef.current.length) {
+        stopWordAudio()
+        return
+      }
+      playBrowserSpeechChunkAt(nextIdx, wordAudioChunksRef.current, ctrl, word)
+    }
+    utterance.onerror = (event) => {
+      if (ctrl.signal.aborted || !browserSpeechActiveRef.current || event.error === 'interrupted') return
+      showToast('Browser speech stopped. Tap a word to start again.')
+      stopWordAudio()
+    }
+
+    window.speechSynthesis.speak(utterance)
+    return true
   }
 
   function startWordAudioCueRAF() {
@@ -4279,6 +4478,9 @@ export function ReaderRoute() {
     wordAudioScheduledEndRef.current = 0
     wordAudioChunkStartRef.current = 0
     wordAudioChunkSeekRef.current = 0
+    browserSpeechActiveRef.current = false
+    if (canUseBrowserSpeech()) window.speechSynthesis.cancel()
+    browserSpeechUtteranceRef.current = null
     if (wordAudioCtxRef.current?.state === 'suspended') void wordAudioCtxRef.current.resume()
     wordAudioRef.current?.pause()
     wordAudioRef.current = null
@@ -4559,6 +4761,18 @@ export function ReaderRoute() {
     const ctrl = new AbortController()
     wordAudioAbortRef.current = ctrl
 
+    const shouldUseBrowserSpeech =
+      effectiveTtsProvider === BROWSER_TTS_PROVIDER_ID ||
+      (effectiveTtsProvider === 'kokoro' && !isModelReady())
+    if (shouldUseBrowserSpeech) {
+      if (playBrowserSpeechChunkAt(0, initial, ctrl, word)) return
+      if (effectiveTtsProvider === BROWSER_TTS_PROVIDER_ID) {
+        stopWordAudio()
+        showToast('Browser speech is not supported by this browser.')
+        return
+      }
+    }
+
     const startReadyChunkCount = Math.min(
       initial.length,
       START_PLAYBACK_READY_CHUNKS[effectiveTtsProvider] ?? 1,
@@ -4588,6 +4802,11 @@ export function ReaderRoute() {
 
   function resumeWordAudio() {
     if (!wordAudio) return
+    if (browserSpeechActiveRef.current && canUseBrowserSpeech()) {
+      window.speechSynthesis.resume()
+      setWordAudio({ word: wordAudio.word, status: 'playing' })
+      return
+    }
     const ctx = wordAudioCtxRef.current
     if (ctx && ctx.state === 'suspended') {
       void ctx.resume().then(() => {
@@ -4607,6 +4826,11 @@ export function ReaderRoute() {
     if (!wordAudio) return
     if (wordAudio.status === 'loading') return
     if (wordAudio.status === 'playing') {
+      if (browserSpeechActiveRef.current && canUseBrowserSpeech()) {
+        window.speechSynthesis.pause()
+        setWordAudio({ word: wordAudio.word, status: 'ready' })
+        return
+      }
       const ctx = wordAudioCtxRef.current
       const source = wordAudioSourceRef.current
       // Only use AudioContext suspend when there is an active BufferSource node.
@@ -4627,6 +4851,9 @@ export function ReaderRoute() {
   useEffect(() => () => {
     stopWordAudioCueRAF()
     wordAudioAbortRef.current?.abort()
+    browserSpeechActiveRef.current = false
+    if (canUseBrowserSpeech()) window.speechSynthesis.cancel()
+    browserSpeechUtteranceRef.current = null
     try { wordAudioSourceRef.current?.stop(0); wordAudioSourceRef.current?.disconnect() } catch { /* already stopped */ }
     wordAudioSourceRef.current = null
     wordAudioCtxRef.current?.close().catch(() => {})
