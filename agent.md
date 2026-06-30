@@ -4,6 +4,7 @@ This is a thin index for coding agents. All standing instructions live in the fi
 
 | File | What it covers |
 |------|---------------|
+| `AGENTS.md` | Production directive, end goal, platform policy, PR/verification rules |
 | `CLAUDE.md` | Project-wide architecture, env vars, regression checklist, fragile areas |
 | `web-next/CLAUDE.md` | Frontend stack, design language, paths, component library |
 | `.claude/skills/seamless-tts/SKILL.md` | TTS playback invariants, cache key contract, z-index ladder |
@@ -13,4 +14,4 @@ This is a thin index for coding agents. All standing instructions live in the fi
 
 ## Read-before-edit
 
-Before touching `server/app.py` audio paths, `web-next/src/features/reader/ReaderRoute.tsx`, or `pdf_to_audio.py`, read the relevant skill above. Skills hold invariants that cannot be inferred from the code alone (cache-key contracts, Vercel-specific gotchas, layering rules).
+Before touching `cloudflare/worker/src/index.ts`, `server/app.py` audio paths, `web-next/src/features/reader/ReaderRoute.tsx`, or `pdf_to_audio.py`, read `AGENTS.md` and the relevant skill above. Skills hold invariants that cannot be inferred from the code alone (cache-key contracts, deployment gotchas, layering rules).
