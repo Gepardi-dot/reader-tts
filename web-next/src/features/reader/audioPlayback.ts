@@ -62,6 +62,13 @@ export function patchAudioChunk<T extends object>(
   return true
 }
 
+export function browserSpeechQueueTarget(activeIdx: number, chunkCount: number, ahead = 1): number {
+  if (chunkCount <= 0) return -1
+  const safeIdx = Math.max(0, Math.floor(activeIdx))
+  const safeAhead = Math.max(0, Math.floor(ahead))
+  return Math.min(chunkCount - 1, safeIdx + safeAhead)
+}
+
 export function isChunking(provider: string): boolean {
   return provider in CHUNK_CHARS
 }
