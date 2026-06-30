@@ -12,7 +12,6 @@ export function LoginRoute() {
   const [mode, setMode] = useState<Mode>('signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [inviteCode, setInviteCode] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -25,7 +24,7 @@ export function LoginRoute() {
         await signIn(email, password)
         navigate('/library', { replace: true })
       } else {
-        await signUp(email, password, inviteCode)
+        await signUp(email, password)
         navigate('/library', { replace: true })
       }
     } catch (err: unknown) {
@@ -73,20 +72,6 @@ export function LoginRoute() {
               placeholder="••••••••"
             />
           </div>
-
-          {mode === 'signup' && (
-            <div className="space-y-1.5">
-              <Label htmlFor="invite">Invite code</Label>
-              <Input
-                id="invite"
-                type="text"
-                autoComplete="off"
-                value={inviteCode}
-                onChange={(e) => setInviteCode(e.target.value)}
-                placeholder="reader-friends"
-              />
-            </div>
-          )}
 
           {error && (
             <p className="text-sm text-destructive">{error}</p>

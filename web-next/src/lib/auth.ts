@@ -79,11 +79,11 @@ export async function signIn(email: string, password: string) {
   return persistAuth(await res.json() as AuthPayload)
 }
 
-export async function signUp(email: string, password: string, inviteCode: string) {
+export async function signUp(email: string, password: string) {
   const res = await fetch(resolveUrl('/api/auth/signup'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password, inviteCode: inviteCode.trim() || null }),
+    body: JSON.stringify({ email, password }),
   })
   if (!res.ok) throw new Error(await errorMessage(res))
   return persistAuth(await res.json() as AuthPayload)

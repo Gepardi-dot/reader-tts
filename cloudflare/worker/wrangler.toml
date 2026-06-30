@@ -4,8 +4,6 @@ compatibility_date = "2026-06-29"
 
 [vars]
 APP_NAME = "reader-tts"
-# Set this before production deploy:
-# wrangler secret put SIGNUP_INVITE_CODE --config cloudflare/worker/wrangler.toml
 
 [[d1_databases]]
 binding = "DB"

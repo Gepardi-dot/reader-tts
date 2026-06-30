@@ -16,6 +16,8 @@ export function UploadRoute() {
   const [file, setFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
+  const [progressMessage, setProgressMessage] = useState('')
+  const [progressValue, setProgressValue] = useState(0)
   const [drag, setDrag] = useState(false)
   const [modelState, setModelState] = useState<ModelState>(() => getModelStatus())
   const inputRef = useRef<HTMLInputElement>(null)
@@ -28,8 +30,15 @@ export function UploadRoute() {
     if (!file) return
     setUploading(true)
     setError('')
+    setProgressMessage('Preparing book...')
+    setProgressValue(0)
     try {
-      const book = await uploadBook(file)
+      const book = await uploadBook(file, null, {
+        onProgress: (progress) => {
+          setProgressMessage(progress.message)
+          setProgressValue(progress.progress)
+        },
+      })
       queryClient.setQueryData<unknown[]>(['books'], (current) => {
         const items = Array.isArray(current) ? current : []
         return [book, ...items.filter((item) => {
@@ -47,12 +56,13 @@ export function UploadRoute() {
         return
       }
       if (e instanceof TypeError && /fetch/i.test(e.message)) {
-        setError('API server is unreachable. Start the backend on http://127.0.0.1:8000 and try again.')
+        setError('API is unreachable. Check the Cloudflare Worker or local Worker dev server and try again.')
       } else {
         setError(e instanceof Error ? e.message : 'Upload failed')
       }
     } finally {
       setUploading(false)
+      setProgressMessage('')
     }
   }
 
@@ -65,7 +75,7 @@ export function UploadRoute() {
       setFile(dropped)
       setError('')
     } else {
-      setError('Unsupported format. Upload PDF, EPUB, TXT, Markdown, HTML, or DOCX.')
+      setError('Unsupported format. Upload PDF, TXT, Markdown, or HTML.')
     }
   }
 
@@ -101,7 +111,7 @@ export function UploadRoute() {
             <Upload size={40} className="text-muted-foreground/60" />
             <div className="text-center">
               <p className="font-medium text-foreground">Drop a book here</p>
-              <p className="text-sm text-muted-foreground mt-1">PDF, EPUB, TXT, Markdown, HTML, or DOCX</p>
+              <p className="text-sm text-muted-foreground mt-1">PDF, TXT, Markdown, or HTML</p>
             </div>
           </>
         )}
@@ -123,7 +133,7 @@ export function UploadRoute() {
             setError('')
           } else {
             setFile(null)
-            setError('Unsupported format. Upload PDF, EPUB, TXT, Markdown, HTML, or DOCX.')
+            setError('Unsupported format. Upload PDF, TXT, Markdown, or HTML.')
           }
         }}
       />
@@ -136,7 +146,7 @@ export function UploadRoute() {
           disabled={!file || uploading}
           onClick={handleUpload}
         >
-          {uploading ? 'Uploading…' : 'Upload'}
+          {uploading ? progressMessage || 'Uploading...' : 'Upload'}
         </Button>
         {file && (
           <Button variant="outline" onClick={() => setFile(null)}>
@@ -144,6 +154,18 @@ export function UploadRoute() {
           </Button>
         )}
       </div>
+
+      {uploading && progressMessage && (
+        <div className="mt-3 space-y-1.5">
+          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-all"
+              style={{ width: `${Math.max(4, Math.min(100, progressValue))}%` }}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">{progressMessage}</p>
+        </div>
+      )}
 
       {modelState.status === 'downloading' && (
         <p className="text-xs text-muted-foreground mt-3">

@@ -21,7 +21,6 @@ interface D1Database {
 interface Env {
   DB: D1Database
   APP_ORIGIN?: string
-  SIGNUP_INVITE_CODE?: string
   SESSION_DAYS?: string
 }
 
@@ -175,13 +174,9 @@ async function health(env: Env) {
 
 async function handleAuth(request: Request, env: Env, path: string) {
   if (path === '/api/auth/signup' && request.method === 'POST') {
-    const body = await readJson<{ email?: unknown; password?: unknown; inviteCode?: unknown }>(request)
+    const body = await readJson<{ email?: unknown; password?: unknown }>(request)
     const email = normalizeEmail(body.email)
     const password = requirePassword(body.password)
-    const configuredInvite = env.SIGNUP_INVITE_CODE?.trim()
-    if (configuredInvite && body.inviteCode !== configuredInvite) {
-      throw new ApiError(403, 'Invalid invite code.')
-    }
 
     const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first()
     if (existing) throw new ApiError(409, 'An account already exists for this email.')
@@ -353,6 +348,7 @@ async function createBook(request: Request, env: Env, user: User) {
   let fileName = ''
   let text = ''
   let sourceFormat = ''
+  let pageCount: number | null = null
 
   if (contentType.includes('application/json')) {
     const body = await readJson<Record<string, unknown>>(request)
@@ -360,6 +356,7 @@ async function createBook(request: Request, env: Env, user: User) {
     fileName = stringField(body.fileName) || `${title}.txt`
     text = stringField(body.text)
     sourceFormat = stringField(body.sourceFormat)
+    pageCount = requestedPageCount(body.pageCount)
   } else if (contentType.includes('multipart/form-data')) {
     const form = await request.formData()
     const file = form.get('file')
@@ -384,7 +381,7 @@ async function createBook(request: Request, env: Env, user: User) {
     title: title.trim(),
     fileName,
     uploadedAt: now,
-    pageCount: estimatePages(text),
+    pageCount: pageCount ?? estimatePages(text),
     textCharacters: text.length,
     text,
     excerpt: text.trim().slice(0, 320),
@@ -459,6 +456,11 @@ function isPlainTextLike(fileName: string, contentType: string) {
 
 function estimatePages(text: string) {
   return Math.max(1, Math.ceil(text.length / 2400))
+}
+
+function requestedPageCount(value: unknown) {
+  const pageCount = Number(value)
+  return Number.isFinite(pageCount) && pageCount > 0 ? Math.round(pageCount) : null
 }
 
 async function handleBookRoute(request: Request, env: Env, user: User, bookId: string, rest: string) {
