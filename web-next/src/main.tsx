@@ -2,13 +2,9 @@ import './index.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
-import { QueryClient } from '@tanstack/react-query'
-import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
-import { createSyncStoragePersister } from '@tanstack/query-sync-storage-persister'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { getStoredAuthToken, getStoredUser, restoreSession, subscribeAuth } from '@/lib/auth'
-import { setAudioCacheUserId } from '@/shared/storage/audioCache'
-import { setDictionaryCacheUserId } from '@/shared/storage/dictionaryCache'
+import { subscribeAuth } from '@/lib/auth'
 import { router } from './app/router'
 
 const queryClient = new QueryClient({
@@ -21,12 +17,6 @@ const queryClient = new QueryClient({
   },
 })
 
-const persister = createSyncStoragePersister({
-  storage: window.localStorage,
-  key: 'storybook-qcache-v1',
-  throttleTime: 1000,
-})
-
 let activeUserId = ''
 
 function applyAuthUser(nextUserId: string) {
@@ -35,8 +25,13 @@ function applyAuthUser(nextUserId: string) {
     window.localStorage.removeItem('storybook-qcache-v1')
   }
   activeUserId = nextUserId
-  void setAudioCacheUserId(nextUserId || null)
-  void setDictionaryCacheUserId(nextUserId || null)
+  void Promise.all([
+    import('@/shared/storage/audioCache'),
+    import('@/shared/storage/dictionaryCache'),
+  ]).then(([audioCache, dictionaryCache]) => {
+    void audioCache.setAudioCacheUserId(nextUserId || null)
+    void dictionaryCache.setDictionaryCacheUserId(nextUserId || null)
+  })
   if (!nextUserId) {
     // On sign-out, wipe the query cache so no stale data leaks between users
     queryClient.clear()
@@ -56,17 +51,6 @@ function applyAuthUser(nextUserId: string) {
 }
 
 subscribeAuth((user) => applyAuthUser(user?.id ?? ''))
-
-// Restore token from existing session on app start (before any render)
-if (getStoredAuthToken()) {
-  applyAuthUser(getStoredUser()?.id ?? '')
-}
-
-restoreSession().then((user) => {
-  applyAuthUser(user?.id ?? '')
-}).catch((error) => {
-  console.warn('[auth] Failed to restore session.', error)
-})
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
@@ -89,10 +73,10 @@ if (typeof navigator !== 'undefined' && 'storage' in navigator && 'persist' in n
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <PersistQueryClientProvider client={queryClient} persistOptions={{ persister }}>
+    <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <RouterProvider router={router} />
       </TooltipProvider>
-    </PersistQueryClientProvider>
+    </QueryClientProvider>
   </StrictMode>,
 )

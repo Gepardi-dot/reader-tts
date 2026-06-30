@@ -1,4 +1,4 @@
-import { setCachedToken } from '@/shared/api/client'
+import { setCachedToken } from '@/shared/api/authToken'
 
 export interface AuthUser {
   id: string

@@ -1,23 +1,17 @@
-import { extractBookText, type BookExtractionProgress } from '@/shared/books/extractBookText'
+import { getCachedToken, setCachedToken } from '@/shared/api/authToken'
+import type { BookExtractionProgress } from '@/shared/books/extractBookText'
 
 export class AuthError extends Error {}
 
-// Cached bearer token, kept fresh by the custom auth client.
-let _cachedToken = ''
-
-export function setCachedToken(token: string) {
-  _cachedToken = token
-}
-
 function getToken() {
-  return _cachedToken
+  return getCachedToken()
 }
 
 async function readSessionToken() {
   if (typeof window === 'undefined') return getToken()
   const { getStoredAuthToken } = await import('@/lib/auth')
   const token = getStoredAuthToken()
-  if (token !== _cachedToken) {
+  if (token !== getCachedToken()) {
     setCachedToken(token)
   }
   return token
@@ -150,6 +144,7 @@ export const api = {
 }
 
 export async function uploadBook(file: File, title?: string | null, options: UploadBookOptions = {}) {
+  const { extractBookText } = await import('@/shared/books/extractBookText')
   const payload = await extractBookText(file, { title, onProgress: options.onProgress })
   options.onProgress?.({ phase: 'uploading', progress: 100, message: 'Saving book...' })
 
