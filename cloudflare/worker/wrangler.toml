@@ -4,6 +4,7 @@ compatibility_date = "2026-06-29"
 
 [vars]
 APP_NAME = "reader-tts"
+GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 
 [[d1_databases]]
 binding = "DB"
