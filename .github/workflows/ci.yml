@@ -25,7 +25,7 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────
   # Primary frontend (web-next): lint → build
-  # This is the app that deploys to Vercel.
+  # This is the app deployed to Cloudflare Pages.
   # ─────────────────────────────────────────────────────────────────────────
   frontend:
     name: Frontend — web-next (lint + build)
