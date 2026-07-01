@@ -10,3 +10,7 @@ GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 binding = "DB"
 database_name = "reader_tts"
 database_id = "c58a5509-40d7-439a-8bfb-42b8d990a245"
+
+[[r2_buckets]]
+binding = "AUDIO_CACHE"
+bucket_name = "reader-tts-audio-cache"

@@ -17,12 +17,13 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - Browser speech is the default instant provider and starts on word tap.
 - Kokoro runs in a browser Worker, caches model assets, and can synthesize locally after warmup.
 - Gemini TTS is enabled in the Cloudflare Worker and passes authenticated provider-preview synthesis.
+- R2 is active for durable Gemini live-audio cache storage, with the edge Cache API still serving as the fastest first-level cache.
 - The Reader chunks audio and prefetches ahead, but orchestration still lives inside `ReaderRoute.tsx`.
 
 ## Engineering Plan
 
-1. Add edge caching for Gemini WAV chunks.
-2. Enable R2 for persistent cross-colo Gemini storage when the Cloudflare account allows it.
+1. Keep edge caching for local Gemini WAV chunk repeat hits.
+2. Use R2 for persistent cross-colo Gemini storage.
 3. Keep Browser speech as the immediate fallback for uncached Gemini or cold Kokoro.
 4. Move playback scheduling into a dedicated audio controller so React rendering does not drive timing.
 5. Add lightweight telemetry for tap latency, cache hits, chunk generation time, and stalls.
@@ -48,4 +49,5 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - 2026-06-30: Browser speech now keeps one utterance queued ahead for browser-only and cold-Kokoro fallback playback, reducing chunk-boundary gaps without blocking Gemini native handoff.
 - 2026-07-01: Added `GEMINI_API_KEY` as a Cloudflare Worker secret, redeployed `reader-tts-api`, and confirmed `/api/providers` reports Gemini available. Authenticated `/api/providers/test` produced a WAV data URL with `gemini-2.5-flash-preview-tts` in about 6 seconds.
 - 2026-07-01: Extracted Web Audio buffer start/end/seek calculations into tested playback helpers so the next controller pass can focus on imperative media handles instead of duplicated timing math.
-- Next: enable R2 in the Cloudflare dashboard, run real Gemini cache-hit smoke tests with persistent storage, then move imperative media handles out of `ReaderRoute.tsx`.
+- 2026-07-01: Enabled R2, created `reader-tts-audio-cache`, and added the Worker `AUDIO_CACHE` binding for durable Gemini WAV cache storage.
+- Next: run real Gemini R2 cache-hit smoke tests after deployment, add latency telemetry, then move imperative media handles out of `ReaderRoute.tsx`.
