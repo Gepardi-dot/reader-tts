@@ -51,4 +51,5 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - 2026-07-01: Extracted Web Audio buffer start/end/seek calculations into tested playback helpers so the next controller pass can focus on imperative media handles instead of duplicated timing math.
 - 2026-07-01: Enabled R2, created `reader-tts-audio-cache`, and added the Worker `AUDIO_CACHE` binding for durable Gemini WAV cache storage.
 - 2026-07-01: Added authenticated performance telemetry for TTS play starts, first-audio latency, and Gemini live-audio fetch timing with cache source metadata.
+- 2026-07-01: Added an authenticated TTS telemetry summary endpoint for p50/p95 timing, cache hit rates, cache-source counts, and recent compact events.
 - Next: use telemetry samples to tune chunk sizes/prefetch thresholds, then move imperative media handles out of `ReaderRoute.tsx`.

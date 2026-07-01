@@ -146,6 +146,7 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   const user = await requireUser(request, env)
 
   if (path === '/api/providers/test' && request.method === 'POST') return testProvider(request, env)
+  if (path === '/api/telemetry/tts-summary' && request.method === 'GET') return ttsTelemetrySummary(env, user)
   if (path === '/api/telemetry' && request.method === 'POST') return recordTelemetry(request, env, user)
 
   if (path === '/api/books' && request.method === 'GET') return listBooks(env, user)
@@ -1094,6 +1095,136 @@ async function recordTelemetry(request: Request, env: Env, user: User) {
   )
   await env.DB.batch(statements)
   return json({ ok: true, accepted: events.length })
+}
+
+function percentile(sorted: number[], p: number) {
+  if (!sorted.length) return null
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))
+  return sorted[index]
+}
+
+function durationSummary(values: number[]) {
+  const sorted = values
+    .filter((value) => Number.isFinite(value))
+    .map((value) => Math.max(0, Math.round(value)))
+    .sort((left, right) => left - right)
+  if (!sorted.length) {
+    return {
+      count: 0,
+      avgMs: null,
+      p50Ms: null,
+      p95Ms: null,
+      minMs: null,
+      maxMs: null,
+    }
+  }
+  const total = sorted.reduce((sum, value) => sum + value, 0)
+  return {
+    count: sorted.length,
+    avgMs: Math.round(total / sorted.length),
+    p50Ms: percentile(sorted, 50),
+    p95Ms: percentile(sorted, 95),
+    minMs: sorted[0],
+    maxMs: sorted[sorted.length - 1],
+  }
+}
+
+function safeMetadataSummary(metadataJson: unknown) {
+  if (typeof metadataJson !== 'string' || !metadataJson) return null
+  try {
+    const parsed = JSON.parse(metadataJson)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const metadata = parsed as Record<string, unknown>
+    return {
+      mode: typeof metadata.mode === 'string' ? metadata.mode : null,
+      chunkIndex: Number.isFinite(Number(metadata.chunkIndex)) ? Number(metadata.chunkIndex) : null,
+      chunkChars: Number.isFinite(Number(metadata.chunkChars)) ? Number(metadata.chunkChars) : null,
+      totalChunks: Number.isFinite(Number(metadata.totalChunks)) ? Number(metadata.totalChunks) : null,
+      background: typeof metadata.background === 'boolean' ? metadata.background : null,
+    }
+  } catch {
+    return null
+  }
+}
+
+async function ttsTelemetrySummary(env: Env, user: User) {
+  const since = new Date(Date.now() - TELEMETRY_RETENTION_DAYS * 24 * 60 * 60_000).toISOString()
+  const rows = await env.DB.prepare(
+    `SELECT event_name, provider, duration_ms, cache_hit, cache_storage, metadata_json, created_at
+     FROM performance_events
+     WHERE user_id = ? AND event_name LIKE 'tts.%' AND created_at >= ?
+     ORDER BY created_at DESC
+     LIMIT 1000`,
+  ).bind(user.id, since).all<Record<string, unknown>>()
+
+  const groups = new Map<string, {
+    eventName: string
+    provider: string | null
+    count: number
+    durations: number[]
+    cacheHits: number
+    cacheMisses: number
+    cacheStorage: Record<string, number>
+  }>()
+
+  for (const row of rows.results) {
+    const eventName = String(row.event_name ?? '')
+    const provider = row.provider == null ? null : String(row.provider)
+    const key = `${eventName}:${provider ?? ''}`
+    const group = groups.get(key) ?? {
+      eventName,
+      provider,
+      count: 0,
+      durations: [],
+      cacheHits: 0,
+      cacheMisses: 0,
+      cacheStorage: {},
+    }
+    group.count += 1
+    if (row.duration_ms != null) {
+      const duration = Number(row.duration_ms)
+      if (Number.isFinite(duration)) group.durations.push(duration)
+    }
+    if (row.cache_hit === 1) group.cacheHits += 1
+    if (row.cache_hit === 0) group.cacheMisses += 1
+    const storage = row.cache_storage == null ? '' : String(row.cache_storage)
+    if (storage) group.cacheStorage[storage] = (group.cacheStorage[storage] ?? 0) + 1
+    groups.set(key, group)
+  }
+
+  const byEvent = Array.from(groups.values())
+    .sort((left, right) => left.eventName.localeCompare(right.eventName) || String(left.provider ?? '').localeCompare(String(right.provider ?? '')))
+    .map((group) => ({
+      eventName: group.eventName,
+      provider: group.provider,
+      count: group.count,
+      duration: durationSummary(group.durations),
+      cache: {
+        hits: group.cacheHits,
+        misses: group.cacheMisses,
+        hitRate: group.cacheHits + group.cacheMisses
+          ? Math.round((group.cacheHits / (group.cacheHits + group.cacheMisses)) * 1000) / 1000
+          : null,
+        storage: group.cacheStorage,
+      },
+    }))
+
+  const recent = rows.results.slice(0, 20).map((row) => ({
+    eventName: String(row.event_name ?? ''),
+    provider: row.provider == null ? null : String(row.provider),
+    durationMs: row.duration_ms == null ? null : Number(row.duration_ms),
+    cacheHit: row.cache_hit == null ? null : row.cache_hit === 1,
+    cacheStorage: row.cache_storage == null ? null : String(row.cache_storage),
+    metadata: safeMetadataSummary(row.metadata_json),
+    createdAt: String(row.created_at ?? ''),
+  }))
+
+  return json({
+    windowDays: TELEMETRY_RETENTION_DAYS,
+    totalEvents: rows.results.length,
+    byEvent,
+    recent,
+  })
 }
 
 async function updateReadingProgress(request: Request, env: Env, user: User, bookId: string) {
