@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   BROWSER_TTS_PROVIDER_ID,
+  audioPreferenceDraftChanged,
   audioBufferScheduledEndTime,
   audioBufferSourceStartTime,
   audioSliceStart,
   browserSpeechQueueTarget,
   buildAudioChunks,
   buildPlaybackStartupPlan,
+  committedVoiceForDraft,
   findGridChunk,
   isChunking,
   patchAudioChunk,
@@ -121,6 +123,37 @@ describe('audio playback startup plan', () => {
     expect(isChunking(BROWSER_TTS_PROVIDER_ID)).toBe(false)
     expect(pacingFor('kokoro')).toEqual({ lengthScale: 0.93, sentenceSilence: 0.38 })
     expect(pacingFor('google')).toEqual({ lengthScale: 1.0, sentenceSilence: 0.20 })
+  })
+})
+
+describe('audio preference drafts', () => {
+  it('does not commit browser voices because browser voice selection is local', () => {
+    expect(committedVoiceForDraft(BROWSER_TTS_PROVIDER_ID, 'Samantha')).toBeNull()
+    expect(committedVoiceForDraft('kokoro', 'af_heart')).toBe('af_heart')
+  })
+
+  it('detects provider and voice draft changes', () => {
+    expect(audioPreferenceDraftChanged({
+      committedProvider: 'kokoro',
+      committedVoice: 'af_heart',
+      draftProvider: 'kokoro',
+      draftVoice: 'af_bella',
+    })).toBe(true)
+    expect(audioPreferenceDraftChanged({
+      committedProvider: 'kokoro',
+      committedVoice: 'af_heart',
+      draftProvider: 'google',
+      draftVoice: 'Kore',
+    })).toBe(true)
+  })
+
+  it('leaves unchanged drafts inert', () => {
+    expect(audioPreferenceDraftChanged({
+      committedProvider: 'google',
+      committedVoice: 'Kore',
+      draftProvider: 'google',
+      draftVoice: 'Kore',
+    })).toBe(false)
   })
 })
 
