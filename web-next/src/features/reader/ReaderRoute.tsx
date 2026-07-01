@@ -40,6 +40,7 @@ import {
   FIRST_AUDIO_CHARS,
   PREFETCH_AHEAD_TARGET,
   PREFETCH_CHUNK_LIMIT,
+  SILENT_WAV_DATA_URL,
   audioPreferenceDraftChanged,
   audioSliceStart,
   buildAudioChunks,
@@ -194,12 +195,6 @@ const PROVIDER_PREVIEW_TEXT = (
   'When the room quieted, the story finally found its rhythm. '
   + 'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
 )
-
-// 44-byte silent WAV (RIFF header + 0 PCM samples). Used as a synchronous
-// primer source so .play() during a user gesture actually succeeds, unlocking
-// the audio element on iOS Safari and Chrome mobile for later async-loaded
-// content.
-const SILENT_WAV_DATA_URL = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
 
 const HIGHLIGHT_COLORS = [
   { id: 'amber' as const, hex: '#fbbf24', label: 'Yellow' },

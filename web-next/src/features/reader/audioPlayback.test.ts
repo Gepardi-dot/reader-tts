@@ -14,6 +14,7 @@ import {
   isChunking,
   patchAudioChunk,
   pacingFor,
+  shouldPrimeNativeAudio,
   tapOffsetSeekSeconds,
 } from './audioPlayback'
 
@@ -82,29 +83,35 @@ describe('audio playback chunking', () => {
 
 describe('audio playback startup plan', () => {
   it('keeps browser speech local and does not request native audio', () => {
-    expect(buildPlaybackStartupPlan({
+    const startupPlan = buildPlaybackStartupPlan({
       provider: BROWSER_TTS_PROVIDER_ID,
       chunkCount: 4,
       browserSpeechSupported: true,
       kokoroModelReady: false,
-    })).toMatchObject({
+    })
+
+    expect(startupPlan).toMatchObject({
       useBrowserSpeech: true,
       fetchNativeInBackground: false,
     })
+    expect(shouldPrimeNativeAudio(startupPlan)).toBe(false)
   })
 
   it('masks Gemini cloud startup with browser speech while fetching native audio', () => {
-    expect(buildPlaybackStartupPlan({
+    const startupPlan = buildPlaybackStartupPlan({
       provider: 'google',
       chunkCount: 4,
       browserSpeechSupported: true,
       kokoroModelReady: true,
-    })).toEqual({
+    })
+
+    expect(startupPlan).toEqual({
       startReadyChunkCount: 1,
       bootstrapCount: 2,
       useBrowserSpeech: true,
       fetchNativeInBackground: true,
     })
+    expect(shouldPrimeNativeAudio(startupPlan)).toBe(true)
   })
 
   it('falls back to native startup when browser speech is unavailable for Gemini', () => {
@@ -135,16 +142,19 @@ describe('audio playback startup plan', () => {
   })
 
   it('uses native Kokoro startup once the model is warm', () => {
-    expect(buildPlaybackStartupPlan({
+    const startupPlan = buildPlaybackStartupPlan({
       provider: 'kokoro',
       chunkCount: 3,
       browserSpeechSupported: true,
       kokoroModelReady: true,
-    })).toMatchObject({
+    })
+
+    expect(startupPlan).toMatchObject({
       startReadyChunkCount: 1,
       bootstrapCount: 2,
       useBrowserSpeech: false,
     })
+    expect(shouldPrimeNativeAudio(startupPlan)).toBe(true)
   })
 
   it('keeps provider metadata explicit', () => {

@@ -25,6 +25,7 @@ import {
   DEFAULT_PREFETCH_AHEAD,
   FIRST_AUDIO_CHARS,
   PREFETCH_AHEAD_TARGET,
+  SILENT_WAV_DATA_URL,
   audioBufferScheduledEndTime,
   audioBufferSourceStartTime,
   browserSpeechQueueTarget,
@@ -34,6 +35,7 @@ import {
   findGridChunk,
   patchAudioChunk,
   pacingFor,
+  shouldPrimeNativeAudio,
   tapOffsetSeekSeconds,
 } from './audioPlayback'
 import {
@@ -346,6 +348,7 @@ export function useWordAudioController({
   audioRateRef.current = rate
 
   const wordAudioRef = useRef<HTMLAudioElement | null>(null)
+  const wordAudioPrimedRef = useRef<HTMLAudioElement | null>(null)
   const wordAudioAbortRef = useRef<AbortController | null>(null)
   const browserSpeechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null)
   const browserSpeechActiveRef = useRef(false)
@@ -387,6 +390,28 @@ export function useWordAudioController({
       wordAudioScheduledEndRef.current = 0
     }
     return wordAudioCtxRef.current
+  }
+
+  function primeWordAudioElement() {
+    let audio = wordAudioRef.current
+    if (!audio) {
+      audio = new Audio()
+      audio.preservesPitch = true
+      wordAudioRef.current = audio
+    }
+    audio.muted = true
+    audio.loop = false
+    audio.src = SILENT_WAV_DATA_URL
+    wordAudioPrimedRef.current = audio
+    const playPromise = audio.play()
+    if (playPromise && typeof playPromise.then === 'function') {
+      playPromise.catch(() => undefined)
+    }
+    return audio
+  }
+
+  function clearPrimedWordAudioElement() {
+    if (wordAudioPrimedRef.current) wordAudioPrimedRef.current = null
   }
 
   function stopWordAudioCueRAF() {
@@ -883,6 +908,7 @@ export function useWordAudioController({
     if (wordAudioCtxRef.current?.state === 'suspended') void wordAudioCtxRef.current.resume()
     wordAudioRef.current?.pause()
     wordAudioRef.current = null
+    clearPrimedWordAudioElement()
     wordAudioCurIdxRef.current = 0
     wordAudioChunksRef.current = []
     wordAudioChunkFetchesRef.current.clear()
@@ -961,6 +987,7 @@ export function useWordAudioController({
     } catch { /* ignore */ }
     wordAudioRef.current?.pause()
     wordAudioRef.current = null
+    clearPrimedWordAudioElement()
 
     const source = ctx.createBufferSource()
     source.buffer = buffer
@@ -1050,6 +1077,7 @@ export function useWordAudioController({
       } catch { /* ignore */ }
       wordAudioRef.current?.pause()
       wordAudioRef.current = null
+      clearPrimedWordAudioElement()
 
       const source = ctx.createBufferSource()
       source.buffer = chunk.buffer
@@ -1080,11 +1108,16 @@ export function useWordAudioController({
         void continueWordAudioPlayback(idx + 1, ctrl, word)
       }
     } else {
-      wordAudioRef.current?.pause()
-      const audio = new Audio(chunk.url)
+      const primedAudio = wordAudioPrimedRef.current
+      const audio = primedAudio ?? new Audio()
+      if (wordAudioRef.current && wordAudioRef.current !== audio) wordAudioRef.current.pause()
+      audio.src = chunk.url
+      audio.muted = false
+      audio.loop = false
       audio.preservesPitch = true
       audio.playbackRate = audioRateRef.current
       wordAudioRef.current = audio
+      clearPrimedWordAudioElement()
       syncAudioFollowCue(chunk, 0, true)
 
       audio.play()
@@ -1187,6 +1220,9 @@ export function useWordAudioController({
       browserSpeechSupported: canUseBrowserSpeech(),
       kokoroModelReady,
     })
+    if (shouldPrimeNativeAudio(startupPlan)) {
+      primeWordAudioElement()
+    }
     queuePerformanceTelemetry({
       eventName: 'tts.play_start',
       bookId,
@@ -1344,6 +1380,7 @@ export function useWordAudioController({
     audio.preservesPitch = true
     audio.playbackRate = rate
     wordAudioRef.current = audio
+    clearPrimedWordAudioElement()
 
     const start = () => {
       try { audio.currentTime = positionInChunk } catch { /* ignore */ }
@@ -1395,6 +1432,8 @@ export function useWordAudioController({
     wordAudioCtxRef.current?.close().catch(() => {})
     wordAudioCtxRef.current = null
     wordAudioRef.current?.pause()
+    wordAudioRef.current = null
+    clearPrimedWordAudioElement()
     wordAudioChunkFetchesRef.current.clear()
     clearWordAudioObjectUrls()
   }, [])
