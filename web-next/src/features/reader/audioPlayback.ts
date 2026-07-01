@@ -23,6 +23,7 @@ export const DEFAULT_FIRST_AUDIO_CHARS = 180
 export const DEFAULT_AUDIO_CHARS = 800
 export const PREFETCH_CHUNK_LIMIT = 3
 export const AUDIO_SLICE_CHARS = 2200
+export const AUDIO_CONTEXT_START_LEAD_SEC = 0.002
 
 // How many chunks to fire in parallel right when playback begins.
 // The first chunk is awaited only when no instant browser mask is active.
@@ -60,6 +61,48 @@ export function patchAudioChunk<T extends object>(
   if (!chunk) return false
   Object.assign(chunk, patch)
   return true
+}
+
+export function audioBufferSourceStartTime(
+  currentTime: number,
+  scheduledEnd: number,
+  leadSeconds = AUDIO_CONTEXT_START_LEAD_SEC,
+): number {
+  const safeCurrentTime = Number.isFinite(currentTime) ? currentTime : 0
+  const safeScheduledEnd = Number.isFinite(scheduledEnd) ? scheduledEnd : 0
+  const safeLead = Math.max(0, Number.isFinite(leadSeconds) ? leadSeconds : 0)
+  return Math.max(safeCurrentTime + safeLead, safeScheduledEnd)
+}
+
+export function audioBufferScheduledEndTime({
+  startAt,
+  bufferDuration,
+  seekSeconds = 0,
+  playbackRate = 1,
+}: {
+  startAt: number
+  bufferDuration: number
+  seekSeconds?: number
+  playbackRate?: number
+}): number {
+  const safeStartAt = Number.isFinite(startAt) ? startAt : 0
+  const safeDuration = Math.max(0, Number.isFinite(bufferDuration) ? bufferDuration : 0)
+  const safeSeek = Math.max(0, Math.min(
+    safeDuration,
+    Number.isFinite(seekSeconds) ? seekSeconds : 0,
+  ))
+  const safeRate = playbackRate > 0 && Number.isFinite(playbackRate) ? playbackRate : 1
+  return safeStartAt + Math.max(0, safeDuration - safeSeek) / safeRate
+}
+
+export function tapOffsetSeekSeconds(
+  chunkStart: number,
+  tapOffset: number | null | undefined,
+  cues: readonly { start: number; timeStart: number }[] | null | undefined,
+): number {
+  if (tapOffset == null || tapOffset <= chunkStart || !cues?.length) return 0
+  const seekCue = cues.find((cue) => cue.start >= tapOffset)
+  return seekCue ? Math.max(0, seekCue.timeStart) : 0
 }
 
 export function browserSpeechQueueTarget(activeIdx: number, chunkCount: number, ahead = 1): number {

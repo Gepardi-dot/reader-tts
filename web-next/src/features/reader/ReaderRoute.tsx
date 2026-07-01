@@ -42,6 +42,8 @@ import {
   FIRST_AUDIO_CHARS,
   PREFETCH_AHEAD_TARGET,
   PREFETCH_CHUNK_LIMIT,
+  audioBufferScheduledEndTime,
+  audioBufferSourceStartTime,
   audioSliceStart,
   browserSpeechQueueTarget,
   buildAudioChunks,
@@ -50,6 +52,7 @@ import {
   isChunking,
   patchAudioChunk,
   pacingFor,
+  tapOffsetSeekSeconds,
 } from './audioPlayback'
 import {
   preferredBrowserSpeechVoice,
@@ -4553,9 +4556,12 @@ export function ReaderRoute() {
 
     wordAudioChunkSeekRef.current = 0
     const now = ctx.currentTime
-    const startAt = Math.max(now + 0.002, wordAudioScheduledEndRef.current)
+    const startAt = audioBufferSourceStartTime(now, wordAudioScheduledEndRef.current)
     source.start(startAt)
-    wordAudioScheduledEndRef.current = startAt + buffer.duration
+    wordAudioScheduledEndRef.current = audioBufferScheduledEndTime({
+      startAt,
+      bufferDuration: buffer.duration,
+    })
     wordAudioChunkStartRef.current = startAt
     syncAudioFollowCue(chunk, 0, true)
     startWordAudioCueRAF()
@@ -4643,17 +4649,18 @@ export function ReaderRoute() {
       wordAudioSourceRef.current = source
 
       // Seek into first chunk when playing from a grid chunk that starts before the tap word
-      let seekSec = 0
-      if (chunk.tapOffset != null && chunk.tapOffset > chunk.start && chunk.cues?.length) {
-        const seekCue = chunk.cues.find(c => c.start >= chunk.tapOffset!)
-        if (seekCue) seekSec = seekCue.timeStart
-      }
+      const seekSec = tapOffsetSeekSeconds(chunk.start, chunk.tapOffset, chunk.cues)
       wordAudioChunkSeekRef.current = seekSec
 
       const now = ctx.currentTime
-      const startAt = Math.max(now + 0.002, wordAudioScheduledEndRef.current)
+      const startAt = audioBufferSourceStartTime(now, wordAudioScheduledEndRef.current)
       source.start(startAt, seekSec > 0 ? seekSec : undefined)
-      wordAudioScheduledEndRef.current = startAt + (chunk.buffer.duration - seekSec) / audioRateRef.current
+      wordAudioScheduledEndRef.current = audioBufferScheduledEndTime({
+        startAt,
+        bufferDuration: chunk.buffer.duration,
+        seekSeconds: seekSec,
+        playbackRate: audioRateRef.current,
+      })
       wordAudioChunkStartRef.current = startAt
       syncAudioFollowCue(chunk, seekSec, true)
       startWordAudioCueRAF()

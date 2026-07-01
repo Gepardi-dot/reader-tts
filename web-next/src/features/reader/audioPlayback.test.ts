@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   BROWSER_TTS_PROVIDER_ID,
+  audioBufferScheduledEndTime,
+  audioBufferSourceStartTime,
   audioSliceStart,
   browserSpeechQueueTarget,
   buildAudioChunks,
@@ -9,6 +11,7 @@ import {
   isChunking,
   patchAudioChunk,
   pacingFor,
+  tapOffsetSeekSeconds,
 } from './audioPlayback'
 
 describe('audio playback chunking', () => {
@@ -143,6 +146,46 @@ describe('audio chunk patching', () => {
 
     expect(patchAudioChunk(chunks, 3, { status: 'ready' })).toBe(false)
     expect(chunks).toEqual([{ start: 0, end: 5, text: 'hello', status: 'idle' }])
+  })
+})
+
+describe('audio buffer scheduling', () => {
+  it('schedules slightly ahead of the current audio context time when idle', () => {
+    expect(audioBufferSourceStartTime(10, 0)).toBeCloseTo(10.002)
+  })
+
+  it('does not schedule before the previous buffer end', () => {
+    expect(audioBufferSourceStartTime(10, 12)).toBe(12)
+  })
+
+  it('computes the scheduled end after seek and playback-rate adjustment', () => {
+    expect(audioBufferScheduledEndTime({
+      startAt: 4,
+      bufferDuration: 8,
+      seekSeconds: 2,
+      playbackRate: 1.5,
+    })).toBe(8)
+  })
+
+  it('clamps seek seconds and falls back from invalid playback rates', () => {
+    expect(audioBufferScheduledEndTime({
+      startAt: 1,
+      bufferDuration: 3,
+      seekSeconds: 99,
+      playbackRate: 0,
+    })).toBe(1)
+  })
+
+  it('finds the first cue at or after a grid tap offset', () => {
+    const cues = [
+      { start: 100, timeStart: 0 },
+      { start: 140, timeStart: 1.2 },
+      { start: 190, timeStart: 2.4 },
+    ]
+
+    expect(tapOffsetSeekSeconds(100, 130, cues)).toBe(1.2)
+    expect(tapOffsetSeekSeconds(100, 99, cues)).toBe(0)
+    expect(tapOffsetSeekSeconds(100, 230, cues)).toBe(0)
   })
 })
 
