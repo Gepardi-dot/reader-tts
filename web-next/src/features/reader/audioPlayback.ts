@@ -11,12 +11,12 @@ export interface AudioTextChunk {
 // Streaming-style playback: keep the first request small so audio can start quickly,
 // then synthesize larger follow-up chunks while the first chunk is playing.
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
-  google: 240,
+  google: 160,
   kokoro: 65,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {
-  google: 420,
+  google: 320,
   kokoro: 420,
 }
 
@@ -29,7 +29,7 @@ export const AUDIO_CONTEXT_START_LEAD_SEC = 0.002
 // How many chunks to fire in parallel right when playback begins.
 // The first chunk is awaited only when no instant browser mask is active.
 export const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
-  google: 2,
+  google: 3,
   kokoro: 2,
 }
 
@@ -41,6 +41,7 @@ export const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
 export const PREFETCH_AHEAD_TARGET: Record<string, number> = {
+  google: 3,
   kokoro: 3,
 }
 

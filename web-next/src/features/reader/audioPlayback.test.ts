@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   BROWSER_TTS_PROVIDER_ID,
+  CHUNK_CHARS,
+  FIRST_AUDIO_CHARS,
+  PREFETCH_AHEAD_TARGET,
   audioPreferenceDraftChanged,
   audioBufferScheduledEndTime,
   audioBufferSourceStartTime,
@@ -79,6 +82,26 @@ describe('audio playback chunking', () => {
     expect(chunks[0].text.length).toBeLessThanOrEqual(110)
     expect(chunks.map((chunk) => chunk.text).join('')).toBe(text.slice(tapOffset))
   })
+
+  it('keeps Gemini startup chunks short for faster cloud synthesis and browser masking', () => {
+    const text = [
+      `${'quick '.repeat(32)}first boundary. `,
+      `${'steady '.repeat(80)}second boundary. `,
+      `${'smooth '.repeat(80)}third boundary.`,
+    ].join('')
+
+    const chunks = buildAudioChunks(
+      text,
+      0,
+      CHUNK_CHARS.google,
+      FIRST_AUDIO_CHARS.google,
+    )
+
+    expect(FIRST_AUDIO_CHARS.google).toBeLessThan(CHUNK_CHARS.google)
+    expect(chunks.length).toBeGreaterThan(3)
+    expect(chunks[0].text.length).toBeLessThanOrEqual(220)
+    expect(Math.max(...chunks.slice(1).map((chunk) => chunk.text.length))).toBeLessThanOrEqual(420)
+  })
 })
 
 describe('audio playback startup plan', () => {
@@ -107,11 +130,12 @@ describe('audio playback startup plan', () => {
 
     expect(startupPlan).toEqual({
       startReadyChunkCount: 1,
-      bootstrapCount: 2,
+      bootstrapCount: 3,
       useBrowserSpeech: true,
       fetchNativeInBackground: true,
     })
     expect(shouldPrimeNativeAudio(startupPlan)).toBe(true)
+    expect(PREFETCH_AHEAD_TARGET.google).toBe(3)
   })
 
   it('falls back to native startup when browser speech is unavailable for Gemini', () => {
