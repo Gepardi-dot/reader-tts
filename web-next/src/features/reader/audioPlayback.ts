@@ -287,3 +287,7 @@ export function buildPlaybackStartupPlan({
 export function shouldPrimeNativeAudio(startupPlan: PlaybackStartupPlan): boolean {
   return startupPlan.fetchNativeInBackground || !startupPlan.useBrowserSpeech
 }
+
+export function shouldBridgeNativeAudioGap(provider: string, browserSpeechSupported: boolean): boolean {
+  return provider === CLOUD_TTS_PROVIDER_ID && browserSpeechSupported
+}

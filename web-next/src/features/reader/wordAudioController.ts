@@ -35,6 +35,7 @@ import {
   findGridChunk,
   patchAudioChunk,
   pacingFor,
+  shouldBridgeNativeAudioGap,
   shouldPrimeNativeAudio,
   tapOffsetSeekSeconds,
 } from './audioPlayback'
@@ -933,6 +934,25 @@ export function useWordAudioController({
     if (nextChunk.url) {
       playWordAudioChunkAt(nextIdx, latest, ctrl, word)
       return
+    }
+
+    if (shouldBridgeNativeAudioGap(provider, canUseBrowserSpeech())) {
+      queuePerformanceTelemetry({
+        eventName: 'tts.native_gap_bridge',
+        bookId,
+        provider,
+        metadata: {
+          chunkIndex: nextIdx,
+          chunkChars: nextChunk.text.length,
+          chunkStatus: nextChunk.status,
+        },
+      })
+      if (nextChunk.status === 'idle') {
+        void fetchWordAudioChunk(nextIdx, nextChunk, ctrl.signal, { background: true })
+      }
+      if (playBrowserSpeechChunkAt(nextIdx, latest, ctrl, word, { switchToNativeWhenReady: true })) {
+        return
+      }
     }
 
     setWordAudio({ word, status: 'loading' })
