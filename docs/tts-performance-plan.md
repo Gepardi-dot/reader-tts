@@ -56,4 +56,5 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - 2026-07-01: Extracted the reader word-audio playback controller from `ReaderRoute.tsx` so media refs, chunk fetches, streaming buffers, pause/resume, and stop cleanup are isolated from route rendering.
 - 2026-07-01: Made the playbar primary control deterministic: loading clicks cancel, playing clicks pause, and paused clicks resume or restart the current chunk if the underlying media handle has gone stale.
 - 2026-07-01: D1 telemetry showed cold Kokoro browser fallback sometimes spoke 585-character grid chunks with first-audio near 1.8s, so the cold-grid path now re-chunks from the tapped offset with Kokoro's short first chunk.
+- 2026-07-01: Word-audio native startup now primes a reusable HTMLAudio element during the original tap whenever Gemini handoff or native Kokoro playback may need HTMLAudio fallback, matching the existing mobile unlock pattern from the audio preview player.
 - Next: use telemetry samples to tune chunk sizes/prefetch thresholds, then split Kokoro/Gemini buffering policy from low-level media control.

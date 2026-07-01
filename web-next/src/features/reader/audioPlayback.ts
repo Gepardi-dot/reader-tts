@@ -1,5 +1,6 @@
 export const BROWSER_TTS_PROVIDER_ID = 'browser'
 export const CLOUD_TTS_PROVIDER_ID = 'google'
+export const SILENT_WAV_DATA_URL = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
 
 export interface AudioTextChunk {
   start: number
@@ -280,4 +281,8 @@ export function buildPlaybackStartupPlan({
     useBrowserSpeech,
     fetchNativeInBackground: cloudBrowserMask,
   }
+}
+
+export function shouldPrimeNativeAudio(startupPlan: PlaybackStartupPlan): boolean {
+  return startupPlan.fetchNativeInBackground || !startupPlan.useBrowserSpeech
 }
