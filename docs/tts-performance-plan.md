@@ -47,4 +47,5 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - 2026-06-30: Primed and cached browser speech voice selection before first playback so the instant fallback path avoids synchronous voice discovery on tap.
 - 2026-06-30: Browser speech now keeps one utterance queued ahead for browser-only and cold-Kokoro fallback playback, reducing chunk-boundary gaps without blocking Gemini native handoff.
 - 2026-07-01: Added `GEMINI_API_KEY` as a Cloudflare Worker secret, redeployed `reader-tts-api`, and confirmed `/api/providers` reports Gemini available. Authenticated `/api/providers/test` produced a WAV data URL with `gemini-2.5-flash-preview-tts` in about 6 seconds.
-- Next: enable R2 in the Cloudflare dashboard, run real Gemini cache-hit smoke tests with persistent storage, then continue extracting timing-sensitive playback scheduling out of `ReaderRoute.tsx`.
+- 2026-07-01: Extracted Web Audio buffer start/end/seek calculations into tested playback helpers so the next controller pass can focus on imperative media handles instead of duplicated timing math.
+- Next: enable R2 in the Cloudflare dashboard, run real Gemini cache-hit smoke tests with persistent storage, then move imperative media handles out of `ReaderRoute.tsx`.
