@@ -1224,8 +1224,23 @@ export function useWordAudioController({
   function resumeWordAudio() {
     if (!wordAudio) return
     if (browserSpeechActiveRef.current && canUseBrowserSpeech()) {
-      window.speechSynthesis.resume()
-      setWordAudio({ word: wordAudio.word, status: 'playing' })
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume()
+        setWordAudio({ word: wordAudio.word, status: 'playing' })
+        return
+      }
+      if (window.speechSynthesis.speaking) {
+        setWordAudio({ word: wordAudio.word, status: 'playing' })
+        return
+      }
+      browserSpeechActiveRef.current = false
+      browserSpeechUtteranceRef.current = null
+      const currentChunk = wordAudioChunksRef.current[wordAudioCurIdxRef.current] ?? wordAudioChunksRef.current[0]
+      if (currentChunk) {
+        void playWord(wordAudio.word, currentChunk.start)
+        return
+      }
+      stopWordAudio()
       return
     }
     const ctx = wordAudioCtxRef.current
@@ -1237,7 +1252,15 @@ export function useWordAudioController({
       return
     }
     const audio = wordAudioRef.current
-    if (!audio) return
+    if (!audio) {
+      const currentChunk = wordAudioChunksRef.current[wordAudioCurIdxRef.current] ?? wordAudioChunksRef.current[0]
+      if (currentChunk) {
+        void playWord(wordAudio.word, currentChunk.start)
+        return
+      }
+      stopWordAudio()
+      return
+    }
     audio.play()
       .then(() => setWordAudio({ word: wordAudio.word, status: 'playing' }))
       .catch(() => showToast('Playback was blocked by the browser. Tap play again.'))
@@ -1245,7 +1268,10 @@ export function useWordAudioController({
 
   function toggleWordAudio() {
     if (!wordAudio) return
-    if (wordAudio.status === 'loading') return
+    if (wordAudio.status === 'loading') {
+      stopWordAudio()
+      return
+    }
     if (wordAudio.status === 'playing') {
       if (browserSpeechActiveRef.current && canUseBrowserSpeech()) {
         window.speechSynthesis.pause()
