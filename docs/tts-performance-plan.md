@@ -53,4 +53,5 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - 2026-07-01: Added authenticated performance telemetry for TTS play starts, first-audio latency, and Gemini live-audio fetch timing with cache source metadata.
 - 2026-07-01: Added an authenticated TTS telemetry summary endpoint for p50/p95 timing, cache hit rates, cache-source counts, and recent compact events.
 - 2026-07-01: Staged provider/voice changes inside the audio panel so dropdown movement previews locally and only the explicit Apply action mutates reader playback or persisted preferences.
-- Next: use telemetry samples to tune chunk sizes/prefetch thresholds, then move imperative media handles out of `ReaderRoute.tsx`.
+- 2026-07-01: Extracted the reader word-audio playback controller from `ReaderRoute.tsx` so media refs, chunk fetches, streaming buffers, pause/resume, and stop cleanup are isolated from route rendering.
+- Next: use telemetry samples to tune chunk sizes/prefetch thresholds, then split Kokoro/Gemini buffering policy from low-level media control.
