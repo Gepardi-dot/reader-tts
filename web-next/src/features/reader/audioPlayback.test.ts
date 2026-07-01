@@ -7,6 +7,7 @@ import {
   audioSliceStart,
   browserSpeechQueueTarget,
   buildAudioChunks,
+  buildAudioChunksFromGridWindow,
   buildPlaybackStartupPlan,
   committedVoiceForDraft,
   findGridChunk,
@@ -48,6 +49,34 @@ describe('audio playback chunking', () => {
     expect(findGridChunk(grid, 0)).toBe(0)
     expect(findGridChunk(grid, 100)).toBe(1)
     expect(findGridChunk(grid, 419)).toBe(2)
+  })
+
+  it('re-chunks a presynthesis grid window from the tapped offset', () => {
+    const text = [
+      'Intro words before the tap. ',
+      `${'fast '.repeat(40)}first boundary. `,
+      `${'next '.repeat(80)}second boundary.`,
+    ].join('')
+    const tapOffset = text.indexOf('fast')
+    const grid = [
+      { start: 0, end: text.indexOf('second boundary.') },
+      { start: text.indexOf('second boundary.'), end: text.length },
+    ]
+
+    const chunks = buildAudioChunksFromGridWindow({
+      fullText: text,
+      grid,
+      start: tapOffset,
+      windowChunks: 2,
+      targetChars: 180,
+      firstTargetChars: 50,
+    })
+
+    expect(chunks.length).toBeGreaterThan(1)
+    expect(chunks[0].start).toBe(tapOffset)
+    expect(chunks[0].text).toBe(text.slice(tapOffset, chunks[0].end))
+    expect(chunks[0].text.length).toBeLessThanOrEqual(110)
+    expect(chunks.map((chunk) => chunk.text).join('')).toBe(text.slice(tapOffset))
   })
 })
 

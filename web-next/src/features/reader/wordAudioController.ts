@@ -29,6 +29,7 @@ import {
   audioBufferSourceStartTime,
   browserSpeechQueueTarget,
   buildAudioChunks,
+  buildAudioChunksFromGridWindow,
   buildPlaybackStartupPlan,
   findGridChunk,
   patchAudioChunk,
@@ -1127,16 +1128,33 @@ export function useWordAudioController({
     const grid = provider === 'kokoro' && !kokoroModelReady ? presynthGridRef.current : null
     if (grid && grid.length > 0) {
       const chunkIdx = findGridChunk(grid, start)
-      const window_ = grid.slice(chunkIdx, chunkIdx + 50)
-      initial = window_.map((g, i) => ({
-        start: g.start,
-        end: g.end,
-        text: fullText.slice(g.start, g.end),
+      const chunkSize = CHUNK_CHARS[provider] ?? DEFAULT_AUDIO_CHARS
+      const firstChunkSize = FIRST_AUDIO_CHARS[provider] ?? DEFAULT_FIRST_AUDIO_CHARS
+      const raw = buildAudioChunksFromGridWindow({
+        fullText,
+        grid,
+        start,
+        windowChunks: 50,
+        targetChars: chunkSize,
+        firstTargetChars: firstChunkSize,
+      })
+      initial = raw.map((chunk) => ({
+        ...chunk,
         url: null,
         buffer: null,
         status: 'idle' as ChunkStatus,
-        tapOffset: i === 0 && g.start < start ? start : undefined,
       }))
+      if (!initial.length) {
+        const fallbackWindow = grid.slice(chunkIdx, chunkIdx + 50)
+        initial = fallbackWindow.map((g) => ({
+          start: Math.max(g.start, start),
+          end: g.end,
+          text: fullText.slice(Math.max(g.start, start), g.end),
+          url: null,
+          buffer: null,
+          status: 'idle' as ChunkStatus,
+        })).filter((chunk) => chunk.text.trim())
+      }
     } else {
       const end = Math.min(fullText.length, start + AUDIO_SLICE_CHARS)
       const snippet = fullText.slice(start, end)

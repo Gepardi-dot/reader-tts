@@ -211,6 +211,30 @@ export function buildAudioChunks(
   return chunks.filter((chunk) => chunk.text.trim())
 }
 
+export function buildAudioChunksFromGridWindow({
+  fullText,
+  grid,
+  start,
+  windowChunks,
+  targetChars,
+  firstTargetChars,
+}: {
+  fullText: string
+  grid: Array<{ start: number; end: number }>
+  start: number
+  windowChunks: number
+  targetChars: number
+  firstTargetChars: number
+}): AudioTextChunk[] {
+  if (!fullText || grid.length === 0 || windowChunks <= 0) return []
+  const boundedStart = Math.max(0, Math.min(start, fullText.length))
+  const chunkIdx = findGridChunk(grid, boundedStart)
+  const lastGridIdx = Math.min(grid.length - 1, chunkIdx + Math.max(1, Math.floor(windowChunks)) - 1)
+  const boundedEnd = Math.max(boundedStart, Math.min(grid[lastGridIdx]?.end ?? boundedStart, fullText.length))
+  const snippet = fullText.slice(boundedStart, boundedEnd)
+  return buildAudioChunks(snippet, boundedStart, targetChars, firstTargetChars)
+}
+
 // Binary search: find the grid chunk whose range contains `offset`.
 export function findGridChunk(grid: Array<{ start: number; end: number }>, offset: number): number {
   let lo = 0
