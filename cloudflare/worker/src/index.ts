@@ -18,8 +18,30 @@ interface D1Database {
   batch<T = unknown>(statements: D1PreparedStatement[]): Promise<T[]>
 }
 
+interface R2ObjectBody {
+  size: number
+  customMetadata?: Record<string, string>
+  arrayBuffer(): Promise<ArrayBuffer>
+}
+
+interface R2Bucket {
+  get(key: string): Promise<R2ObjectBody | null>
+  put(
+    key: string,
+    value: ArrayBuffer | ArrayBufferView | ReadableStream | string,
+    options?: {
+      httpMetadata?: {
+        contentType?: string
+        cacheControl?: string
+      }
+      customMetadata?: Record<string, string>
+    },
+  ): Promise<unknown>
+}
+
 interface Env {
   DB: D1Database
+  AUDIO_CACHE?: R2Bucket
   APP_ORIGIN?: string
   SESSION_DAYS?: string
   GEMINI_API_KEY?: string
@@ -51,6 +73,7 @@ const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-preview-tts'
 const GEMINI_SAMPLE_RATE = 24_000
 const LIVE_AUDIO_CACHE_VERSION = 1
 const EDGE_AUDIO_CACHE_SECONDS = 7 * 24 * 60 * 60
+const R2_AUDIO_CACHE_PREFIX = `live-audio/v${LIVE_AUDIO_CACHE_VERSION}`
 const PROVIDER_PREVIEW_TEXT = (
   'When the room quieted, the story finally found its rhythm. ' +
   'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
@@ -693,6 +716,76 @@ function writeEdgeAudioCache(ctx: ExecutionContext, cacheDigest: string, payload
   )
 }
 
+function r2AudioCacheKey(cacheDigest: string) {
+  return `${R2_AUDIO_CACHE_PREFIX}/${cacheDigest}.wav`
+}
+
+function liveAudioPayloadFromWav(
+  cacheDigest: string,
+  wav: Uint8Array,
+  options: {
+    duration: number | null
+    cacheStorage?: string
+  },
+): Record<string, JsonValue> {
+  return {
+    url: `data:audio/wav;base64,${bytesToBase64(wav)}`,
+    duration: options.duration,
+    cues: [],
+    cacheKey: `live-audio:v${LIVE_AUDIO_CACHE_VERSION}:${cacheDigest}`,
+    cacheVersion: LIVE_AUDIO_CACHE_VERSION,
+    contentType: 'audio/wav',
+    byteLength: wav.byteLength,
+    cacheHit: false,
+    cacheStorage: options.cacheStorage ?? 'generated',
+  }
+}
+
+async function readR2AudioCache(env: Env, cacheDigest: string): Promise<Record<string, JsonValue> | null> {
+  if (!env.AUDIO_CACHE) return null
+  try {
+    const object = await env.AUDIO_CACHE.get(r2AudioCacheKey(cacheDigest))
+    if (!object) return null
+    const wav = new Uint8Array(await object.arrayBuffer())
+    const durationRaw = object.customMetadata?.duration
+    const duration = durationRaw && Number.isFinite(Number(durationRaw))
+      ? Number(durationRaw)
+      : null
+    return liveAudioPayloadFromWav(cacheDigest, wav, {
+      duration,
+      cacheStorage: 'r2',
+    })
+  } catch {
+    return null
+  }
+}
+
+function writeR2AudioCache(
+  ctx: ExecutionContext,
+  env: Env,
+  cacheDigest: string,
+  result: { duration: number; wav: Uint8Array },
+) {
+  if (!env.AUDIO_CACHE) return
+  const metadata: Record<string, string> = {
+    duration: String(result.duration),
+    cacheVersion: String(LIVE_AUDIO_CACHE_VERSION),
+    contentType: 'audio/wav',
+    byteLength: String(result.wav.byteLength),
+  }
+  ctx.waitUntil(
+    env.AUDIO_CACHE
+      .put(r2AudioCacheKey(cacheDigest), result.wav, {
+        httpMetadata: {
+          contentType: 'audio/wav',
+          cacheControl: `public, max-age=${EDGE_AUDIO_CACHE_SECONDS}`,
+        },
+        customMetadata: metadata,
+      })
+      .catch(() => undefined),
+  )
+}
+
 async function geminiLiveAudioCacheDigest(input: {
   bookId: string
   provider: string
@@ -842,7 +935,13 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
   const cacheKey = `live-audio:v${LIVE_AUDIO_CACHE_VERSION}:${cacheDigest}`
   const cached = await readEdgeAudioCache(cacheDigest)
   if (cached) {
-    return json({ ...cached, cacheHit: true })
+    return json({ ...cached, cacheHit: true, cacheStorage: 'edge' })
+  }
+
+  const durableCached = await readR2AudioCache(env, cacheDigest)
+  if (durableCached) {
+    writeEdgeAudioCache(ctx, cacheDigest, durableCached)
+    return json({ ...durableCached, cacheHit: true, cacheStorage: 'r2' })
   }
 
   const result = await synthesizeGeminiAudio(env, {
@@ -853,17 +952,14 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
     lengthScale: safeLengthScale,
     sentenceSilence: safeSentenceSilence,
   })
-  const data = bytesToBase64(result.wav)
-  const payload: Record<string, JsonValue> = {
-    url: `data:audio/wav;base64,${data}`,
-    duration: result.duration,
-    cues: [],
+  const payload = {
+    ...liveAudioPayloadFromWav(cacheDigest, result.wav, {
+      duration: result.duration,
+      cacheStorage: 'generated',
+    }),
     cacheKey,
-    cacheVersion: LIVE_AUDIO_CACHE_VERSION,
-    contentType: 'audio/wav',
-    byteLength: result.wav.byteLength,
-    cacheHit: false,
   }
+  writeR2AudioCache(ctx, env, cacheDigest, result)
   writeEdgeAudioCache(ctx, cacheDigest, payload)
   return json(payload)
 }

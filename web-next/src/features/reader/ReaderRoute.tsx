@@ -139,6 +139,8 @@ interface LiveAudioResult {
   cacheVersion?: number
   contentType?: string
   byteLength?: number | null
+  cacheHit?: boolean
+  cacheStorage?: 'edge' | 'r2' | 'generated' | string
 }
 
 interface ProviderTestResult {
@@ -239,6 +241,7 @@ function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
     payload.voice ?? '',
     payload.model ?? '',
     payload.output_format,
+    payload.narration_style,
     payload.length_scale,
     payload.sentence_silence,
     payload.start,
