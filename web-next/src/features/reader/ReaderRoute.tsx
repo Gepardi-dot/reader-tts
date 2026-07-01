@@ -2906,6 +2906,11 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
 }) {
   const isBuffering = phase === 'buffering'
   const isPlaying   = phase === 'playing'
+  const primaryLabel = isBuffering
+    ? 'Cancel audio'
+    : isPlaying
+      ? 'Pause audio'
+      : 'Resume audio'
 
   const progressPct = totalChunks > 1
     ? Math.round(((curIdx + (isPlaying ? 1 : 0)) / totalChunks) * 100)
@@ -2983,7 +2988,9 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
       <div className="flex items-center gap-2 flex-1 min-w-0">
         <button
           onClick={() => handle?.toggle()}
-          disabled={isBuffering}
+          disabled={!handle}
+          aria-label={primaryLabel}
+          title={primaryLabel}
           className="flex items-center justify-center active:scale-90 transition-transform disabled:opacity-40 shrink-0"
           style={{
             width: 26, height: 26, borderRadius: '50%',
