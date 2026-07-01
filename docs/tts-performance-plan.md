@@ -16,7 +16,7 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 
 - Browser speech is the default instant provider and starts on word tap.
 - Kokoro runs in a browser Worker, caches model assets, and can synthesize locally after warmup.
-- Gemini TTS is implemented in the Cloudflare Worker but remains disabled until `GEMINI_API_KEY` is added as a Worker secret.
+- Gemini TTS is enabled in the Cloudflare Worker and passes authenticated provider-preview synthesis.
 - The Reader chunks audio and prefetches ahead, but orchestration still lives inside `ReaderRoute.tsx`.
 
 ## Engineering Plan
@@ -46,4 +46,5 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - 2026-06-30: Reduced playback-time allocations by patching ref-held audio chunks in place instead of cloning the chunk array on each stream/status update.
 - 2026-06-30: Primed and cached browser speech voice selection before first playback so the instant fallback path avoids synchronous voice discovery on tap.
 - 2026-06-30: Browser speech now keeps one utterance queued ahead for browser-only and cold-Kokoro fallback playback, reducing chunk-boundary gaps without blocking Gemini native handoff.
-- Next: enable R2 in the Cloudflare dashboard, add `GEMINI_API_KEY` as a Worker secret, run real Gemini cache-hit smoke tests, then continue extracting timing-sensitive playback scheduling out of `ReaderRoute.tsx`.
+- 2026-07-01: Added `GEMINI_API_KEY` as a Cloudflare Worker secret, redeployed `reader-tts-api`, and confirmed `/api/providers` reports Gemini available. Authenticated `/api/providers/test` produced a WAV data URL with `gemini-2.5-flash-preview-tts` in about 6 seconds.
+- Next: enable R2 in the Cloudflare dashboard, run real Gemini cache-hit smoke tests with persistent storage, then continue extracting timing-sensitive playback scheduling out of `ReaderRoute.tsx`.
