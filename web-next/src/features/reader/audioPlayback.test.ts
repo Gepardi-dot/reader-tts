@@ -17,6 +17,7 @@ import {
   isChunking,
   patchAudioChunk,
   pacingFor,
+  shouldBridgeNativeAudioGap,
   shouldPrimeNativeAudio,
   tapOffsetSeekSeconds,
 } from './audioPlayback'
@@ -136,6 +137,13 @@ describe('audio playback startup plan', () => {
     })
     expect(shouldPrimeNativeAudio(startupPlan)).toBe(true)
     expect(PREFETCH_AHEAD_TARGET.google).toBe(3)
+  })
+
+  it('bridges late Gemini native chunks with browser speech instead of silence', () => {
+    expect(shouldBridgeNativeAudioGap('google', true)).toBe(true)
+    expect(shouldBridgeNativeAudioGap('google', false)).toBe(false)
+    expect(shouldBridgeNativeAudioGap('kokoro', true)).toBe(false)
+    expect(shouldBridgeNativeAudioGap(BROWSER_TTS_PROVIDER_ID, true)).toBe(false)
   })
 
   it('falls back to native startup when browser speech is unavailable for Gemini', () => {
