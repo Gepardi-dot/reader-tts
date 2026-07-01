@@ -52,6 +52,25 @@ export interface PlaybackStartupPlan {
   fetchNativeInBackground: boolean
 }
 
+export function committedVoiceForDraft(provider: string, draftVoice: string | null | undefined): string | null {
+  return provider === BROWSER_TTS_PROVIDER_ID ? null : (draftVoice ?? null)
+}
+
+export function audioPreferenceDraftChanged({
+  committedProvider,
+  committedVoice,
+  draftProvider,
+  draftVoice,
+}: {
+  committedProvider: string
+  committedVoice: string | null | undefined
+  draftProvider: string
+  draftVoice: string | null | undefined
+}): boolean {
+  return committedProvider !== draftProvider ||
+    (committedVoice ?? null) !== committedVoiceForDraft(draftProvider, draftVoice)
+}
+
 export function patchAudioChunk<T extends object>(
   chunks: T[],
   idx: number,

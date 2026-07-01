@@ -50,10 +50,12 @@ import {
   PREFETCH_CHUNK_LIMIT,
   audioBufferScheduledEndTime,
   audioBufferSourceStartTime,
+  audioPreferenceDraftChanged,
   audioSliceStart,
   browserSpeechQueueTarget,
   buildAudioChunks,
   buildPlaybackStartupPlan,
+  committedVoiceForDraft,
   findGridChunk,
   isChunking,
   patchAudioChunk,
@@ -2576,11 +2578,50 @@ function AudioContent({
     staleTime: 5 * 60_000,
   })
   const providerOptions = providerOptionsFromCatalog(providersRes?.providers)
-  const activeProvider = providerOptions.find(p => p.id === provider)
+  const [draftProvider, setDraftProvider] = useState(provider)
+  const [draftVoice, setDraftVoice] = useState<string | null>(voice)
+
+  const activeProvider = providerOptions.find(p => p.id === draftProvider)
   const providerVoices = activeProvider?.voices ?? []
   const selectedProviderUnavailable = Boolean(providersRes?.providers?.length && (!activeProvider || !activeProvider.available))
-  const selectedVoiceId = voice ?? (providerVoices[0]?.id ?? null)
+  const draftVoiceIsAvailable = Boolean(draftVoice && providerVoices.some((item) => item.id === draftVoice))
+  const selectedVoiceId = draftProvider === BROWSER_TTS_PROVIDER_ID
+    ? null
+    : (draftVoiceIsAvailable ? draftVoice : defaultVoiceForProvider(activeProvider))
   const selectedVoiceIndex = providerVoices.findIndex((item) => item.id === selectedVoiceId)
+  const appliedVoice = committedVoiceForDraft(draftProvider, selectedVoiceId)
+  const committedProviderInfo = providerOptions.find(p => p.id === provider)
+  const committedVoiceLabel = committedProviderInfo
+    ?.voices.find((item) => item.id === voice)
+    ?.label ?? voice ?? committedProviderInfo?.label ?? 'Browser speech'
+  const hasDraftChanges = audioPreferenceDraftChanged({
+    committedProvider: provider,
+    committedVoice: voice,
+    draftProvider,
+    draftVoice: selectedVoiceId,
+  })
+
+  function applyDraftSelection() {
+    if (selectedProviderUnavailable) {
+      const message = `${activeProvider?.label ?? draftProvider} is not configured yet. Choose an available provider.`
+      setErrorMsg(message)
+      onError?.(message)
+      return
+    }
+    stopPlayback()
+    setErrorMsg(null)
+    onProviderChange(draftProvider)
+    onVoiceChange(appliedVoice)
+    queuePerformanceTelemetry({
+      eventName: 'tts.voice_apply',
+      provider: draftProvider,
+      metadata: {
+        previousProvider: provider,
+        previousVoice: voice ?? '',
+        nextVoice: appliedVoice ?? '',
+      },
+    })
+  }
 
   // ── Fetch a single chunk and store its URL ──────────────────────────────────
 
@@ -2600,13 +2641,13 @@ function AudioContent({
     updateChunk(idx, { status: 'fetching' })
     const fetchPromise = (async () => {
       try {
-        const { lengthScale, sentenceSilence } = pacingFor(provider)
+        const { lengthScale, sentenceSilence } = pacingFor(draftProvider)
         const previewLengthScale = Math.max(0.6, Math.min(lengthScale * rateRef.current, 1.5))
         const preview = await request<ProviderTestResult>('/api/providers/test', {
           method: 'POST',
           body: JSON.stringify({
-            provider,
-            voice,
+            provider: draftProvider,
+            voice: selectedVoiceId,
             model: null,
             narration_style: '',
             length_scale: previewLengthScale,
@@ -2643,7 +2684,7 @@ function AudioContent({
 
   function prefetchAhead(fromIdx: number, currentChunks: AudioChunk[], signal: AbortSignal) {
     if (signal.aborted) return
-    const target = PREFETCH_AHEAD_TARGET[provider] ?? DEFAULT_PREFETCH_AHEAD
+    const target = PREFETCH_AHEAD_TARGET[draftProvider] ?? DEFAULT_PREFETCH_AHEAD
     for (let offset = 1; offset <= target; offset += 1) {
       const idx = fromIdx + offset
       const chunk = currentChunks[idx]
@@ -2761,13 +2802,13 @@ function AudioContent({
     setErrorMsg(null)
 
     if (selectedProviderUnavailable) {
-      const message = `${activeProvider?.label ?? provider} is not configured yet. Choose an available provider.`
+      const message = `${activeProvider?.label ?? draftProvider} is not configured yet. Choose an available provider.`
       setErrorMsg(message)
       onError?.(message)
       return
     }
 
-    if (provider === BROWSER_TTS_PROVIDER_ID) {
+    if (draftProvider === BROWSER_TTS_PROVIDER_ID) {
       if (!supportsBrowserSpeech()) {
         const message = 'Browser speech is not supported by this browser.'
         setErrorMsg(message)
@@ -2841,7 +2882,7 @@ function AudioContent({
 
   function togglePlay() {
     if (phase === 'playing') {
-      if (provider === BROWSER_TTS_PROVIDER_ID && supportsBrowserSpeech()) {
+      if (draftProvider === BROWSER_TTS_PROVIDER_ID && supportsBrowserSpeech()) {
         window.speechSynthesis.pause()
       } else {
         audioRef.current?.pause()
@@ -2849,7 +2890,7 @@ function AudioContent({
       setPhase('paused')
     } else if (phase === 'paused') {
       setErrorMsg(null)
-      if (provider === BROWSER_TTS_PROVIDER_ID && supportsBrowserSpeech()) {
+      if (draftProvider === BROWSER_TTS_PROVIDER_ID && supportsBrowserSpeech()) {
         window.speechSynthesis.resume()
         setPhase('playing')
         return
@@ -2864,7 +2905,7 @@ function AudioContent({
           setPhase('paused')
       })
     } else if (phase === 'idle') {
-      if (provider !== BROWSER_TTS_PROVIDER_ID) primeAudioElement()
+      if (draftProvider !== BROWSER_TTS_PROVIDER_ID) primeAudioElement()
       void startPlayback()
     }
     // 'buffering' → ignore taps
@@ -2875,7 +2916,7 @@ function AudioContent({
   const isBuffering = phase === 'buffering'
   const isPlaying   = phase === 'playing'
   const isPaused    = phase === 'paused'
-  const playDisabled = isBuffering || selectedProviderUnavailable || (provider !== BROWSER_TTS_PROVIDER_ID && !selectedVoiceId)
+  const playDisabled = isBuffering || selectedProviderUnavailable || (draftProvider !== BROWSER_TTS_PROVIDER_ID && !selectedVoiceId)
 
   const totalChunks  = chunks.length
   const readyChunks  = chunks.filter(c => c.status === 'ready').length
@@ -2884,7 +2925,7 @@ function AudioContent({
   // Buffering label
   const bufferLabel = (() => {
     if (!isBuffering) return null
-    if (provider === 'neutts_local' || provider === 'kokoro') return 'Generating sample…'
+    if (draftProvider === 'neutts_local' || draftProvider === 'kokoro') return 'Generating sample…'
     return 'Loading preview…'
   })()
 
@@ -2894,7 +2935,15 @@ function AudioContent({
     const nextIndex = (baseIndex + direction + providerVoices.length) % providerVoices.length
     stopPlayback()
     setErrorMsg(null)
-    onVoiceChange(providerVoices[nextIndex].id)
+    setDraftVoice(providerVoices[nextIndex].id)
+    queuePerformanceTelemetry({
+      eventName: 'tts.voice_draft_changed',
+      provider: draftProvider,
+      metadata: {
+        source: direction > 0 ? 'next' : 'previous',
+        voice: providerVoices[nextIndex].id,
+      },
+    })
   }
 
   return (
@@ -2904,13 +2953,21 @@ function AudioContent({
       {/* Provider */}
       <div>
         <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Provider</p>
-        <Select value={provider} onValueChange={(v) => {
+        <Select value={draftProvider} onValueChange={(v) => {
           if (v == null) return
           stopPlayback()
           setErrorMsg(null)
           const nextProvider = providerOptions.find(p => p.id === v)
-          onProviderChange(v)
-          onVoiceChange(defaultVoiceForProvider(nextProvider))
+          setDraftProvider(v)
+          setDraftVoice(defaultVoiceForProvider(nextProvider))
+          queuePerformanceTelemetry({
+            eventName: 'tts.voice_draft_changed',
+            provider: v,
+            metadata: {
+              source: 'provider_select',
+              voice: defaultVoiceForProvider(nextProvider) ?? '',
+            },
+          })
         }}>
           <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -2928,8 +2985,21 @@ function AudioContent({
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Voice</p>
           <Select
-            value={voice ?? (providerVoices[0]?.id ?? '')}
-            onValueChange={(v) => { if (v != null) { stopPlayback(); setErrorMsg(null); onVoiceChange(v) } }}
+            value={selectedVoiceId ?? (providerVoices[0]?.id ?? '')}
+            onValueChange={(v) => {
+              if (v == null) return
+              stopPlayback()
+              setErrorMsg(null)
+              setDraftVoice(v)
+              queuePerformanceTelemetry({
+                eventName: 'tts.voice_draft_changed',
+                provider: draftProvider,
+                metadata: {
+                  source: 'voice_select',
+                  voice: v,
+                },
+              })
+            }}
           >
             <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -2940,7 +3010,7 @@ function AudioContent({
           </Select>
 
           {/* Commit: pre-cache this voice for the whole book so later plays are instant. */}
-          {provider === 'kokoro' && onCommitVoice && currentBookId && (() => {
+          {provider === 'kokoro' && onCommitVoice && currentBookId && !hasDraftChanges && (() => {
             const rcs = rollingCacheState
             const isThisBookVoice = rcs?.bookId === currentBookId && rcs?.voice === voice
             const isActive = Boolean(isThisBookVoice && rcs?.active)
@@ -2980,6 +3050,33 @@ function AudioContent({
           })()}
         </div>
       )}
+
+      <div className="rounded-lg border px-3 py-2 space-y-2"
+        style={{ borderColor: `${colors.text}12`, background: `${colors.text}05` }}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40">Current voice</p>
+            <p className="text-[12px] opacity-70 truncate">{committedVoiceLabel}</p>
+          </div>
+          <button
+            type="button"
+            onClick={applyDraftSelection}
+            disabled={!hasDraftChanges || selectedProviderUnavailable}
+            className="h-8 px-3 rounded-md text-[12px] font-medium transition-all active:scale-[0.98] disabled:opacity-45 disabled:cursor-not-allowed"
+            style={{
+              background: hasDraftChanges ? colors.text : `${colors.text}0a`,
+              color: hasDraftChanges ? colors.bg : `${colors.text}70`,
+            }}
+          >
+            {hasDraftChanges ? 'Apply voice' : 'Applied'}
+          </button>
+        </div>
+        {hasDraftChanges && (
+          <p className="text-[11px] leading-4 opacity-50">
+            Preview changes here first. Reading audio switches only after Apply.
+          </p>
+        )}
+      </div>
 
       {/* Speed */}
       <div>
@@ -3260,6 +3357,7 @@ export function ReaderRoute() {
   const wordAudioObjectUrlsRef = useRef<Set<string>>(new Set())
   const wordAudioPlaybackStartRef = useRef<number | null>(null)
   const wordAudioFirstAudioReportedRef = useRef(false)
+  const wordAudioVoiceSwitchStartRef = useRef<number | null>(null)
   // Web Audio API — gapless playback
   const wordAudioCtxRef           = useRef<AudioContext | null>(null)
   const wordAudioSourceRef        = useRef<AudioBufferSourceNode | null>(null)
@@ -3393,7 +3491,7 @@ export function ReaderRoute() {
     const curIdx = wordAudioCurIdxRef.current
     const currentChunk = chunks[curIdx]
     if (!currentChunk) return
-    void playWord(current.word, currentChunk.start)
+    void playWord(current.word, currentChunk.start, 'voice-switch')
   // playWord, wordAudio are intentionally not deps — we only want this to fire
   // when the user changes provider/voice, not on every other state mutation.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4196,6 +4294,8 @@ export function ReaderRoute() {
     if (wordAudioFirstAudioReportedRef.current) return
     wordAudioFirstAudioReportedRef.current = true
     const startedAt = wordAudioPlaybackStartRef.current
+    const voiceSwitchStartedAt = wordAudioVoiceSwitchStartRef.current
+    wordAudioVoiceSwitchStartRef.current = null
     queuePerformanceTelemetry({
       eventName: 'tts.first_audio',
       bookId,
@@ -4208,6 +4308,20 @@ export function ReaderRoute() {
         totalChunks: wordAudioChunksRef.current.length,
       },
     })
+    if (voiceSwitchStartedAt != null) {
+      queuePerformanceTelemetry({
+        eventName: 'tts.voice_switch_first_audio',
+        bookId,
+        provider: effectiveTtsProvider,
+        durationMs: elapsedMs(voiceSwitchStartedAt),
+        metadata: {
+          mode,
+          chunkIndex: idx,
+          chunkChars: chunk.text.length,
+          voice: effectiveTtsVoice ?? '',
+        },
+      })
+    }
   }
 
   function clearAudioFollow() {
@@ -4539,6 +4653,7 @@ export function ReaderRoute() {
     wordAudioChunkFetchesRef.current.clear()
     wordAudioPlaybackStartRef.current = null
     wordAudioFirstAudioReportedRef.current = false
+    wordAudioVoiceSwitchStartRef.current = null
     clearWordAudioObjectUrls()
     clearAudioFollow()
     setWordAudioCurIdx(0)
@@ -4769,11 +4884,12 @@ export function ReaderRoute() {
     }
   }
 
-  async function playWord(word: string, startOffset: number) {
+  async function playWord(word: string, startOffset: number, reason?: 'voice-switch') {
     stopWordAudio()
     const playStartedAt = performanceNow()
     wordAudioPlaybackStartRef.current = playStartedAt
     wordAudioFirstAudioReportedRef.current = false
+    wordAudioVoiceSwitchStartRef.current = reason === 'voice-switch' ? playStartedAt : null
     // Create + unlock AudioContext here — must be in a user-gesture call stack (iOS Safari)
     const audioCtx = getWordAudioCtx()
     void audioCtx.resume()
@@ -5294,6 +5410,7 @@ export function ReaderRoute() {
                 <div className="overflow-y-auto" style={{ flex: 1 }}>
                   <div style={{ display: sheet === 'audio' ? 'block' : 'none' }}>
                     <AudioContent
+                      key={`${effectiveTtsProvider}:${effectiveTtsVoice ?? ''}`}
                       colors={colors}
                       provider={effectiveTtsProvider}
                       onProviderChange={setTtsProvider}
