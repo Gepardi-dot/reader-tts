@@ -15,6 +15,12 @@ import { api, request, requestBlob, AuthError } from '@/shared/api/client'
 import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 import { getCachedDictionary, lookupStaticDictionary, putCachedDictionary } from '@/shared/storage/dictionaryCache'
 import {
+  elapsedMs,
+  flushPerformanceTelemetry,
+  performanceNow,
+  queuePerformanceTelemetry,
+} from '@/shared/telemetry/performanceTelemetry'
+import {
   isModelReady,
   startWarmup,
   synthesizeLocalStreaming,
@@ -3252,6 +3258,8 @@ export function ReaderRoute() {
   const wordAudioChunksRef    = useRef<AudioChunk[]>([])
   const wordAudioChunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
   const wordAudioObjectUrlsRef = useRef<Set<string>>(new Set())
+  const wordAudioPlaybackStartRef = useRef<number | null>(null)
+  const wordAudioFirstAudioReportedRef = useRef(false)
   // Web Audio API — gapless playback
   const wordAudioCtxRef           = useRef<AudioContext | null>(null)
   const wordAudioSourceRef        = useRef<AudioBufferSourceNode | null>(null)
@@ -3315,6 +3323,19 @@ export function ReaderRoute() {
 
   useEffect(() => {
     primeBrowserSpeechVoices()
+  }, [])
+
+  useEffect(() => {
+    const flush = () => {
+      void flushPerformanceTelemetry()
+    }
+    window.addEventListener('pagehide', flush)
+    window.addEventListener('beforeunload', flush)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      window.removeEventListener('beforeunload', flush)
+      flush()
+    }
   }, [])
 
   // Restore scroll position — also handles ?offset= from notes navigation
@@ -4021,6 +4042,7 @@ export function ReaderRoute() {
       setWordAudioCurIdx(idx)
       setWordAudio({ word, status: 'playing' })
       updateWordAudioChunk(idx, { status: 'ready', cues: [] })
+      markWordAudioFirstAudible('browser', idx, chunk)
       syncAudioFollowCue(chunk, 0, true)
     }
     utterance.onboundary = (event) => {
@@ -4164,6 +4186,28 @@ export function ReaderRoute() {
 
   function updateWordAudioChunk(idx: number, patch: Partial<AudioChunk>) {
     patchAudioChunk(wordAudioChunksRef.current, idx, patch)
+  }
+
+  function markWordAudioFirstAudible(
+    mode: 'browser' | 'web-audio' | 'html-audio' | 'kokoro-stream',
+    idx: number,
+    chunk: AudioChunk,
+  ) {
+    if (wordAudioFirstAudioReportedRef.current) return
+    wordAudioFirstAudioReportedRef.current = true
+    const startedAt = wordAudioPlaybackStartRef.current
+    queuePerformanceTelemetry({
+      eventName: 'tts.first_audio',
+      bookId,
+      provider: effectiveTtsProvider,
+      durationMs: startedAt == null ? null : elapsedMs(startedAt),
+      metadata: {
+        mode,
+        chunkIndex: idx,
+        chunkChars: chunk.text.length,
+        totalChunks: wordAudioChunksRef.current.length,
+      },
+    })
   }
 
   function clearAudioFollow() {
@@ -4400,6 +4444,7 @@ export function ReaderRoute() {
         }
 
         const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
+        const liveAudioStartedAt = performanceNow()
         const liveAudio = await requestLiveAudio(bookId!, {
           provider: effectiveTtsProvider,
           voice: effectiveTtsVoice,
@@ -4414,6 +4459,19 @@ export function ReaderRoute() {
           text: chunk.text,
         })
         if (signal.aborted) return null
+        queuePerformanceTelemetry({
+          eventName: 'tts.live_audio_fetch',
+          bookId,
+          provider: effectiveTtsProvider,
+          durationMs: elapsedMs(liveAudioStartedAt),
+          cacheHit: liveAudio.cacheHit,
+          cacheStorage: liveAudio.cacheStorage,
+          metadata: {
+            chunkIndex: idx,
+            chunkChars: chunk.text.length,
+            background: Boolean(options.background),
+          },
+        })
 
         // Download bytes once, persist them for reloads, then create a blob URL + decode for gapless playback.
         const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
@@ -4479,6 +4537,8 @@ export function ReaderRoute() {
     wordAudioCurIdxRef.current = 0
     wordAudioChunksRef.current = []
     wordAudioChunkFetchesRef.current.clear()
+    wordAudioPlaybackStartRef.current = null
+    wordAudioFirstAudioReportedRef.current = false
     clearWordAudioObjectUrls()
     clearAudioFollow()
     setWordAudioCurIdx(0)
@@ -4561,6 +4621,7 @@ export function ReaderRoute() {
     const now = ctx.currentTime
     const startAt = audioBufferSourceStartTime(now, wordAudioScheduledEndRef.current)
     source.start(startAt)
+    markWordAudioFirstAudible('kokoro-stream', idx, chunk)
     wordAudioScheduledEndRef.current = audioBufferScheduledEndTime({
       startAt,
       bufferDuration: buffer.duration,
@@ -4658,6 +4719,7 @@ export function ReaderRoute() {
       const now = ctx.currentTime
       const startAt = audioBufferSourceStartTime(now, wordAudioScheduledEndRef.current)
       source.start(startAt, seekSec > 0 ? seekSec : undefined)
+      markWordAudioFirstAudible('web-audio', idx, chunk)
       wordAudioScheduledEndRef.current = audioBufferScheduledEndTime({
         startAt,
         bufferDuration: chunk.buffer.duration,
@@ -4683,11 +4745,13 @@ export function ReaderRoute() {
       wordAudioRef.current = audio
       syncAudioFollowCue(chunk, 0, true)
 
-      audio.play().catch(() => {
-        if (ctrl.signal.aborted) return
-        setWordAudio({ word, status: 'ready' })
-        showToast('Audio is ready. Tap the banner play button.')
-      })
+      audio.play()
+        .then(() => markWordAudioFirstAudible('html-audio', idx, chunk))
+        .catch(() => {
+          if (ctrl.signal.aborted) return
+          setWordAudio({ word, status: 'ready' })
+          showToast('Audio is ready. Tap the banner play button.')
+        })
 
       audio.ontimeupdate = () => {
         if (ctrl.signal.aborted) return
@@ -4707,6 +4771,9 @@ export function ReaderRoute() {
 
   async function playWord(word: string, startOffset: number) {
     stopWordAudio()
+    const playStartedAt = performanceNow()
+    wordAudioPlaybackStartRef.current = playStartedAt
+    wordAudioFirstAudioReportedRef.current = false
     // Create + unlock AudioContext here — must be in a user-gesture call stack (iOS Safari)
     const audioCtx = getWordAudioCtx()
     void audioCtx.resume()
@@ -4763,6 +4830,19 @@ export function ReaderRoute() {
       chunkCount: initial.length,
       browserSpeechSupported: canUseBrowserSpeech(),
       kokoroModelReady,
+    })
+    queuePerformanceTelemetry({
+      eventName: 'tts.play_start',
+      bookId,
+      provider: effectiveTtsProvider,
+      metadata: {
+        startOffset: start,
+        selectedChars: word.length,
+        chunkCount: initial.length,
+        browserSpeech: startupPlan.useBrowserSpeech,
+        nativeBackgroundFetch: startupPlan.fetchNativeInBackground,
+        kokoroModelReady,
+      },
     })
 
     const shouldBootstrapNativeAudio = !startupPlan.useBrowserSpeech || startupPlan.fetchNativeInBackground

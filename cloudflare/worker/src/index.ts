@@ -74,6 +74,10 @@ const GEMINI_SAMPLE_RATE = 24_000
 const LIVE_AUDIO_CACHE_VERSION = 1
 const EDGE_AUDIO_CACHE_SECONDS = 7 * 24 * 60 * 60
 const R2_AUDIO_CACHE_PREFIX = `live-audio/v${LIVE_AUDIO_CACHE_VERSION}`
+const TELEMETRY_MAX_EVENTS = 20
+const TELEMETRY_MAX_TEXT = 160
+const TELEMETRY_MAX_METADATA_CHARS = 1800
+const TELEMETRY_RETENTION_DAYS = 14
 const PROVIDER_PREVIEW_TEXT = (
   'When the room quieted, the story finally found its rhythm. ' +
   'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
@@ -142,6 +146,7 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   const user = await requireUser(request, env)
 
   if (path === '/api/providers/test' && request.method === 'POST') return testProvider(request, env)
+  if (path === '/api/telemetry' && request.method === 'POST') return recordTelemetry(request, env, user)
 
   if (path === '/api/books' && request.method === 'GET') return listBooks(env, user)
   if (path === '/api/books' && request.method === 'POST') return createBook(request, env, user)
@@ -990,6 +995,105 @@ async function testProvider(request: Request, env: Env) {
     audioUrl: `data:audio/wav;base64,${bytesToBase64(result.wav)}`,
     message: 'Gemini preview ready.',
   })
+}
+
+function telemetryString(value: unknown, maxLength = TELEMETRY_MAX_TEXT) {
+  if (typeof value !== 'string') return ''
+  return value.trim().slice(0, maxLength)
+}
+
+function telemetryNumber(value: unknown) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function telemetryDuration(value: unknown) {
+  const number = telemetryNumber(value)
+  if (number == null) return null
+  return Math.max(0, Math.min(10 * 60_000, Math.round(number)))
+}
+
+function telemetryBoolean(value: unknown) {
+  return typeof value === 'boolean' ? value : null
+}
+
+function telemetryMetadata(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const metadata: Record<string, JsonValue> = {}
+  for (const [key, raw] of Object.entries(value)) {
+    const safeKey = telemetryString(key, 48)
+    if (!safeKey) continue
+    if (typeof raw === 'string') {
+      metadata[safeKey] = raw.slice(0, 240)
+    } else if (typeof raw === 'number') {
+      metadata[safeKey] = Number.isFinite(raw) ? raw : null
+    } else if (typeof raw === 'boolean' || raw == null) {
+      metadata[safeKey] = raw
+    }
+  }
+  const encoded = JSON.stringify(metadata)
+  return encoded.length <= TELEMETRY_MAX_METADATA_CHARS
+    ? encoded
+    : null
+}
+
+function sanitizeTelemetryEvent(raw: unknown, now: string) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const input = raw as Record<string, unknown>
+  const eventName = telemetryString(input.eventName ?? input.event_name, 80)
+  if (!/^[a-z][a-z0-9_.:-]{1,79}$/i.test(eventName)) return null
+  const provider = telemetryString(input.provider, 48) || null
+  const bookId = telemetryString(input.bookId ?? input.book_id, 80) || null
+  const cacheHit = telemetryBoolean(input.cacheHit ?? input.cache_hit)
+  return {
+    id: crypto.randomUUID(),
+    bookId,
+    eventName,
+    provider,
+    durationMs: telemetryDuration(input.durationMs ?? input.duration_ms),
+    value: telemetryNumber(input.value),
+    cacheHit: cacheHit == null ? null : (cacheHit ? 1 : 0),
+    cacheStorage: telemetryString(input.cacheStorage ?? input.cache_storage, 48) || null,
+    metadataJson: telemetryMetadata(input.metadata),
+    createdAt: now,
+  }
+}
+
+async function recordTelemetry(request: Request, env: Env, user: User) {
+  const body = await readJson<Record<string, unknown>>(request)
+  const rawEvents = Array.isArray(body.events) ? body.events : [body]
+  const now = new Date().toISOString()
+  const events = rawEvents
+    .slice(0, TELEMETRY_MAX_EVENTS)
+    .map((event) => sanitizeTelemetryEvent(event, now))
+    .filter((event): event is NonNullable<ReturnType<typeof sanitizeTelemetryEvent>> => Boolean(event))
+
+  if (!events.length) return json({ ok: true, accepted: 0 })
+
+  const statements = events.map((event) => env.DB.prepare(
+    `INSERT INTO performance_events
+     (id, user_id, book_id, event_name, provider, duration_ms, value, cache_hit, cache_storage, metadata_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    event.id,
+    user.id,
+    event.bookId,
+    event.eventName,
+    event.provider,
+    event.durationMs,
+    event.value,
+    event.cacheHit,
+    event.cacheStorage,
+    event.metadataJson,
+    event.createdAt,
+  ))
+
+  const retentionCutoff = new Date(Date.now() - TELEMETRY_RETENTION_DAYS * 24 * 60 * 60_000).toISOString()
+  statements.push(
+    env.DB.prepare('DELETE FROM performance_events WHERE created_at < ?').bind(retentionCutoff),
+  )
+  await env.DB.batch(statements)
+  return json({ ok: true, accepted: events.length })
 }
 
 async function updateReadingProgress(request: Request, env: Env, user: User, bookId: string) {
