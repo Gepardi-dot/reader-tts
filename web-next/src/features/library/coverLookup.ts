@@ -3,6 +3,11 @@ export interface CoverSearchTerms {
   author?: string
 }
 
+const MAX_COVER_SEARCH_TERMS = 3
+const COVER_LOOKUP_TIMEOUT_MS = 2500
+const COVER_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const COVER_CACHE_PREFIX = 'reader-tts-cover:'
+
 function normalizeBookText(raw: string): string {
   return raw
     .replace(/\.[A-Za-z0-9]+$/, '')
@@ -86,6 +91,61 @@ export function coverSearchTermsForBook(title: string, fileName?: string): Cover
   return uniqueTerms(candidates)
 }
 
+function coverCacheKey(title: string, fileName?: string) {
+  return `${COVER_CACHE_PREFIX}${JSON.stringify([title.trim(), fileName?.trim() ?? ''])}`
+}
+
+function coverCacheStorage() {
+  if (typeof window === 'undefined') return null
+  try {
+    return window.sessionStorage
+  } catch {
+    return null
+  }
+}
+
+function readCachedCover(key: string): string | null | undefined {
+  const storage = coverCacheStorage()
+  if (!storage) return undefined
+  try {
+    const raw = storage.getItem(key)
+    if (!raw) return undefined
+    const cached = JSON.parse(raw) as { url: string | null; expiresAt: number }
+    if (!cached.expiresAt || cached.expiresAt < Date.now()) {
+      storage.removeItem(key)
+      return undefined
+    }
+    return cached.url ?? null
+  } catch {
+    return undefined
+  }
+}
+
+function writeCachedCover(key: string, url: string | null) {
+  const storage = coverCacheStorage()
+  if (!storage) return
+  try {
+    storage.setItem(key, JSON.stringify({
+      url,
+      expiresAt: Date.now() + COVER_CACHE_TTL_MS,
+    }))
+  } catch {
+    // Cover lookup is cosmetic; storage failures should not affect library load.
+  }
+}
+
+async function fetchWithTimeout(url: string) {
+  const ctrl = new AbortController()
+  const timer = globalThis.setTimeout(() => ctrl.abort(), COVER_LOOKUP_TIMEOUT_MS)
+  try {
+    return await fetch(url, { signal: ctrl.signal })
+  } catch {
+    return null
+  } finally {
+    globalThis.clearTimeout(timer)
+  }
+}
+
 export async function fetchOpenLibraryCover({ title, author }: CoverSearchTerms): Promise<string | null> {
   const params = new URLSearchParams({
     title,
@@ -94,42 +154,28 @@ export async function fetchOpenLibraryCover({ title, author }: CoverSearchTerms)
   })
   if (author) params.set('author', author)
 
-  const res = await fetch(`https://openlibrary.org/search.json?${params.toString()}`)
-  if (!res.ok) return null
+  const res = await fetchWithTimeout(`https://openlibrary.org/search.json?${params.toString()}`)
+  if (!res?.ok) return null
 
   const data = await res.json() as { docs?: { cover_i?: number }[] }
   const coverId = data.docs?.[0]?.cover_i
   return coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : null
 }
 
-export async function fetchGoogleBooksCover({ title, author }: CoverSearchTerms): Promise<string | null> {
-  const query = author ? `intitle:${title} inauthor:${author}` : title
-  const params = new URLSearchParams({
-    q: query,
-    maxResults: '5',
-    fields: 'items(volumeInfo(imageLinks))',
-  })
-
-  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?${params.toString()}`)
-  if (!res.ok) return null
-
-  const data = await res.json() as {
-    items?: { volumeInfo?: { imageLinks?: { thumbnail?: string; smallThumbnail?: string } } }[]
-  }
-  const raw = data.items
-    ?.map((item) => item.volumeInfo?.imageLinks?.thumbnail ?? item.volumeInfo?.imageLinks?.smallThumbnail)
-    .find(Boolean)
-
-  return raw
-    ? raw.replace('http://', 'https://').replace('&edge=curl', '').replace('zoom=1', 'zoom=2')
-    : null
-}
-
 export async function findBookCover(title: string, fileName?: string): Promise<string | null> {
-  const terms = coverSearchTermsForBook(title, fileName)
+  const cacheKey = coverCacheKey(title, fileName)
+  const cached = readCachedCover(cacheKey)
+  if (cached !== undefined) return cached
+
+  const terms = coverSearchTermsForBook(title, fileName).slice(0, MAX_COVER_SEARCH_TERMS)
   for (const term of terms) {
-    const coverUrl = await fetchOpenLibraryCover(term) ?? await fetchGoogleBooksCover(term)
-    if (coverUrl) return coverUrl
+    const coverUrl = await fetchOpenLibraryCover(term)
+    if (coverUrl) {
+      writeCachedCover(cacheKey, coverUrl)
+      return coverUrl
+    }
   }
+
+  writeCachedCover(cacheKey, null)
   return null
 }
