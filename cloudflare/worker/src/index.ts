@@ -877,7 +877,10 @@ async function synthesizeGeminiAudio(env: Env, options: {
 
   if (!response.ok) {
     const detail = await response.text().catch(() => response.statusText)
-    throw new ApiError(response.status >= 500 ? 502 : 400, `Gemini TTS failed (${response.status}): ${detail.slice(0, 500)}`)
+    const status = response.status === 429
+      ? 429
+      : (response.status >= 500 ? 502 : 400)
+    throw new ApiError(status, `Gemini TTS failed (${response.status}): ${detail.slice(0, 500)}`)
   }
 
   const payload = await response.json()

@@ -38,7 +38,6 @@ import {
   PREFETCH_CHUNK_LIMIT,
   audioSliceStart,
   buildAudioChunks,
-  isChunking,
   pacingFor,
 } from './audioPlayback'
 import {
@@ -54,10 +53,6 @@ import {
   type ProvidersResponse,
 } from './audioProviderCatalog'
 import { synthesizeKokoroLocal } from './tts-engine/kokoroAudio'
-import {
-  loadLiveAudioBlob,
-  requestLiveAudio,
-} from './tts-engine/liveAudio'
 import {
   type AudioPhase,
 } from './tts-engine/types'
@@ -2614,14 +2609,13 @@ export function ReaderRoute() {
     presynthGridRef.current = grid
   }, [payload?.text, effectiveTtsProvider])
 
-  // Read-ahead prefetch — fires chunk-aligned live-audio requests after the user stops
-  // scrolling (2 s debounce). Cache keys match exactly what the player will request,
-  // so hitting play is often instant if you've been reading for a couple seconds.
+  // Read-ahead prefetch stays local-only. Gemini synthesis is generated during
+  // active playback so the free-tier quota is spent on audio the user asked for.
   const prefetchRef   = useRef<AbortController | null>(null)
   const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (!isChunking(effectiveTtsProvider) || !bookId || !payload?.text) return
-    if (effectiveTtsProvider === 'kokoro' && (!isModelReady() || !effectiveTtsVoice)) return
+    if (effectiveTtsProvider !== 'kokoro' || !payload?.text) return
+    if (!isModelReady() || !effectiveTtsVoice) return
 
     // Debounce: cancel previous timer on every scroll update
     if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
@@ -2630,7 +2624,7 @@ export function ReaderRoute() {
       const ctrl = new AbortController()
       prefetchRef.current = ctrl
 
-      const { lengthScale, sentenceSilence } = pacingFor(effectiveTtsProvider)
+      const { lengthScale } = pacingFor(effectiveTtsProvider)
       const start = audioSliceStart(payload.text.length, scrollPct)
       const fullSlice = payload.text.slice(start, start + AUDIO_SLICE_CHARS)
       if (!fullSlice.trim()) return
@@ -2643,32 +2637,9 @@ export function ReaderRoute() {
       ).slice(0, PREFETCH_CHUNK_LIMIT)
       if (chunkDefs.length === 0) return
 
-      if (effectiveTtsProvider === 'kokoro' && isModelReady() && effectiveTtsVoice) {
-        const localSpeed = lengthScale > 0 ? 1 / lengthScale : 1
-        void Promise.all(chunkDefs.map((chunk) =>
-          synthesizeKokoroLocal(chunk.text, effectiveTtsVoice, localSpeed, ctrl.signal)
-            .then(() => null)
-            .catch(() => null)
-        ))
-        return
-      }
-
-      // Prefetch chunks in parallel - by the time the user hits play they're persisted locally.
+      const localSpeed = lengthScale > 0 ? 1 / lengthScale : 1
       void Promise.all(chunkDefs.map((chunk) =>
-        requestLiveAudio(bookId, {
-          provider: effectiveTtsProvider,
-          voice: effectiveTtsVoice,
-          model: null,
-          output_format: 'mp3',
-          narration_style: '',
-          length_scale: lengthScale,
-          sentence_silence: sentenceSilence,
-          pageNumber: 1,
-          start: chunk.start,
-          end: chunk.end,
-          text: chunk.text,
-        })
-          .then((result) => loadLiveAudioBlob(result))
+        synthesizeKokoroLocal(chunk.text, effectiveTtsVoice, localSpeed, ctrl.signal)
           .then(() => null)
           .catch(() => null)
       ))
@@ -2677,7 +2648,7 @@ export function ReaderRoute() {
     return () => {
       if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
     }
-  }, [effectiveTtsProvider, effectiveTtsVoice, bookId, payload?.text, scrollPct])
+  }, [effectiveTtsProvider, effectiveTtsVoice, payload?.text, scrollPct])
 
   function patchAppearance(patch: Partial<Appearance>) {
     setAppearance(a => ({ ...a, ...patch }))

@@ -11,6 +11,7 @@ export class TtsNativeQueue {
   private readonly fetcher: NativeFetcher
   private readonly inflight = new Map<number, Promise<NativeAudioResult | null>>()
   private readonly listeners = new Set<QueueListener>()
+  private prefetchChain: Promise<void> = Promise.resolve()
 
   constructor(chunks: TtsAudioChunk[], fetcher: NativeFetcher) {
     this.chunks = chunks
@@ -103,18 +104,27 @@ export class TtsNativeQueue {
   }
 
   prefetchFrom(index: number, target: number, signal: AbortSignal) {
-    if (signal.aborted) return
+    if (signal.aborted) return Promise.resolve()
     const start = Math.max(0, index)
     const stop = Math.min(this.chunks.length - 1, start + Math.max(0, target))
-    for (let cursor = start; cursor <= stop; cursor += 1) {
-      const chunk = this.chunks[cursor]
-      if (!chunk || chunk.status === 'ready' || chunk.status === 'fetching') continue
-      void this.ensure(cursor, signal, true)
+
+    const run = async () => {
+      for (let cursor = start; cursor <= stop; cursor += 1) {
+        if (signal.aborted) return
+        const chunk = this.chunks[cursor]
+        if (!chunk || chunk.status === 'ready' || chunk.status === 'fetching') continue
+        await this.ensure(cursor, signal, true)
+      }
     }
+
+    const next = this.prefetchChain.catch(() => undefined).then(run)
+    this.prefetchChain = next.catch(() => undefined)
+    return next
   }
 
   resetInflight() {
     this.inflight.clear()
+    this.prefetchChain = Promise.resolve()
   }
 
   private patch(index: number, patch: Partial<TtsAudioChunk>) {
@@ -134,4 +144,3 @@ export class TtsNativeQueue {
     }
   }
 }
-

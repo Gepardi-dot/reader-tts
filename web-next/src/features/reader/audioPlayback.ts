@@ -26,10 +26,11 @@ export const PREFETCH_CHUNK_LIMIT = 3
 export const AUDIO_SLICE_CHARS = 2200
 export const AUDIO_CONTEXT_START_LEAD_SEC = 0.002
 
-// How many chunks to fire in parallel right when playback begins.
+// How many chunks to bootstrap when playback begins. Cloud chunks are fetched
+// sequentially by the native queue so Gemini quota is not burned in bursts.
 // The first chunk is awaited only when no instant browser mask is active.
 export const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
-  google: 3,
+  google: 2,
   kokoro: 2,
 }
 
@@ -41,7 +42,7 @@ export const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
 export const PREFETCH_AHEAD_TARGET: Record<string, number> = {
-  google: 3,
+  google: 1,
   kokoro: 3,
 }
 

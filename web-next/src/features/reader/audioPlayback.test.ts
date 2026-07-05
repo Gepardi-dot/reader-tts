@@ -131,12 +131,12 @@ describe('audio playback startup plan', () => {
 
     expect(startupPlan).toEqual({
       startReadyChunkCount: 1,
-      bootstrapCount: 3,
+      bootstrapCount: 2,
       useBrowserSpeech: true,
       fetchNativeInBackground: true,
     })
     expect(shouldPrimeNativeAudio(startupPlan)).toBe(true)
-    expect(PREFETCH_AHEAD_TARGET.google).toBe(3)
+    expect(PREFETCH_AHEAD_TARGET.google).toBe(1)
   })
 
   it('bridges late Gemini native chunks with browser speech instead of silence', () => {
