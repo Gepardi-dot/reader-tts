@@ -73,4 +73,5 @@ The reader UI remains the same playbar contract: phase, current chunk, total chu
 - 2026-07-05: Moved live-audio request/blob/cache/error helpers into `tts-engine/liveAudio.ts`, removing a direct dependency from TTS v2 to the legacy controller.
 - 2026-07-05: Moved Kokoro local synthesis/cache helper into `tts-engine/kokoroAudio.ts`, added direct unit coverage, and pointed TTS v2 plus reader prefetch at the shared helper.
 - 2026-07-05: Moved preview audio types into `tts-engine/types.ts` and removed the unused legacy `wordAudioController.ts` hook. TTS v2 is now the reader playback path.
-- Next: gather `tts.*_v2` telemetry from real use, tune handoff thresholds, then split the audio preview controls out of `ReaderRoute.tsx`.
+- 2026-07-05: Split the audio preview panel and provider catalog helpers out of `ReaderRoute.tsx`, leaving the route focused on reader state and active playback wiring.
+- Next: gather `tts.*_v2` telemetry from real use, tune handoff thresholds, then continue shrinking `ReaderRoute.tsx` around the remaining sheet content.
