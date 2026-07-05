@@ -2575,7 +2575,7 @@ export function ReaderRoute() {
       return
     }
     const text = payload.text
-    const GRID_SIZE = 420
+    const GRID_SIZE = CHUNK_CHARS.kokoro ?? 160
     const minSize = Math.max(1, Math.floor(GRID_SIZE * 0.5))
     const maxSize = Math.floor(GRID_SIZE * 1.4)
     const grid: Array<{ start: number; end: number }> = []

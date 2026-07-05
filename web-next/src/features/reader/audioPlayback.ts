@@ -17,7 +17,7 @@ export const FIRST_AUDIO_CHARS: Record<string, number> = {
 
 export const CHUNK_CHARS: Record<string, number> = {
   google: 320,
-  kokoro: 420,
+  kokoro: 160,
 }
 
 export const DEFAULT_FIRST_AUDIO_CHARS = 180
