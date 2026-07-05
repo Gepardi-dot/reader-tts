@@ -23,7 +23,7 @@ import {
   loadLiveAudioBlob,
   requestLiveAudio,
   type LiveAudioPayload,
-} from '../wordAudioController'
+} from './liveAudio'
 import { BrowserSpeechLane } from './browserSpeechLane'
 import { ClockedAudioSink } from './clockedAudioSink'
 import { TtsNativeQueue } from './nativeQueue'

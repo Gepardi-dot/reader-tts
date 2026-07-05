@@ -54,14 +54,16 @@ import {
   supportsBrowserSpeech,
 } from './browserSpeech'
 import {
-  audioErrorMessage,
-  loadLiveAudioBlob,
-  playableAudioUrl,
-  requestLiveAudio,
   synthesizeKokoroLocal,
   type AudioChunk,
   type AudioPhase,
 } from './wordAudioController'
+import {
+  audioErrorMessage,
+  loadLiveAudioBlob,
+  playableAudioUrl,
+  requestLiveAudio,
+} from './tts-engine/liveAudio'
 import {
   useTtsSessionController,
   type TtsAudioChunk,
