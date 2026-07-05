@@ -35,7 +35,9 @@ export interface LiveAudioResult {
 }
 
 const LIVE_AUDIO_MEMORY_TTL_MS = 10 * 60_000
+const LIVE_AUDIO_RATE_LIMIT_FALLBACK_MS = 60_000
 const liveAudioMemoryCache = new Map<string, { expiresAt: number; promise: Promise<LiveAudioResult> }>()
+let liveAudioCooldownUntil = 0
 
 function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
   return JSON.stringify([
@@ -53,7 +55,43 @@ function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
   ])
 }
 
+function liveAudioRetryDelayMs(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error)
+  const retryMatch = raw.match(/retry in\s+([\d.]+)s/i)
+  if (retryMatch) {
+    const retrySeconds = Number(retryMatch[1])
+    if (Number.isFinite(retrySeconds)) return Math.ceil(retrySeconds * 1000) + 1000
+  }
+
+  if (/429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(raw)) {
+    return LIVE_AUDIO_RATE_LIMIT_FALLBACK_MS
+  }
+
+  return 0
+}
+
+export function liveAudioCooldownRemainingMs(provider: string) {
+  if (provider !== 'google') return 0
+  return Math.max(0, liveAudioCooldownUntil - Date.now())
+}
+
+export function resetLiveAudioCooldownForTests() {
+  liveAudioCooldownUntil = 0
+}
+
+function noteLiveAudioFailure(error: unknown) {
+  const retryMs = liveAudioRetryDelayMs(error)
+  if (retryMs > 0) {
+    liveAudioCooldownUntil = Math.max(liveAudioCooldownUntil, Date.now() + retryMs)
+  }
+}
+
 export function requestLiveAudio(bookId: string, payload: LiveAudioPayload) {
+  const cooldownMs = liveAudioCooldownRemainingMs(payload.provider)
+  if (cooldownMs > 0) {
+    return Promise.reject(new Error(`Gemini TTS is cooling down after a rate limit. Retry in ${Math.ceil(cooldownMs / 1000)}s.`))
+  }
+
   const key = liveAudioCacheKey(bookId, payload)
   const now = Date.now()
   const cached = liveAudioMemoryCache.get(key)
@@ -64,6 +102,7 @@ export function requestLiveAudio(bookId: string, payload: LiveAudioPayload) {
     method: 'POST',
     body: JSON.stringify(payload),
   }).catch((error) => {
+    noteLiveAudioFailure(error)
     liveAudioMemoryCache.delete(key)
     throw error
   })
@@ -143,6 +182,9 @@ export function audioErrorMessage(error: unknown) {
   if (/not configured|configured yet/i.test(message)) {
     return message
   }
+  if (/429|RESOURCE_EXHAUSTED|quota|rate limit|cooling down/i.test(message)) {
+    return 'Gemini TTS hit the free-tier rate limit. Browser speech will continue; try Gemini again shortly.'
+  }
   if (/preparing|model is not ready|voice model/i.test(message)) {
     return 'The on-device voice is still preparing. Try again in a moment.'
   }
@@ -154,4 +196,3 @@ export function audioErrorMessage(error: unknown) {
   }
   return 'Could not start audio. Check the selected voice provider and try again.'
 }
-

@@ -16,6 +16,7 @@ import {
 } from '../audioPlayback'
 import {
   audioErrorMessage,
+  liveAudioCooldownRemainingMs,
   loadLiveAudioBlob,
   requestLiveAudio,
   type LiveAudioPayload,
@@ -251,6 +252,22 @@ export function useTtsSessionController({
 
     if (!bookId || selectedProvider === BROWSER_TTS_PROVIDER_ID) return null
 
+    const cooldownMs = liveAudioCooldownRemainingMs(selectedProvider)
+    if (cooldownMs > 0) {
+      queuePerformanceTelemetry({
+        eventName: 'tts.live_audio_backoff_v2',
+        bookId,
+        provider: selectedProvider,
+        value: Math.ceil(cooldownMs / 1000),
+        metadata: {
+          chunkIndex: chunk.index,
+          chunkChars: chunk.text.length,
+          background,
+        },
+      })
+      return null
+    }
+
     const { lengthScale, sentenceSilence } = pacingFor(selectedProvider)
     const payload: LiveAudioPayload = {
       provider: selectedProvider,
@@ -266,7 +283,24 @@ export function useTtsSessionController({
       text: chunk.text,
     }
     const fetchStartedAt = performanceNow()
-    const liveAudio = await requestLiveAudio(bookId, payload)
+    let liveAudio
+    try {
+      liveAudio = await requestLiveAudio(bookId, payload)
+    } catch (error) {
+      queuePerformanceTelemetry({
+        eventName: 'tts.live_audio_error_v2',
+        bookId,
+        provider: selectedProvider,
+        durationMs: elapsedMs(fetchStartedAt),
+        metadata: {
+          chunkIndex: chunk.index,
+          chunkChars: chunk.text.length,
+          background,
+          rateLimited: liveAudioCooldownRemainingMs(selectedProvider) > 0,
+        },
+      })
+      throw error
+    }
     if (signal.aborted) return null
 
     queuePerformanceTelemetry({
