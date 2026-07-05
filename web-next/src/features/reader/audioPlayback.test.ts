@@ -104,6 +104,11 @@ describe('audio playback chunking', () => {
     expect(chunks[0].text.length).toBeLessThanOrEqual(220)
     expect(Math.max(...chunks.slice(1).map((chunk) => chunk.text.length))).toBeLessThanOrEqual(420)
   })
+
+  it('keeps Kokoro chunks small enough for on-device handoff work', () => {
+    expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThanOrEqual(80)
+    expect(CHUNK_CHARS.kokoro).toBeLessThanOrEqual(180)
+  })
 })
 
 describe('audio playback startup plan', () => {
