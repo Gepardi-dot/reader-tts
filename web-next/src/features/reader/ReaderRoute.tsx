@@ -59,10 +59,13 @@ import {
   playableAudioUrl,
   requestLiveAudio,
   synthesizeKokoroLocal,
-  useWordAudioController,
   type AudioChunk,
   type AudioPhase,
 } from './wordAudioController'
+import {
+  useTtsSessionController,
+  type TtsAudioChunk,
+} from './tts-engine/useTtsSessionController'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -3119,7 +3122,7 @@ export function ReaderRoute() {
     toggleWordAudio,
     stopWordAudio,
     isAudioActive,
-  } = useWordAudioController({
+  } = useTtsSessionController({
     bookId,
     bookText: payload?.text ?? '',
     provider: effectiveTtsProvider,
@@ -3743,7 +3746,7 @@ export function ReaderRoute() {
     window.scrollBy({ top: delta, behavior: 'smooth' })
   }
 
-  function syncAudioFollowCue(chunk: AudioChunk, currentTime: number, follow: boolean) {
+  function syncAudioFollowCue(chunk: TtsAudioChunk, currentTime: number, follow: boolean) {
     const cues = (chunk.cues ?? []).filter((cue) => cue.end > cue.start)
     const activeCue = cues.find((cue, index) => {
       const cueStart = Math.max(0, cue.timeStart)
