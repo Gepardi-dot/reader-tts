@@ -24,6 +24,17 @@ export interface TtsAudioChunk {
   cacheStorage?: string | null
 }
 
+export type AudioPhase = TtsPhase
+
+export interface PreviewAudioChunk {
+  start: number
+  end: number
+  text: string
+  status: TtsChunkStatus
+  url: string | null
+  buffer: AudioBuffer | null
+}
+
 export interface TtsSnapshot {
   phase: TtsPhase
   lane: TtsPlaybackLane
@@ -49,4 +60,3 @@ export interface TtsGridChunk {
   start: number
   end: number
 }
-

@@ -53,10 +53,6 @@ import {
   primeBrowserSpeechVoices,
   supportsBrowserSpeech,
 } from './browserSpeech'
-import {
-  type AudioChunk,
-  type AudioPhase,
-} from './wordAudioController'
 import { synthesizeKokoroLocal } from './tts-engine/kokoroAudio'
 import {
   audioErrorMessage,
@@ -64,6 +60,10 @@ import {
   playableAudioUrl,
   requestLiveAudio,
 } from './tts-engine/liveAudio'
+import {
+  type AudioPhase,
+  type PreviewAudioChunk as AudioChunk,
+} from './tts-engine/types'
 import {
   useTtsSessionController,
   type TtsAudioChunk,
