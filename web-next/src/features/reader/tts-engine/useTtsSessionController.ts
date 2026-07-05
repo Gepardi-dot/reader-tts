@@ -12,6 +12,7 @@ import {
   BROWSER_TTS_PROVIDER_ID,
   DEFAULT_PREFETCH_AHEAD,
   PREFETCH_AHEAD_TARGET,
+  nativePrefetchStartIndexForFallback,
   pacingFor,
 } from '../audioPlayback'
 import {
@@ -418,7 +419,11 @@ export function useTtsSessionController({
     laneRef.current = 'fallback'
     phaseRef.current = 'playing'
     currentIndexRef.current = index
-    queue?.prefetchFrom(index, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, ctrl.signal)
+    queue?.prefetchFrom(
+      nativePrefetchStartIndexForFallback(providerRef.current, index),
+      PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD,
+      ctrl.signal,
+    )
     syncAudioFollowCueRef.current(chunk, 0, true)
     emitSnapshot()
 
@@ -529,11 +534,14 @@ export function useTtsSessionController({
     })
     emitSnapshot()
 
-    if (providerRef.current !== BROWSER_TTS_PROVIDER_ID) {
-      queue.prefetchFrom(0, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, ctrl.signal)
-    }
-
     if (fallbackLaneRef.current.canSpeak()) {
+      if (providerRef.current !== BROWSER_TTS_PROVIDER_ID) {
+        queue.prefetchFrom(
+          nativePrefetchStartIndexForFallback(providerRef.current, 0),
+          PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD,
+          ctrl.signal,
+        )
+      }
       const started = speakFallbackAt(0, ctrl, startedAt, sessionId, reason)
       if (started) return
     }
