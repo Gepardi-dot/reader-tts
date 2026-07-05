@@ -48,6 +48,7 @@ import {
   requestLiveAudio,
   type LiveAudioCue,
 } from './tts-engine/liveAudio'
+import { synthesizeKokoroLocal } from './tts-engine/kokoroAudio'
 
 export type AudioPhase = 'idle' | 'buffering' | 'playing' | 'paused'
 export type ChunkStatus = 'idle' | 'fetching' | 'ready' | 'error'
@@ -127,60 +128,6 @@ function waitForKokoroStreamBuffer(stream: KokoroStreamState, index: number, sig
     stream.waiters.add(wake)
     signal.addEventListener('abort', wake, { once: true })
   })
-}
-
-export async function synthesizeKokoroLocal(
-  text: string,
-  voice: string,
-  speed: number,
-  signal: AbortSignal,
-): Promise<{ blob: Blob; duration: number | null; cacheKey: string } | null> {
-  if (!isModelReady()) return null
-  const cacheKey = await localKokoroCacheKey(voice, speed, text)
-  if (signal.aborted) return null
-
-  const hit = await getCachedAudio(cacheKey, LOCAL_KOKORO_CACHE_VERSION).catch(() => null)
-  if (hit) return { blob: hit.blob, duration: hit.duration, cacheKey }
-  if (signal.aborted) return null
-
-  notePlaybackFetchStart()
-  let result
-  try {
-    result = await new Promise<{
-      wav: ArrayBuffer
-      sampleRate: number
-      durationSec: number
-    } | null>((resolve) => {
-      const handle = synthesizeLocalStreaming(text, voice, speed, {
-        onComplete: (res) => resolve(res),
-        onError: () => resolve(null),
-      })
-      if (!handle) {
-        resolve(null)
-        return
-      }
-      signal.addEventListener('abort', () => {
-        try { handle.cancel() } catch { /* best effort */ }
-        resolve(null)
-      }, { once: true })
-    })
-  } finally {
-    notePlaybackFetchEnd()
-  }
-  if (!result || signal.aborted) return null
-
-  const blob = new Blob([result.wav], { type: 'audio/wav' })
-  await putCachedAudio({
-    cacheKey,
-    cacheVersion: LOCAL_KOKORO_CACHE_VERSION,
-    blob,
-    cues: [],
-    duration: result.durationSec,
-    contentType: 'audio/wav',
-    byteLength: blob.size,
-  }).catch(() => { /* cache write failures are non-fatal */ })
-
-  return { blob, duration: result.durationSec, cacheKey }
 }
 
 export function useWordAudioController({

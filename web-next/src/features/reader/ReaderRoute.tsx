@@ -54,10 +54,10 @@ import {
   supportsBrowserSpeech,
 } from './browserSpeech'
 import {
-  synthesizeKokoroLocal,
   type AudioChunk,
   type AudioPhase,
 } from './wordAudioController'
+import { synthesizeKokoroLocal } from './tts-engine/kokoroAudio'
 import {
   audioErrorMessage,
   loadLiveAudioBlob,

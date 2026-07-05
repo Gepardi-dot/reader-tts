@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react'
-import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 import {
-  LOCAL_KOKORO_CACHE_VERSION,
   isModelReady,
-  localKokoroCacheKey,
   startWarmup,
-  synthesizeLocalStreaming,
 } from '@/shared/storage/modelCache'
 import {
   elapsedMs,
@@ -28,6 +24,7 @@ import { BrowserSpeechLane } from './browserSpeechLane'
 import { ClockedAudioSink } from './clockedAudioSink'
 import { TtsNativeQueue } from './nativeQueue'
 import { buildTtsChunks } from './segmenter'
+import { synthesizeKokoroLocal } from './kokoroAudio'
 import type {
   NativeAudioResult,
   TtsAudioChunk,
@@ -210,61 +207,17 @@ export function useTtsSessionController({
       if (!selectedVoice || !isModelReady()) return null
       const { lengthScale } = pacingFor('kokoro')
       const speed = lengthScale > 0 ? 1 / lengthScale : 1
-      const cacheKey = await localKokoroCacheKey(selectedVoice, speed, chunk.text)
-      if (signal.aborted) return null
-
-      const hit = await getCachedAudio(cacheKey, LOCAL_KOKORO_CACHE_VERSION).catch(() => null)
-      if (hit) {
-        const buffer = await decodeBlob(ctx, hit.blob)
-        return {
-          url: null,
-          buffer,
-          cues: [],
-          durationSec: hit.duration ?? buffer.duration,
-          cacheHit: true,
-          cacheStorage: 'indexeddb',
-        }
-      }
-
-      const synthesized = await new Promise<{ wav: ArrayBuffer; durationSec: number } | null>((resolve) => {
-        const handle = synthesizeLocalStreaming(chunk.text, selectedVoice, speed, {
-          onComplete: (result) => resolve({ wav: result.wav, durationSec: result.durationSec }),
-          onError: () => resolve(null),
-        })
-        if (!handle) {
-          resolve(null)
-          return
-        }
-        signal.addEventListener('abort', () => {
-          try {
-            handle.cancel()
-          } catch {
-            // Best effort.
-          }
-          resolve(null)
-        }, { once: true })
-      })
+      const synthesized = await synthesizeKokoroLocal(chunk.text, selectedVoice, speed, signal)
       if (!synthesized || signal.aborted) return null
 
-      const blob = new Blob([synthesized.wav], { type: 'audio/wav' })
-      await putCachedAudio({
-        cacheKey,
-        cacheVersion: LOCAL_KOKORO_CACHE_VERSION,
-        blob,
-        cues: [],
-        duration: synthesized.durationSec,
-        contentType: 'audio/wav',
-        byteLength: blob.size,
-      }).catch(() => undefined)
-
-      const buffer = await decodeBlob(ctx, blob)
+      const buffer = await decodeBlob(ctx, synthesized.blob)
       return {
         url: null,
         buffer,
         cues: [],
-        durationSec: synthesized.durationSec || buffer.duration,
-        cacheHit: false,
-        cacheStorage: 'generated',
+        durationSec: synthesized.duration ?? buffer.duration,
+        cacheHit: synthesized.cacheHit,
+        cacheStorage: synthesized.cacheHit ? 'indexeddb' : 'generated',
       }
     }
 
