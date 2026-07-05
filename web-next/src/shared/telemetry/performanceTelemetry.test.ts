@@ -42,6 +42,38 @@ describe('performance telemetry normalization', () => {
     })
   })
 
+  it('keeps TTS v2 diagnostic metadata used by the summary endpoint', () => {
+    expect(normalizePerformanceTelemetryEvent({
+      eventName: 'tts.first_audio_v2',
+      provider: 'google',
+      durationMs: 42,
+      metadata: {
+        lane: 'fallback',
+        reason: 'tap',
+        chunkIndex: 0,
+        chunkChars: 160,
+        readyChunks: 2,
+        chunkStatus: 'fetching',
+        browserFallback: true,
+        kokoroModelReady: false,
+      },
+    })).toEqual({
+      eventName: 'tts.first_audio_v2',
+      provider: 'google',
+      durationMs: 42,
+      metadata: {
+        lane: 'fallback',
+        reason: 'tap',
+        chunkIndex: 0,
+        chunkChars: 160,
+        readyChunks: 2,
+        chunkStatus: 'fetching',
+        browserFallback: true,
+        kokoroModelReady: false,
+      },
+    })
+  })
+
   it('rejects invalid event names', () => {
     expect(normalizePerformanceTelemetryEvent({ eventName: '../bad' })).toBeNull()
   })

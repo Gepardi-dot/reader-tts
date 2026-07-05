@@ -74,4 +74,5 @@ The reader UI remains the same playbar contract: phase, current chunk, total chu
 - 2026-07-05: Moved Kokoro local synthesis/cache helper into `tts-engine/kokoroAudio.ts`, added direct unit coverage, and pointed TTS v2 plus reader prefetch at the shared helper.
 - 2026-07-05: Moved preview audio types into `tts-engine/types.ts` and removed the unused legacy `wordAudioController.ts` hook. TTS v2 is now the reader playback path.
 - 2026-07-05: Split the audio preview panel and provider catalog helpers out of `ReaderRoute.tsx`, leaving the route focused on reader state and active playback wiring.
-- Next: gather `tts.*_v2` telemetry from real use, tune handoff thresholds, then continue shrinking `ReaderRoute.tsx` around the remaining sheet content.
+- 2026-07-05: Expanded the authenticated TTS telemetry summary with v2 diagnostics for first-audio lane timing, live-audio fetch mode/cache behavior, native-ready buffered chunks, and underrun bridge counts.
+- Next: use `GET /api/telemetry/tts-summary` after real Kokoro/Gemini sessions to tune handoff thresholds, chunk sizes, and read-ahead windows from measured evidence.
