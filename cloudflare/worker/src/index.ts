@@ -1129,21 +1129,246 @@ function durationSummary(values: number[]) {
   }
 }
 
-function safeMetadataSummary(metadataJson: unknown) {
+function valueSummary(values: number[]) {
+  const sorted = values
+    .filter((value) => Number.isFinite(value))
+    .map((value) => Math.max(0, Math.round(value)))
+    .sort((left, right) => left - right)
+  if (!sorted.length) {
+    return {
+      count: 0,
+      avg: null,
+      p50: null,
+      p95: null,
+      min: null,
+      max: null,
+    }
+  }
+  const total = sorted.reduce((sum, value) => sum + value, 0)
+  return {
+    count: sorted.length,
+    avg: Math.round(total / sorted.length),
+    p50: percentile(sorted, 50),
+    p95: percentile(sorted, 95),
+    min: sorted[0],
+    max: sorted[sorted.length - 1],
+  }
+}
+
+interface TtsMetadataSummary {
+  mode: string | null
+  lane: string | null
+  reason: string | null
+  chunkStatus: string | null
+  chunkIndex: number | null
+  chunkChars: number | null
+  totalChunks: number | null
+  readyChunks: number | null
+  currentIndex: number | null
+  startOffset: number | null
+  selectedChars: number | null
+  background: boolean | null
+  browserFallback: boolean | null
+  kokoroModelReady: boolean | null
+}
+
+function metadataStringField(metadata: Record<string, unknown>, key: string) {
+  return typeof metadata[key] === 'string' ? String(metadata[key]) : null
+}
+
+function metadataNumberField(metadata: Record<string, unknown>, key: string) {
+  return Number.isFinite(Number(metadata[key])) ? Number(metadata[key]) : null
+}
+
+function metadataBooleanField(metadata: Record<string, unknown>, key: string) {
+  return typeof metadata[key] === 'boolean' ? Boolean(metadata[key]) : null
+}
+
+function safeMetadataSummary(metadataJson: unknown): TtsMetadataSummary | null {
   if (typeof metadataJson !== 'string' || !metadataJson) return null
   try {
     const parsed = JSON.parse(metadataJson)
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
     const metadata = parsed as Record<string, unknown>
     return {
-      mode: typeof metadata.mode === 'string' ? metadata.mode : null,
-      chunkIndex: Number.isFinite(Number(metadata.chunkIndex)) ? Number(metadata.chunkIndex) : null,
-      chunkChars: Number.isFinite(Number(metadata.chunkChars)) ? Number(metadata.chunkChars) : null,
-      totalChunks: Number.isFinite(Number(metadata.totalChunks)) ? Number(metadata.totalChunks) : null,
-      background: typeof metadata.background === 'boolean' ? metadata.background : null,
+      mode: metadataStringField(metadata, 'mode'),
+      lane: metadataStringField(metadata, 'lane'),
+      reason: metadataStringField(metadata, 'reason'),
+      chunkStatus: metadataStringField(metadata, 'chunkStatus'),
+      chunkIndex: metadataNumberField(metadata, 'chunkIndex'),
+      chunkChars: metadataNumberField(metadata, 'chunkChars'),
+      totalChunks: metadataNumberField(metadata, 'totalChunks'),
+      readyChunks: metadataNumberField(metadata, 'readyChunks'),
+      currentIndex: metadataNumberField(metadata, 'currentIndex'),
+      startOffset: metadataNumberField(metadata, 'startOffset'),
+      selectedChars: metadataNumberField(metadata, 'selectedChars'),
+      background: metadataBooleanField(metadata, 'background'),
+      browserFallback: metadataBooleanField(metadata, 'browserFallback'),
+      kokoroModelReady: metadataBooleanField(metadata, 'kokoroModelReady'),
     }
   } catch {
     return null
+  }
+}
+
+function rowDuration(row: Record<string, unknown>) {
+  if (row.duration_ms == null) return null
+  const duration = Number(row.duration_ms)
+  return Number.isFinite(duration) ? duration : null
+}
+
+function rowProvider(row: Record<string, unknown>) {
+  return row.provider == null ? null : String(row.provider)
+}
+
+function bumpCounter(record: Record<string, number>, key: string | null | undefined) {
+  if (!key) return
+  record[key] = (record[key] ?? 0) + 1
+}
+
+function summarizeTtsDiagnostics(rows: Array<Record<string, unknown>>) {
+  const firstAudio = new Map<string, {
+    provider: string | null
+    lane: string | null
+    count: number
+    durations: number[]
+    reasons: Record<string, number>
+  }>()
+  const liveFetches = new Map<string, {
+    provider: string | null
+    background: boolean | null
+    count: number
+    durations: number[]
+    cacheHits: number
+    cacheMisses: number
+    storage: Record<string, number>
+  }>()
+  const nativeReady = new Map<string, {
+    provider: string | null
+    count: number
+    readyChunks: number[]
+  }>()
+  const underruns = new Map<string, {
+    provider: string | null
+    count: number
+    chunkStatus: Record<string, number>
+  }>()
+
+  for (const row of rows) {
+    const eventName = String(row.event_name ?? '')
+    const provider = rowProvider(row)
+    const metadata = safeMetadataSummary(row.metadata_json)
+    const duration = rowDuration(row)
+
+    if (eventName === 'tts.first_audio_v2') {
+      const lane = metadata?.lane ?? 'unknown'
+      const key = `${provider ?? ''}:${lane}`
+      const group = firstAudio.get(key) ?? {
+        provider,
+        lane,
+        count: 0,
+        durations: [],
+        reasons: {},
+      }
+      group.count += 1
+      if (duration != null) group.durations.push(duration)
+      bumpCounter(group.reasons, metadata?.reason ?? 'unknown')
+      firstAudio.set(key, group)
+    }
+
+    if (eventName === 'tts.live_audio_fetch_v2') {
+      const background = metadata?.background ?? null
+      const key = `${provider ?? ''}:${background == null ? '' : String(background)}`
+      const group = liveFetches.get(key) ?? {
+        provider,
+        background,
+        count: 0,
+        durations: [],
+        cacheHits: 0,
+        cacheMisses: 0,
+        storage: {},
+      }
+      group.count += 1
+      if (duration != null) group.durations.push(duration)
+      if (row.cache_hit === 1) group.cacheHits += 1
+      if (row.cache_hit === 0) group.cacheMisses += 1
+      bumpCounter(group.storage, row.cache_storage == null ? null : String(row.cache_storage))
+      liveFetches.set(key, group)
+    }
+
+    if (eventName === 'tts.native_ready_v2') {
+      const key = provider ?? ''
+      const group = nativeReady.get(key) ?? {
+        provider,
+        count: 0,
+        readyChunks: [],
+      }
+      group.count += 1
+      if (metadata?.readyChunks != null) group.readyChunks.push(metadata.readyChunks)
+      nativeReady.set(key, group)
+    }
+
+    if (eventName === 'tts.native_underrun_bridge_v2') {
+      const key = provider ?? ''
+      const group = underruns.get(key) ?? {
+        provider,
+        count: 0,
+        chunkStatus: {},
+      }
+      group.count += 1
+      bumpCounter(group.chunkStatus, metadata?.chunkStatus ?? 'unknown')
+      underruns.set(key, group)
+    }
+  }
+
+  const sortProvider = <T extends { provider: string | null }>(items: T[]) => (
+    items.sort((left, right) => String(left.provider ?? '').localeCompare(String(right.provider ?? '')))
+  )
+
+  return {
+    firstAudioByLane: Array.from(firstAudio.values())
+      .sort((left, right) => (
+        String(left.provider ?? '').localeCompare(String(right.provider ?? '')) ||
+        String(left.lane ?? '').localeCompare(String(right.lane ?? ''))
+      ))
+      .map((group) => ({
+        provider: group.provider,
+        lane: group.lane,
+        count: group.count,
+        duration: durationSummary(group.durations),
+        reasons: group.reasons,
+      })),
+    liveAudioFetches: Array.from(liveFetches.values())
+      .sort((left, right) => (
+        String(left.provider ?? '').localeCompare(String(right.provider ?? '')) ||
+        String(left.background).localeCompare(String(right.background))
+      ))
+      .map((group) => ({
+        provider: group.provider,
+        background: group.background,
+        count: group.count,
+        duration: durationSummary(group.durations),
+        cache: {
+          hits: group.cacheHits,
+          misses: group.cacheMisses,
+          hitRate: group.cacheHits + group.cacheMisses
+            ? Math.round((group.cacheHits / (group.cacheHits + group.cacheMisses)) * 1000) / 1000
+            : null,
+          storage: group.storage,
+        },
+      })),
+    nativeReady: sortProvider(Array.from(nativeReady.values()))
+      .map((group) => ({
+        provider: group.provider,
+        count: group.count,
+        readyChunks: valueSummary(group.readyChunks),
+      })),
+    underrunBridges: sortProvider(Array.from(underruns.values()))
+      .map((group) => ({
+        provider: group.provider,
+        count: group.count,
+        chunkStatus: group.chunkStatus,
+      })),
   }
 }
 
@@ -1223,6 +1448,7 @@ async function ttsTelemetrySummary(env: Env, user: User) {
     windowDays: TELEMETRY_RETENTION_DAYS,
     totalEvents: rows.results.length,
     byEvent,
+    diagnostics: summarizeTtsDiagnostics(rows.results),
     recent,
   })
 }
