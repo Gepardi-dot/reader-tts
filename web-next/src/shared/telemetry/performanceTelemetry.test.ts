@@ -46,27 +46,53 @@ describe('performance telemetry normalization', () => {
     expect(normalizePerformanceTelemetryEvent({
       eventName: 'tts.first_audio_v2',
       provider: 'google',
-      durationMs: 42,
+      durationMs: 62,
       metadata: {
         lane: 'fallback',
         reason: 'tap',
         chunkIndex: 0,
         chunkChars: 160,
+      },
+    })).toEqual({
+      eventName: 'tts.first_audio_v2',
+      provider: 'google',
+      durationMs: 62,
+      metadata: {
+        lane: 'fallback',
+        reason: 'tap',
+        chunkIndex: 0,
+        chunkChars: 160,
+      },
+    })
+
+    expect(normalizePerformanceTelemetryEvent({
+      eventName: 'tts.native_handoff_v2',
+      provider: 'google',
+      durationMs: 42,
+      cacheHit: false,
+      cacheStorage: 'generated',
+      metadata: {
+        reason: 'tap',
+        chunkIndex: 1,
+        chunkChars: 420,
         readyChunks: 2,
+        bufferedSeconds: 8.4,
         chunkStatus: 'fetching',
         browserFallback: true,
         kokoroModelReady: false,
       },
     })).toEqual({
-      eventName: 'tts.first_audio_v2',
+      eventName: 'tts.native_handoff_v2',
       provider: 'google',
       durationMs: 42,
+      cacheHit: false,
+      cacheStorage: 'generated',
       metadata: {
-        lane: 'fallback',
         reason: 'tap',
-        chunkIndex: 0,
-        chunkChars: 160,
+        chunkIndex: 1,
+        chunkChars: 420,
         readyChunks: 2,
+        bufferedSeconds: 8.4,
         chunkStatus: 'fetching',
         browserFallback: true,
         kokoroModelReady: false,
