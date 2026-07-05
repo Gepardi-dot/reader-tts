@@ -24,6 +24,7 @@ import { BrowserSpeechLane } from './browserSpeechLane'
 import { ClockedAudioSink } from './clockedAudioSink'
 import { TtsNativeQueue } from './nativeQueue'
 import { buildTtsChunks } from './segmenter'
+import { FirstAudioGate } from './sessionTelemetry'
 import { synthesizeKokoroLocal } from './kokoroAudio'
 import type {
   NativeAudioResult,
@@ -111,6 +112,7 @@ export function useTtsSessionController({
   const laneRef = useRef<TtsSnapshot['lane']>('none')
   const fallbackLaneRef = useRef(new BrowserSpeechLane())
   const nativeSinkRef = useRef(new ClockedAudioSink())
+  const firstAudioGateRef = useRef(new FirstAudioGate())
   const objectUrlsRef = useRef(new Set<string>())
   const rateRef = useRef(rate)
   const providerRef = useRef(provider)
@@ -165,6 +167,7 @@ export function useTtsSessionController({
     phaseRef.current = 'idle'
     laneRef.current = 'none'
     nativeReadyReportedRef.current = false
+    firstAudioGateRef.current.reset()
     revokeObjectUrls()
     clearAudioFollowRef.current()
     emitSnapshot({ error: null })
@@ -177,7 +180,7 @@ export function useTtsSessionController({
     chunk: TtsAudioChunk,
     reason?: 'voice-switch',
   ) => {
-    if (sessionId !== sessionIdRef.current) return
+    if (!firstAudioGateRef.current.shouldReport(sessionId, sessionIdRef.current)) return
     queuePerformanceTelemetry({
       eventName: 'tts.first_audio_v2',
       bookId,
@@ -190,6 +193,31 @@ export function useTtsSessionController({
         reason: reason ?? 'tap',
         chunkIndex: chunk.index,
         chunkChars: chunk.text.length,
+      },
+    })
+  }, [bookId])
+
+  const markNativeHandoff = useCallback((
+    startedAt: number,
+    sessionId: number,
+    chunk: TtsAudioChunk,
+    reason?: 'voice-switch',
+  ) => {
+    if (sessionId !== sessionIdRef.current) return
+    const ready = queueRef.current?.readyRunFrom(chunk.index) ?? { count: 0, seconds: 0 }
+    queuePerformanceTelemetry({
+      eventName: 'tts.native_handoff_v2',
+      bookId,
+      provider: providerRef.current,
+      durationMs: elapsedMs(startedAt),
+      cacheHit: chunk.cacheHit,
+      cacheStorage: chunk.cacheStorage,
+      metadata: {
+        reason: reason ?? 'tap',
+        chunkIndex: chunk.index,
+        chunkChars: chunk.text.length,
+        readyChunks: ready.count,
+        bufferedSeconds: Math.round(ready.seconds * 10) / 10,
       },
     })
   }, [bookId])
@@ -281,6 +309,7 @@ export function useTtsSessionController({
     const chunk = queue?.allChunks[index]
     if (!queue || !chunk?.buffer || ctrl.signal.aborted || sessionId !== sessionIdRef.current) return false
 
+    const previousLane = laneRef.current
     fallbackLaneRef.current.stop()
     laneRef.current = 'native'
     phaseRef.current = 'playing'
@@ -294,6 +323,9 @@ export function useTtsSessionController({
         currentIndexRef.current = startedIndex
         queue.prefetchFrom(startedIndex + 1, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, ctrl.signal)
         if (startedIndex === index) {
+          if (previousLane === 'fallback') {
+            markNativeHandoff(startedAt, sessionId, startedChunk, reason)
+          }
           markFirstAudio(startedAt, sessionId, 'native', startedChunk, reason)
         }
         emitSnapshot()
@@ -336,7 +368,7 @@ export function useTtsSessionController({
       },
     })
     return scheduledCount > 0
-  }, [bookId, emitSnapshot, markFirstAudio, stopWordAudio])
+  }, [bookId, emitSnapshot, markFirstAudio, markNativeHandoff, stopWordAudio])
 
   const speakFallbackAt = useCallback((
     index: number,
@@ -403,6 +435,7 @@ export function useTtsSessionController({
     currentWordRef.current = word
     currentIndexRef.current = 0
     nativeReadyReportedRef.current = false
+    firstAudioGateRef.current.reset()
     phaseRef.current = 'buffering'
     laneRef.current = 'none'
 

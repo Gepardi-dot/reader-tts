@@ -1164,6 +1164,7 @@ interface TtsMetadataSummary {
   chunkChars: number | null
   totalChunks: number | null
   readyChunks: number | null
+  bufferedSeconds: number | null
   currentIndex: number | null
   startOffset: number | null
   selectedChars: number | null
@@ -1199,6 +1200,7 @@ function safeMetadataSummary(metadataJson: unknown): TtsMetadataSummary | null {
       chunkChars: metadataNumberField(metadata, 'chunkChars'),
       totalChunks: metadataNumberField(metadata, 'totalChunks'),
       readyChunks: metadataNumberField(metadata, 'readyChunks'),
+      bufferedSeconds: metadataNumberField(metadata, 'bufferedSeconds'),
       currentIndex: metadataNumberField(metadata, 'currentIndex'),
       startOffset: metadataNumberField(metadata, 'startOffset'),
       selectedChars: metadataNumberField(metadata, 'selectedChars'),
@@ -1247,6 +1249,17 @@ function summarizeTtsDiagnostics(rows: Array<Record<string, unknown>>) {
     provider: string | null
     count: number
     readyChunks: number[]
+  }>()
+  const nativeHandoffs = new Map<string, {
+    provider: string | null
+    count: number
+    durations: number[]
+    readyChunks: number[]
+    bufferedSeconds: number[]
+    cacheHits: number
+    cacheMisses: number
+    storage: Record<string, number>
+    reasons: Record<string, number>
   }>()
   const underruns = new Map<string, {
     provider: string | null
@@ -1308,6 +1321,30 @@ function summarizeTtsDiagnostics(rows: Array<Record<string, unknown>>) {
       nativeReady.set(key, group)
     }
 
+    if (eventName === 'tts.native_handoff_v2') {
+      const key = provider ?? ''
+      const group = nativeHandoffs.get(key) ?? {
+        provider,
+        count: 0,
+        durations: [],
+        readyChunks: [],
+        bufferedSeconds: [],
+        cacheHits: 0,
+        cacheMisses: 0,
+        storage: {},
+        reasons: {},
+      }
+      group.count += 1
+      if (duration != null) group.durations.push(duration)
+      if (metadata?.readyChunks != null) group.readyChunks.push(metadata.readyChunks)
+      if (metadata?.bufferedSeconds != null) group.bufferedSeconds.push(metadata.bufferedSeconds)
+      if (row.cache_hit === 1) group.cacheHits += 1
+      if (row.cache_hit === 0) group.cacheMisses += 1
+      bumpCounter(group.storage, row.cache_storage == null ? null : String(row.cache_storage))
+      bumpCounter(group.reasons, metadata?.reason ?? 'unknown')
+      nativeHandoffs.set(key, group)
+    }
+
     if (eventName === 'tts.native_underrun_bridge_v2') {
       const key = provider ?? ''
       const group = underruns.get(key) ?? {
@@ -1362,6 +1399,23 @@ function summarizeTtsDiagnostics(rows: Array<Record<string, unknown>>) {
         provider: group.provider,
         count: group.count,
         readyChunks: valueSummary(group.readyChunks),
+      })),
+    nativeHandoffs: sortProvider(Array.from(nativeHandoffs.values()))
+      .map((group) => ({
+        provider: group.provider,
+        count: group.count,
+        duration: durationSummary(group.durations),
+        readyChunks: valueSummary(group.readyChunks),
+        bufferedSeconds: valueSummary(group.bufferedSeconds),
+        cache: {
+          hits: group.cacheHits,
+          misses: group.cacheMisses,
+          hitRate: group.cacheHits + group.cacheMisses
+            ? Math.round((group.cacheHits / (group.cacheHits + group.cacheMisses)) * 1000) / 1000
+            : null,
+          storage: group.storage,
+        },
+        reasons: group.reasons,
       })),
     underrunBridges: sortProvider(Array.from(underruns.values()))
       .map((group) => ({
