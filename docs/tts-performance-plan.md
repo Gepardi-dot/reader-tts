@@ -69,4 +69,5 @@ The reader UI remains the same playbar contract: phase, current chunk, total chu
 - 2026-07-01: Gemini native playback now bridges late native chunks with browser speech at chunk boundaries instead of going silent in a loading state, and records `tts.native_gap_bridge` telemetry for follow-up tuning.
 - 2026-07-05: Started TTS v2 reengineering. The reader now has a separate engine scaffold for deterministic segmentation, native queue buffering, browser fallback, and native handoff policy.
 - 2026-07-05: Verified TTS v2 with unit tests, typecheck, lint, production build, and Playwright against browser-speech and Gemini-selected reader playback controls.
+- 2026-07-05: Upgraded the native sink to schedule each contiguous ready Kokoro/Gemini buffer run on the WebAudio clock instead of starting one chunk at a time.
 - Next: gather `tts.*_v2` telemetry from real use, tune handoff thresholds, then move low-level live-audio helpers out of the legacy controller so `wordAudioController.ts` can be retired.

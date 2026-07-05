@@ -331,24 +331,24 @@ export function useTtsSessionController({
     fallbackLaneRef.current.stop()
     laneRef.current = 'native'
     phaseRef.current = 'playing'
-    currentIndexRef.current = index
-    queue.prefetchFrom(index + 1, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, ctrl.signal)
-
-    return nativeSinkRef.current.playChunk({
-      chunk,
+    const scheduledCount = nativeSinkRef.current.playReadyRun({
+      chunks: queue.allChunks,
+      startIndex: index,
       rate: rateRef.current,
       tapOffset: index === 0 ? chunk.start : null,
       signal: ctrl.signal,
-      onStart: () => {
-        markFirstAudio(startedAt, sessionId, 'native', chunk, reason)
-        syncAudioFollowCueRef.current(chunk, 0, true)
+      onChunkStart: (startedChunk, startedIndex) => {
+        currentIndexRef.current = startedIndex
+        queue.prefetchFrom(startedIndex + 1, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, ctrl.signal)
+        if (startedIndex === index) {
+          markFirstAudio(startedAt, sessionId, 'native', startedChunk, reason)
+        }
         emitSnapshot()
       },
-      onProgress: (currentTime, follow) => {
-        syncAudioFollowCueRef.current(chunk, currentTime, follow)
+      onProgress: (activeChunk, currentTime, follow) => {
+        syncAudioFollowCueRef.current(activeChunk, currentTime, follow)
       },
-      onEnded: () => {
-        const nextIndex = index + 1
+      onRunDrained: (nextIndex) => {
         if (ctrl.signal.aborted || sessionId !== sessionIdRef.current) return
         if (nextIndex >= chunksRef.current.length) {
           stopWordAudio()
@@ -382,6 +382,7 @@ export function useTtsSessionController({
         })
       },
     })
+    return scheduledCount > 0
   }, [bookId, emitSnapshot, markFirstAudio, stopWordAudio])
 
   const speakFallbackAt = useCallback((

@@ -1,34 +1,42 @@
 import { audioBufferScheduledEndTime, audioBufferSourceStartTime, tapOffsetSeekSeconds } from '../audioPlayback'
 import type { TtsAudioChunk } from './types'
 
-interface PlayNativeChunkOptions {
-  chunk: TtsAudioChunk
+interface PlayNativeRunOptions {
+  chunks: readonly TtsAudioChunk[]
+  startIndex: number
   rate: number
   tapOffset?: number | null
   signal: AbortSignal
-  onStart: () => void
-  onProgress: (currentTime: number, follow: boolean) => void
-  onEnded: () => void
+  onChunkStart: (chunk: TtsAudioChunk, index: number) => void
+  onProgress: (chunk: TtsAudioChunk, currentTime: number, follow: boolean) => void
+  onRunDrained: (nextIndex: number) => void
+}
+
+interface ScheduledNativeChunk {
+  index: number
+  chunk: TtsAudioChunk
+  source: AudioBufferSourceNode
+  startAt: number
+  endAt: number
+  seekSeconds: number
 }
 
 export class ClockedAudioSink {
   private ctx: AudioContext | null = null
-  private source: AudioBufferSourceNode | null = null
-  private scheduledEnd = 0
-  private chunkStart = 0
-  private seekSeconds = 0
+  private sources: AudioBufferSourceNode[] = []
+  private scheduled: ScheduledNativeChunk[] = []
+  private activeIndex: number | null = null
   private rafId: number | null = null
+  private runToken = 0
 
   get active() {
-    return this.ctx?.state === 'running' && Boolean(this.source)
+    return this.ctx?.state === 'running' && this.sources.length > 0
   }
 
   ensureContext() {
     if (!this.ctx || this.ctx.state === 'closed') {
       this.ctx = new AudioContext()
-      this.scheduledEnd = 0
-      this.chunkStart = 0
-      this.seekSeconds = 0
+      this.activeIndex = null
     }
     return this.ctx
   }
@@ -44,25 +52,26 @@ export class ClockedAudioSink {
   }
 
   stop() {
+    this.runToken += 1
     this.stopProgress()
-    try {
-      if (this.source) {
-        this.source.onended = null
-        this.source.stop(0)
-        this.source.disconnect()
+    for (const source of this.sources) {
+      try {
+        source.onended = null
+        source.stop(0)
+        source.disconnect()
+      } catch {
+        // Already stopped.
       }
-    } catch {
-      // Already stopped.
     }
-    this.source = null
-    this.scheduledEnd = 0
-    this.chunkStart = 0
-    this.seekSeconds = 0
+    this.sources = []
+    this.scheduled = []
+    this.activeIndex = null
   }
 
   setRate(rate: number) {
-    if (!this.source) return
-    this.source.playbackRate.value = rate
+    for (const source of this.sources) {
+      source.playbackRate.value = rate
+    }
   }
 
   close() {
@@ -71,69 +80,114 @@ export class ClockedAudioSink {
     this.ctx = null
   }
 
-  playChunk({
-    chunk,
+  playReadyRun({
+    chunks,
+    startIndex,
     rate,
     tapOffset,
     signal,
-    onStart,
+    onChunkStart,
     onProgress,
-    onEnded,
-  }: PlayNativeChunkOptions) {
+    onRunDrained,
+  }: PlayNativeRunOptions) {
     const ctx = this.ensureContext()
-    if (!chunk.buffer || signal.aborted) return false
+    if (signal.aborted) return 0
     if (ctx.state === 'suspended') void ctx.resume()
 
     this.stop()
+    const token = this.runToken
 
-    const source = ctx.createBufferSource()
-    source.buffer = chunk.buffer
-    source.playbackRate.value = rate
-    source.connect(ctx.destination)
-    this.source = source
+    const scheduled: ScheduledNativeChunk[] = []
+    let scheduledEnd = ctx.currentTime
+    for (let index = Math.max(0, startIndex); index < chunks.length; index += 1) {
+      const chunk = chunks[index]
+      if (!chunk?.buffer) break
 
-    const seekSeconds = tapOffsetSeekSeconds(chunk.start, tapOffset, chunk.cues)
-    const now = ctx.currentTime
-    const startAt = audioBufferSourceStartTime(now, this.scheduledEnd)
-    source.start(startAt, seekSeconds > 0 ? seekSeconds : undefined)
+      const source = ctx.createBufferSource()
+      source.buffer = chunk.buffer
+      source.playbackRate.value = rate
+      source.connect(ctx.destination)
 
-    this.scheduledEnd = audioBufferScheduledEndTime({
-      startAt,
-      bufferDuration: chunk.buffer.duration,
-      seekSeconds,
-      playbackRate: rate,
-    })
-    this.chunkStart = startAt
-    this.seekSeconds = seekSeconds
+      const seekSeconds = index === startIndex
+        ? tapOffsetSeekSeconds(chunk.start, tapOffset, chunk.cues)
+        : 0
+      const startAt = audioBufferSourceStartTime(ctx.currentTime, scheduledEnd)
+      const endAt = audioBufferScheduledEndTime({
+        startAt,
+        bufferDuration: chunk.buffer.duration,
+        seekSeconds,
+        playbackRate: rate,
+      })
+      source.start(startAt, seekSeconds > 0 ? seekSeconds : undefined)
 
-    onStart()
-    onProgress(seekSeconds, true)
-    this.startProgress(chunk, onProgress, signal)
-
-    source.onended = () => {
-      if (signal.aborted) return
-      this.stopProgress()
-      this.source = null
-      onEnded()
+      scheduledEnd = endAt
+      const scheduledChunk = { index, chunk, source, startAt, endAt, seekSeconds }
+      scheduled.push(scheduledChunk)
+      this.sources.push(source)
     }
-    return true
+
+    if (scheduled.length === 0) return 0
+
+    this.scheduled = scheduled
+    const lastIndex = scheduled[scheduled.length - 1].index
+    for (const item of scheduled) {
+      item.source.onended = () => {
+        this.sources = this.sources.filter((source) => source !== item.source)
+        if (signal.aborted || token !== this.runToken || item.index !== lastIndex) return
+        this.stopProgress()
+        onRunDrained(lastIndex + 1)
+      }
+    }
+
+    this.startProgress({ signal, onChunkStart, onProgress })
+    return scheduled.length
   }
 
-  private startProgress(
-    chunk: TtsAudioChunk,
-    onProgress: (currentTime: number, follow: boolean) => void,
-    signal: AbortSignal,
-  ) {
+  private startProgress({
+    signal,
+    onChunkStart,
+    onProgress,
+  }: {
+    signal: AbortSignal
+    onChunkStart: (chunk: TtsAudioChunk, index: number) => void
+    onProgress: (chunk: TtsAudioChunk, currentTime: number, follow: boolean) => void
+  }) {
     this.stopProgress()
+    const first = this.scheduled[0]
+    if (first) this.activate(first, true, onChunkStart, onProgress)
+
     const tick = () => {
       if (signal.aborted) return
       const ctx = this.ctx
       if (!ctx || ctx.state === 'closed') return
-      const currentTime = Math.max(0, ctx.currentTime - this.chunkStart) + this.seekSeconds
-      onProgress(Math.min(currentTime, chunk.buffer?.duration ?? currentTime), false)
+      const now = ctx.currentTime
+      const active = this.scheduled.find((item) => now >= item.startAt && now < item.endAt)
+      if (active) {
+        this.activate(active, false, onChunkStart, onProgress)
+      }
       this.rafId = requestAnimationFrame(tick)
     }
     this.rafId = requestAnimationFrame(tick)
+  }
+
+  private activate(
+    item: ScheduledNativeChunk,
+    follow: boolean,
+    onChunkStart: (chunk: TtsAudioChunk, index: number) => void,
+    onProgress: (chunk: TtsAudioChunk, currentTime: number, follow: boolean) => void,
+  ) {
+    const ctx = this.ctx
+    if (!ctx) return
+    if (this.activeIndex !== item.index) {
+      this.activeIndex = item.index
+      onChunkStart(item.chunk, item.index)
+    }
+    const elapsed = Math.max(0, ctx.currentTime - item.startAt)
+    const currentTime = Math.min(
+      item.seekSeconds + elapsed,
+      item.chunk.buffer?.duration ?? item.seekSeconds + elapsed,
+    )
+    onProgress(item.chunk, currentTime, follow)
   }
 
   private stopProgress() {
