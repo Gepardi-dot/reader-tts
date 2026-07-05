@@ -19,6 +19,7 @@ import {
   pacingFor,
   shouldBridgeNativeAudioGap,
   shouldPrimeNativeAudio,
+  nativePrefetchStartIndexForFallback,
   tapOffsetSeekSeconds,
 } from './audioPlayback'
 
@@ -144,6 +145,12 @@ describe('audio playback startup plan', () => {
     expect(shouldBridgeNativeAudioGap('google', false)).toBe(false)
     expect(shouldBridgeNativeAudioGap('kokoro', true)).toBe(false)
     expect(shouldBridgeNativeAudioGap(BROWSER_TTS_PROVIDER_ID, true)).toBe(false)
+  })
+
+  it('prefetches native audio after the chunk already covered by browser fallback', () => {
+    expect(nativePrefetchStartIndexForFallback('kokoro', 0)).toBe(1)
+    expect(nativePrefetchStartIndexForFallback('google', 2)).toBe(3)
+    expect(nativePrefetchStartIndexForFallback(BROWSER_TTS_PROVIDER_ID, 2)).toBe(2)
   })
 
   it('falls back to native startup when browser speech is unavailable for Gemini', () => {

@@ -292,3 +292,8 @@ export function shouldPrimeNativeAudio(startupPlan: PlaybackStartupPlan): boolea
 export function shouldBridgeNativeAudioGap(provider: string, browserSpeechSupported: boolean): boolean {
   return provider === CLOUD_TTS_PROVIDER_ID && browserSpeechSupported
 }
+
+export function nativePrefetchStartIndexForFallback(provider: string, currentIndex: number) {
+  const safeIndex = Math.max(0, Math.floor(currentIndex))
+  return provider === BROWSER_TTS_PROVIDER_ID ? safeIndex : safeIndex + 1
+}
