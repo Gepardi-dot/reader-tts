@@ -25,9 +25,17 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 1. Keep edge caching for local Gemini WAV chunk repeat hits.
 2. Use R2 for persistent cross-colo Gemini storage.
 3. Keep Browser speech as the immediate fallback for uncached Gemini or cold Kokoro.
-4. Move playback scheduling into a dedicated audio controller so React rendering does not drive timing.
-5. Use lightweight telemetry for tap latency, cache hits, chunk generation time, and stalls.
+4. Move playback scheduling into a dedicated audio engine so React rendering does not drive timing.
+5. Use lightweight telemetry for tap latency, cache hits, chunk generation time, stalls, and handoffs.
 6. Tune chunk sizes separately for Browser, Kokoro, and Gemini.
+
+## TTS v2 Architecture
+
+The legacy `wordAudioController.ts` path mixed React state, browser speech, HTMLAudio, WebAudio, provider fetches, streaming, cache writes, and cancellation in one hook. TTS v2 replaces that with a small engine under `web-next/src/features/reader/tts-engine/`.
+
+The invariant is: tapping text starts audible browser speech immediately when the browser supports it. Kokoro and Gemini run in the native lane in parallel, but native playback may only take over at a chunk boundary after the queue has enough contiguous buffered audio. If native audio underruns, playback bridges back to browser speech instead of entering silent loading.
+
+The reader UI remains the same playbar contract: phase, current chunk, total chunks, toggle, stop, and word tap playback. React observes engine state; it does not schedule audio timing.
 
 ## Decisions
 
@@ -59,4 +67,6 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - 2026-07-01: Word-audio native startup now primes a reusable HTMLAudio element during the original tap whenever Gemini handoff or native Kokoro playback may need HTMLAudio fallback, matching the existing mobile unlock pattern from the audio preview player.
 - 2026-07-01: D1 telemetry showed a generated Gemini miss on a 571-character chunk taking 22.4s and cached 346-424 character follow-up chunks still taking hundreds of ms, so Gemini now uses 160-character first chunks, 320-character follow-up chunks, and three-chunk bootstrap/read-ahead.
 - 2026-07-01: Gemini native playback now bridges late native chunks with browser speech at chunk boundaries instead of going silent in a loading state, and records `tts.native_gap_bridge` telemetry for follow-up tuning.
-- Next: use telemetry samples to tune chunk sizes/prefetch thresholds, then split Kokoro/Gemini buffering policy from low-level media control.
+- 2026-07-05: Started TTS v2 reengineering. The reader now has a separate engine scaffold for deterministic segmentation, native queue buffering, browser fallback, and native handoff policy.
+- 2026-07-05: Verified TTS v2 with unit tests, typecheck, lint, production build, and Playwright against browser-speech and Gemini-selected reader playback controls.
+- Next: gather `tts.*_v2` telemetry from real use, tune handoff thresholds, then move low-level live-audio helpers out of the legacy controller so `wordAudioController.ts` can be retired.
