@@ -121,6 +121,40 @@ describe('modelCache state machine', () => {
     expect(mc.isModelReady()).toBe(true)
   })
 
+  it('waitForModelReady starts warmup and resolves when ready', async () => {
+    const mc = await loadModule()
+    const pending = mc.waitForModelReady()
+
+    expect(MockWorker.instances).toHaveLength(1)
+    expect(mc.getModelStatus().status).toBe('downloading')
+
+    MockWorker.instances[0].emit({ type: 'ready' })
+
+    await expect(pending).resolves.toBe(true)
+  })
+
+  it('waitForModelReady resolves false on abort', async () => {
+    const mc = await loadModule()
+    const ctrl = new AbortController()
+    const pending = mc.waitForModelReady(ctrl.signal)
+
+    ctrl.abort()
+
+    await expect(pending).resolves.toBe(false)
+    MockWorker.instances[0].emit({ type: 'ready' })
+    expect(mc.isModelReady()).toBe(true)
+  })
+
+  it('waitForModelReady resolves immediately when already warm', async () => {
+    const mc = await loadModule()
+    mc.startWarmup()
+    MockWorker.instances[0].emit({ type: 'ready' })
+    const workerCount = MockWorker.instances.length
+
+    await expect(mc.waitForModelReady()).resolves.toBe(true)
+    expect(MockWorker.instances).toHaveLength(workerCount)
+  })
+
   it('warmup:error terminates the worker and allows retry on next startWarmup', async () => {
     const mc = await loadModule()
     mc.startWarmup()

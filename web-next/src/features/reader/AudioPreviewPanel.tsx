@@ -4,6 +4,7 @@ import { Pause, Play, SkipBack, SkipForward } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { api, request } from '@/shared/api/client'
+import { waitForModelReady } from '@/shared/storage/modelCache'
 import type { RollingCacheState } from '@/shared/storage/rollingVoiceCache'
 import { queuePerformanceTelemetry } from '@/shared/telemetry/performanceTelemetry'
 import {
@@ -34,6 +35,9 @@ import {
   type AudioPhase,
   type PreviewAudioChunk as AudioChunk,
 } from './tts-engine/types'
+import { synthesizeKokoroLocal } from './tts-engine/kokoroAudio'
+
+const KOKORO_PREVIEW_TEXT = 'The story found its rhythm, warm and clear.'
 
 export interface AudioPreviewColors {
   bg: string
@@ -174,6 +178,27 @@ export function AudioPreviewPanel({
     updateChunk(idx, { status: 'fetching' })
     const fetchPromise = (async () => {
       try {
+        if (draftProvider === 'kokoro') {
+          const voiceId = selectedVoiceId
+          if (!voiceId) throw new Error('Choose a voice to preview.')
+
+          const ready = await waitForModelReady(signal)
+          if (signal.aborted) return null
+          if (!ready) throw new Error('The on-device voice is still preparing. Try again in a moment.')
+
+          const { lengthScale } = pacingFor('kokoro')
+          const speed = lengthScale > 0 ? 1 / lengthScale : 1
+          const preview = await synthesizeKokoroLocal(KOKORO_PREVIEW_TEXT, voiceId, speed, signal)
+          if (signal.aborted) return null
+          if (!preview) throw new Error('The on-device voice is still preparing. Try again in a moment.')
+
+          const url = URL.createObjectURL(preview.blob)
+          rememberAudioObjectUrl(url)
+          setSampleText(KOKORO_PREVIEW_TEXT)
+          updateChunk(idx, { status: 'ready', url })
+          return url
+        }
+
         const { lengthScale, sentenceSilence } = pacingFor(draftProvider)
         const previewLengthScale = Math.max(0.6, Math.min(lengthScale * rateRef.current, 1.5))
         const preview = await request<ProviderTestResult>('/api/providers/test', {
@@ -662,6 +687,7 @@ export function AudioPreviewPanel({
           onClick={togglePlay}
           disabled={playDisabled}
           className="w-12 h-12 rounded-full bg-primary text-white flex items-center justify-center shadow-lg active:scale-95 transition-transform disabled:opacity-50"
+          aria-label={isPlaying ? 'Pause voice sample' : 'Play voice sample'}
         >
           {isBuffering
             ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />

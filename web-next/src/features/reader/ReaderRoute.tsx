@@ -2357,6 +2357,7 @@ export function ReaderRoute() {
   })
   const providerCatalog = withBrowserProvider(providersData?.providers)
   const activeProviderInfo = providerCatalog.find(p => p.id === ttsProvider)
+  const kokoroProviderAvailable = providerCatalog.some(p => p.id === 'kokoro' && p.available)
   const fallbackProviderInfo = providersData?.providers
     ? pickFallbackProvider(providerCatalog)
     : null
@@ -2543,7 +2544,7 @@ export function ReaderRoute() {
   }, [bookId, payload?.text, effectiveTtsProvider, effectiveTtsVoice, commitVoiceForBook])
 
   useEffect(() => {
-    if (effectiveTtsProvider !== 'kokoro' || !hasReaderText) return
+    if (!hasReaderText || !kokoroProviderAvailable) return
     let cancelled = false
     let timeoutId: ReturnType<typeof setTimeout> | null = null
     let idleId: number | null = null
@@ -2552,9 +2553,9 @@ export function ReaderRoute() {
     }
 
     if ('requestIdleCallback' in window) {
-      idleId = window.requestIdleCallback(warm, { timeout: 4000 })
+      idleId = window.requestIdleCallback(warm, { timeout: 5000 })
     } else {
-      timeoutId = setTimeout(warm, 1800)
+      timeoutId = setTimeout(warm, 3000)
     }
 
     return () => {
@@ -2562,7 +2563,7 @@ export function ReaderRoute() {
       if (idleId !== null) window.cancelIdleCallback(idleId)
       if (timeoutId) clearTimeout(timeoutId)
     }
-  }, [effectiveTtsProvider, hasReaderText])
+  }, [hasReaderText, kokoroProviderAvailable])
 
   // Background warmup — fire as soon as a local provider is selected so the model is
   // loaded by the time the user opens the audio sheet. Fire-and-forget, no UI blocking.
