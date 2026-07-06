@@ -9,7 +9,7 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 - Tap-to-first-audio: under 100 ms for cached or browser fallback playback.
 - Kokoro after warmup: first high-quality chunk scheduled under 200 ms.
 - Gemini cache hit: first chunk returned from Cloudflare storage under 150 ms.
-- Gemini cache miss: browser speech masks the network round trip, then Gemini takes over at a chunk boundary.
+- Gemini cache miss: native startup should show clear buffering/backoff state; browser speech remains available as the separate instant provider when quality voice selection is less important than immediate sound.
 - Playback quality: no repeated gaps between chunks once two chunks are buffered.
 
 ## Current State
@@ -24,7 +24,7 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 
 1. Keep edge caching for local Gemini WAV chunk repeat hits.
 2. Use R2 for persistent cross-colo Gemini storage.
-3. Keep Browser speech as the immediate fallback for uncached Gemini or cold Kokoro.
+3. Keep Browser speech as the immediate default and emergency fallback, but do not mask selected Kokoro/Gemini voices with browser speech during normal native playback.
 4. Move playback scheduling into a dedicated audio engine so React rendering does not drive timing.
 5. Use lightweight telemetry for tap latency, cache hits, chunk generation time, stalls, and handoffs.
 6. Tune chunk sizes separately for Browser, Kokoro, and Gemini.
@@ -33,7 +33,7 @@ ReaderTTS should feel instant and stay smooth: tapping text should start audible
 
 The legacy `wordAudioController.ts` path mixed React state, browser speech, HTMLAudio, WebAudio, provider fetches, streaming, cache writes, and cancellation in one hook. TTS v2 replaces that with a small engine under `web-next/src/features/reader/tts-engine/`.
 
-The invariant is: tapping text starts audible browser speech immediately when the browser supports it. Kokoro and Gemini run in the native lane in parallel, but native playback may only take over at a chunk boundary after the queue has enough contiguous buffered audio. If native audio underruns, playback bridges back to browser speech instead of entering silent loading.
+The invariant is: tapping text starts immediately when Browser speech is the selected provider. When Kokoro or Gemini is selected, playback stays in the native lane so the chosen voice is honored; startup and underruns should be reduced through warmup, short chunks, cache hits, and clear buffering/backoff state rather than silently switching to the browser's default voice.
 
 The reader UI remains the same playbar contract: phase, current chunk, total chunks, toggle, stop, and word tap playback. React observes engine state; it does not schedule audio timing.
 
@@ -42,6 +42,7 @@ The reader UI remains the same playbar contract: phase, current chunk, total chu
 - Browser speech remains the fastest default because it has no model download or network dependency.
 - Kokoro is the preferred free high-quality path after warmup.
 - Gemini is an optional cloud quality path and must be cached aggressively to control latency and cost.
+- Voice correctness wins over masking: selected native voices should not sound like the browser default.
 - Do not reintroduce the old Vercel/Supabase audio path.
 
 ## Working Notes
@@ -78,4 +79,6 @@ The reader UI remains the same playbar contract: phase, current chunk, total chu
 - 2026-07-05: Live D1 telemetry showed `tts.first_audio_v2` was emitted again on later chunks and native handoff, inflating tap-to-audio numbers. First-audio reporting is now gated once per session, and native takeover is tracked separately as `tts.native_handoff_v2`.
 - 2026-07-05: Controlled Gemini playback showed free-tier `429 RESOURCE_EXHAUSTED` failures caused by idle read-ahead and parallel native prefetch. Gemini is now active-playback-only, native prefetch runs sequentially, and client cooldown prevents repeated Worker calls while browser speech continues.
 - 2026-07-06: Controlled Kokoro playback showed the model was warm but native handoff never arrived because 300+ character chunks could not synthesize before browser fallback finished. Kokoro follow-up chunks and the rolling-cache grid are now smaller so on-device work can catch up at chunk boundaries.
+- 2026-07-06: PR #42 fixed native voice selection by preserving valid non-default voices, committing the exact applied provider/voice to Kokoro cache preparation, and keeping selected native providers out of the browser-speech lane during normal playback.
+- 2026-07-06: Kokoro audio-panel previews now synthesize locally with the selected Kokoro voice instead of calling the Gemini-only provider preview endpoint, and reader screens idle-warm Kokoro after text load so previews/playback are less likely to pay the full model startup cost on first use.
 - Next: use `GET /api/telemetry/tts-summary` after real Kokoro/Gemini sessions to tune handoff thresholds, chunk sizes, and read-ahead windows from measured first-audio, native-handoff, quota-backoff, and underrun evidence.

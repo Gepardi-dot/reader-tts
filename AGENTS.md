@@ -27,4 +27,4 @@ Current direction is Cloudflare-first: Pages for the frontend, Workers for the A
 
 ## Current Priority
 
-Continue improving TTS responsiveness and playback smoothness. Browser speech remains the instant fallback, Kokoro is the preferred free high-quality path after warmup, and Gemini is the optional cloud-quality path that must be cached aggressively.
+Continue improving TTS responsiveness and playback smoothness. Browser speech remains the instant default and emergency fallback, but selected Kokoro/Gemini voices should not be masked by browser speech during normal playback. Kokoro is the preferred free high-quality path after warmup, and Gemini is the optional cloud-quality path that must be cached aggressively.

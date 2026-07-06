@@ -192,6 +192,32 @@ export function isModelReady(): boolean {
   return state.status === 'ready'
 }
 
+export function waitForModelReady(signal?: AbortSignal): Promise<boolean> {
+  if (isModelReady()) return Promise.resolve(true)
+  if (signal?.aborted) return Promise.resolve(false)
+
+  return new Promise((resolve) => {
+    let done = false
+    let unsubscribe: (() => void) | null = null
+
+    const finish = (ready: boolean) => {
+      if (done) return
+      done = true
+      unsubscribe?.()
+      signal?.removeEventListener('abort', onAbort)
+      resolve(ready)
+    }
+    const onAbort = () => finish(false)
+
+    signal?.addEventListener('abort', onAbort, { once: true })
+    unsubscribe = subscribeModelStatus((next) => {
+      if (next.status === 'ready') finish(true)
+      if (next.status === 'error') finish(false)
+    })
+    startWarmup()
+  })
+}
+
 /**
  * Streaming synthesis. Resolves the worker handle synchronously so the caller
  * can start scheduling audio chunks as they arrive. `onComplete` fires once

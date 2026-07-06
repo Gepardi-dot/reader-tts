@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 
 import {
   isModelReady,
   startWarmup,
-  subscribeModelStatus,
+  waitForModelReady,
 } from '@/shared/storage/modelCache'
 import {
   elapsedMs,
@@ -76,31 +76,6 @@ type SpeakFallbackAt = (
   sessionId: number,
   reason?: 'voice-switch',
 ) => boolean
-
-function waitForKokoroModelReady(signal: AbortSignal): Promise<boolean> {
-  if (isModelReady()) return Promise.resolve(true)
-  if (signal.aborted) return Promise.resolve(false)
-
-  return new Promise((resolve) => {
-    let done = false
-    let unsubscribe: (() => void) | null = null
-    const finish = (ready: boolean) => {
-      if (done) return
-      done = true
-      unsubscribe?.()
-      signal.removeEventListener('abort', onAbort)
-      resolve(ready)
-    }
-    const onAbort = () => finish(false)
-
-    signal.addEventListener('abort', onAbort, { once: true })
-    unsubscribe = subscribeModelStatus((state) => {
-      if (state.status === 'ready') finish(true)
-      if (state.status === 'error') finish(false)
-    })
-    startWarmup()
-  })
-}
 
 const EMPTY_SNAPSHOT: TtsSnapshot = {
   phase: 'idle',
@@ -261,7 +236,7 @@ export function useTtsSessionController({
     if (selectedProvider === 'kokoro') {
       if (!selectedVoice) return null
       if (!isModelReady()) {
-        const ready = await waitForKokoroModelReady(signal)
+        const ready = await waitForModelReady(signal)
         if (!ready || signal.aborted) return null
       }
       const { lengthScale } = pacingFor('kokoro')
