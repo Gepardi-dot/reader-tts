@@ -28,6 +28,7 @@ import { BrowserSpeechLane } from './browserSpeechLane'
 import { ClockedAudioSink } from './clockedAudioSink'
 import { TtsNativeQueue } from './nativeQueue'
 import { buildTtsChunks } from './segmenter'
+import { TtsSessionState } from './sessionState'
 import { FirstAudioGate } from './sessionTelemetry'
 import { synthesizeKokoroLocal } from './kokoroAudio'
 import type {
@@ -106,14 +107,9 @@ export function useTtsSessionController({
   showToast,
 }: UseTtsSessionControllerParams): TtsSessionController {
   const [snapshot, setSnapshot] = useState<TtsSnapshot>({ ...EMPTY_SNAPSHOT, provider })
-  const sessionIdRef = useRef(0)
-  const abortRef = useRef<AbortController | null>(null)
   const queueRef = useRef<TtsNativeQueue | null>(null)
   const chunksRef = useRef<TtsAudioChunk[]>([])
-  const currentIndexRef = useRef(0)
-  const currentWordRef = useRef<string | null>(null)
-  const phaseRef = useRef<TtsPhase>('idle')
-  const laneRef = useRef<TtsSnapshot['lane']>('none')
+  const sessionStateRef = useRef(new TtsSessionState())
   const fallbackLaneRef = useRef(new BrowserSpeechLane())
   const nativeSinkRef = useRef(new ClockedAudioSink())
   const firstAudioGateRef = useRef(new FirstAudioGate())
@@ -138,19 +134,15 @@ export function useTtsSessionController({
 
   const emitSnapshot = useCallback((patch: Partial<TtsSnapshot> = {}) => {
     const queue = queueRef.current
-    const ready = queue?.readyRunFrom(currentIndexRef.current) ?? { count: 0, seconds: 0 }
-    const next: TtsSnapshot = {
-      phase: phaseRef.current,
-      lane: laneRef.current,
-      currentIndex: currentIndexRef.current,
-      totalChunks: chunksRef.current.length,
-      word: currentWordRef.current,
+    const session = sessionStateRef.current
+    const ready = queue?.readyRunFrom(session.currentIndex) ?? { count: 0, seconds: 0 }
+    const next = session.snapshot({
       provider: providerRef.current,
+      totalChunks: chunksRef.current.length,
       nativeReadyChunks: ready.count,
       bufferedSeconds: ready.seconds,
-      error: null,
-      ...patch,
-    }
+      patch,
+    })
     setSnapshot(next)
   }, [])
 
@@ -160,18 +152,12 @@ export function useTtsSessionController({
   }, [])
 
   const stopWordAudio = useCallback(() => {
-    abortRef.current?.abort()
-    abortRef.current = null
-    sessionIdRef.current += 1
+    sessionStateRef.current.stop()
     fallbackLaneRef.current.stop()
     nativeSinkRef.current.stop()
     queueRef.current?.resetInflight()
     queueRef.current = null
     chunksRef.current = []
-    currentIndexRef.current = 0
-    currentWordRef.current = null
-    phaseRef.current = 'idle'
-    laneRef.current = 'none'
     nativeReadyReportedRef.current = false
     firstAudioGateRef.current.reset()
     revokeObjectUrls()
@@ -186,7 +172,7 @@ export function useTtsSessionController({
     chunk: TtsAudioChunk,
     reason?: 'voice-switch',
   ) => {
-    if (!firstAudioGateRef.current.shouldReport(sessionId, sessionIdRef.current)) return
+    if (!firstAudioGateRef.current.shouldReport(sessionId, sessionStateRef.current.id)) return
     queuePerformanceTelemetry({
       eventName: 'tts.first_audio_v2',
       bookId,
@@ -209,7 +195,7 @@ export function useTtsSessionController({
     chunk: TtsAudioChunk,
     reason?: 'voice-switch',
   ) => {
-    if (sessionId !== sessionIdRef.current) return
+    if (!sessionStateRef.current.isCurrent(sessionId)) return
     const ready = queueRef.current?.readyRunFrom(chunk.index) ?? { count: 0, seconds: 0 }
     queuePerformanceTelemetry({
       eventName: 'tts.native_handoff_v2',
@@ -355,14 +341,14 @@ export function useTtsSessionController({
     sessionId: number,
     reason?: 'voice-switch',
   ) => {
+    const session = sessionStateRef.current
     const queue = queueRef.current
     const chunk = queue?.allChunks[index]
-    if (!queue || !chunk?.buffer || ctrl.signal.aborted || sessionId !== sessionIdRef.current) return false
+    if (!queue || !chunk?.buffer || !session.isCurrent(sessionId, ctrl.signal)) return false
 
-    const previousLane = laneRef.current
+    const previousLane = session.lane
     fallbackLaneRef.current.stop()
-    laneRef.current = 'native'
-    phaseRef.current = 'playing'
+    session.setPlaying('native')
     const scheduledCount = nativeSinkRef.current.playReadyRun({
       chunks: queue.allChunks,
       startIndex: index,
@@ -370,7 +356,8 @@ export function useTtsSessionController({
       tapOffset: index === 0 ? chunk.start : null,
       signal: ctrl.signal,
       onChunkStart: (startedChunk, startedIndex) => {
-        currentIndexRef.current = startedIndex
+        if (!session.isCurrent(sessionId, ctrl.signal)) return
+        session.setCurrentIndex(startedIndex)
         queue.prefetchFrom(startedIndex + 1, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, ctrl.signal)
         if (startedIndex === index) {
           if (previousLane === 'fallback') {
@@ -381,10 +368,11 @@ export function useTtsSessionController({
         emitSnapshot()
       },
       onProgress: (activeChunk, currentTime, follow) => {
+        if (!session.isCurrent(sessionId, ctrl.signal)) return
         syncAudioFollowCueRef.current(activeChunk, currentTime, follow)
       },
       onRunDrained: (nextIndex) => {
-        if (ctrl.signal.aborted || sessionId !== sessionIdRef.current) return
+        if (!session.isCurrent(sessionId, ctrl.signal)) return
         if (nextIndex >= chunksRef.current.length) {
           stopWordAudio()
           return
@@ -396,13 +384,13 @@ export function useTtsSessionController({
         }
 
         queue.prefetchFrom(nextIndex, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, ctrl.signal)
-        phaseRef.current = 'buffering'
+        session.setBuffering()
         emitSnapshot()
         void queue.ensure(nextIndex, ctrl.signal, false).then((result) => {
-          if (ctrl.signal.aborted || sessionId !== sessionIdRef.current || !result?.buffer) return
+          if (!session.isCurrent(sessionId, ctrl.signal) || !result?.buffer) return
           startNativeAtRef.current(nextIndex, ctrl, startedAt, sessionId, reason)
         }).catch((error) => {
-          if (ctrl.signal.aborted || sessionId !== sessionIdRef.current) return
+          if (!session.isCurrent(sessionId, ctrl.signal)) return
           showToastRef.current(audioErrorMessage(error))
           stopWordAudio()
         })
@@ -418,13 +406,13 @@ export function useTtsSessionController({
     sessionId: number,
     reason?: 'voice-switch',
   ): boolean => {
+    const session = sessionStateRef.current
     const chunk = chunksRef.current[index]
     const queue = queueRef.current
-    if (!chunk || ctrl.signal.aborted || sessionId !== sessionIdRef.current) return false
+    if (!chunk || !session.isCurrent(sessionId, ctrl.signal)) return false
 
-    laneRef.current = 'fallback'
-    phaseRef.current = 'playing'
-    currentIndexRef.current = index
+    session.setPlaying('fallback')
+    session.setCurrentIndex(index)
     queue?.prefetchFrom(
       nativePrefetchStartIndexForFallback(providerRef.current, index),
       PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD,
@@ -438,13 +426,13 @@ export function useTtsSessionController({
       rate: rateRef.current,
       signal: ctrl.signal,
       onStart: () => {
+        if (!session.isCurrent(sessionId, ctrl.signal)) return
         markFirstAudio(startedAt, sessionId, 'fallback', chunk, reason)
-        phaseRef.current = 'playing'
-        laneRef.current = 'fallback'
+        session.setPlaying('fallback')
         emitSnapshot()
       },
       onEnd: () => {
-        if (ctrl.signal.aborted || sessionId !== sessionIdRef.current) return
+        if (!session.isCurrent(sessionId, ctrl.signal)) return
         const nextIndex = index + 1
         if (nextIndex >= chunksRef.current.length) {
           stopWordAudio()
@@ -456,7 +444,7 @@ export function useTtsSessionController({
         void speakFallbackAtRef.current(nextIndex, ctrl, startedAt, sessionId, reason)
       },
       onError: () => {
-        if (ctrl.signal.aborted || sessionId !== sessionIdRef.current) return
+        if (!session.isCurrent(sessionId, ctrl.signal)) return
         showToastRef.current('Browser speech stopped. Tap a word to start again.')
         stopWordAudio()
       },
@@ -473,17 +461,15 @@ export function useTtsSessionController({
   ) => {
     stopWordAudio()
     const startedAt = performanceNow()
-    const sessionId = sessionIdRef.current + 1
-    const startSelectionKey = selectionKeyRef.current
-    sessionIdRef.current = sessionId
-    const ctrl = new AbortController()
-    abortRef.current = ctrl
-    currentWordRef.current = word
-    currentIndexRef.current = 0
+    const startedSession = sessionStateRef.current.begin({
+      word,
+      selectionKey: selectionKeyRef.current,
+    })
+    const sessionId = startedSession.id
+    const startSelectionKey = startedSession.selectionKey
+    const ctrl = startedSession.controller
     nativeReadyReportedRef.current = false
     firstAudioGateRef.current.reset()
-    phaseRef.current = 'buffering'
-    laneRef.current = 'none'
 
     if (providerRef.current === 'kokoro') startWarmup()
 
@@ -505,14 +491,15 @@ export function useTtsSessionController({
     const queue = new TtsNativeQueue(chunks, fetchNativeChunk)
     queueRef.current = queue
     const unsubscribe = queue.subscribe(() => {
-      if (sessionId !== sessionIdRef.current) return
-      const nextIndex = currentIndexRef.current
-      if (laneRef.current === 'native') {
+      const session = sessionStateRef.current
+      if (!session.isCurrent(sessionId, ctrl.signal)) return
+      const nextIndex = session.currentIndex
+      if (session.lane === 'native') {
         nativeSinkRef.current.extendReadyRun(queue.allChunks)
       }
       emitSnapshot()
       if (
-        laneRef.current === 'fallback' &&
+        session.lane === 'fallback' &&
         !nativeReadyReportedRef.current &&
         queue.shouldStartNativeFrom(nextIndex)
       ) {
@@ -558,7 +545,7 @@ export function useTtsSessionController({
 
     try {
       const first = await queue.ensure(0, ctrl.signal, false)
-      if (ctrl.signal.aborted || sessionId !== sessionIdRef.current) return
+      if (!sessionStateRef.current.isCurrent(sessionId, ctrl.signal)) return
       if (selectionKeyRef.current !== startSelectionKey) return
       if (!first?.buffer) throw new Error('Audio provider did not return playable audio.')
       startNativeAt(0, ctrl, startedAt, sessionId, reason)
@@ -571,35 +558,36 @@ export function useTtsSessionController({
   }, [bookId, bookText, emitSnapshot, fetchNativeChunk, presynthGridRef, speakFallbackAt, startNativeAt, stopWordAudio])
 
   const toggleWordAudio = useCallback(() => {
-    if (phaseRef.current === 'buffering') {
+    const session = sessionStateRef.current
+    if (session.phase === 'buffering') {
       stopWordAudio()
       return
     }
-    if (phaseRef.current === 'playing') {
-      if (laneRef.current === 'fallback') fallbackLaneRef.current.pause()
+    if (session.phase === 'playing') {
+      if (session.lane === 'fallback') fallbackLaneRef.current.pause()
       else void nativeSinkRef.current.pause()
-      phaseRef.current = 'paused'
+      session.setPaused()
       emitSnapshot()
       return
     }
-    if (phaseRef.current !== 'paused') return
-    if (laneRef.current === 'fallback') fallbackLaneRef.current.resume()
+    if (session.phase !== 'paused') return
+    if (session.lane === 'fallback') fallbackLaneRef.current.resume()
     else void nativeSinkRef.current.resume()
-    phaseRef.current = 'playing'
+    session.setPlaying(session.lane)
     emitSnapshot()
   }, [emitSnapshot, stopWordAudio])
 
   const isAudioActive = useCallback(() => (
-    phaseRef.current === 'playing' ||
-    phaseRef.current === 'buffering' ||
+    sessionStateRef.current.isAudibleOrLoading() ||
     fallbackLaneRef.current.isActive ||
     nativeSinkRef.current.active
   ), [])
 
   useEffect(() => {
-    if (phaseRef.current !== 'idle' && currentWordRef.current) {
-      const currentChunk = chunksRef.current[currentIndexRef.current] ?? chunksRef.current[0]
-      if (currentChunk) void playWord(currentWordRef.current, currentChunk.start, 'voice-switch')
+    const session = sessionStateRef.current
+    if (session.phase !== 'idle' && session.currentWord) {
+      const currentChunk = chunksRef.current[session.currentIndex] ?? chunksRef.current[0]
+      if (currentChunk) void playWord(session.currentWord, currentChunk.start, 'voice-switch')
     }
   // Provider and voice changes intentionally restart the active session once.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -613,9 +601,10 @@ export function useTtsSessionController({
   useEffect(() => {
     nativeSinkRef.current.setRate(rate)
     const queue = queueRef.current
-    if (providerRef.current === BROWSER_TTS_PROVIDER_ID || !queue || !abortRef.current) return
-    const currentIndex = currentIndexRef.current
-    queue.prefetchFrom(currentIndex + 1, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, abortRef.current.signal)
+    const controller = sessionStateRef.current.abortController
+    if (providerRef.current === BROWSER_TTS_PROVIDER_ID || !queue || !controller) return
+    const currentIndex = sessionStateRef.current.currentIndex
+    queue.prefetchFrom(currentIndex + 1, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, controller.signal)
   }, [rate])
 
   return {
