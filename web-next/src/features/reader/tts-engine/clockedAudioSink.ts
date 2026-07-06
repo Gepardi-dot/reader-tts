@@ -21,12 +21,22 @@ interface ScheduledNativeChunk {
   seekSeconds: number
 }
 
+interface ActiveNativeRun {
+  token: number
+  rate: number
+  signal: AbortSignal
+  onChunkStart: (chunk: TtsAudioChunk, index: number) => void
+  onProgress: (chunk: TtsAudioChunk, currentTime: number, follow: boolean) => void
+  onRunDrained: (nextIndex: number) => void
+}
+
 export class ClockedAudioSink {
   private ctx: AudioContext | null = null
   private sources: AudioBufferSourceNode[] = []
   private scheduled: ScheduledNativeChunk[] = []
   private activeIndex: number | null = null
   private rafId: number | null = null
+  private activeRun: ActiveNativeRun | null = null
   private runToken = 0
 
   get active() {
@@ -66,9 +76,11 @@ export class ClockedAudioSink {
     this.sources = []
     this.scheduled = []
     this.activeIndex = null
+    this.activeRun = null
   }
 
   setRate(rate: number) {
+    if (this.activeRun) this.activeRun.rate = rate
     for (const source of this.sources) {
       source.playbackRate.value = rate
     }
@@ -96,10 +108,57 @@ export class ClockedAudioSink {
 
     this.stop()
     const token = this.runToken
+    this.activeRun = { token, rate, signal, onChunkStart, onProgress, onRunDrained }
 
-    const scheduled: ScheduledNativeChunk[] = []
-    let scheduledEnd = ctx.currentTime
-    for (let index = Math.max(0, startIndex); index < chunks.length; index += 1) {
+    const scheduledCount = this.scheduleReadyRun({
+      chunks,
+      startIndex: Math.max(0, startIndex),
+      rate,
+      tapOffset: tapOffset ?? null,
+      token,
+    })
+    if (scheduledCount === 0) {
+      this.activeRun = null
+      return 0
+    }
+
+    this.startProgress({ signal, onChunkStart, onProgress })
+    return scheduledCount
+  }
+
+  extendReadyRun(chunks: readonly TtsAudioChunk[]) {
+    const run = this.activeRun
+    const lastScheduled = this.scheduled[this.scheduled.length - 1]
+    if (!run || !lastScheduled || run.signal.aborted || run.token !== this.runToken) return 0
+
+    return this.scheduleReadyRun({
+      chunks,
+      startIndex: lastScheduled.index + 1,
+      rate: run.rate,
+      tapOffset: null,
+      token: run.token,
+    })
+  }
+
+  private scheduleReadyRun({
+    chunks,
+    startIndex,
+    rate,
+    tapOffset,
+    token,
+  }: {
+    chunks: readonly TtsAudioChunk[]
+    startIndex: number
+    rate: number
+    tapOffset: number | null
+    token: number
+  }) {
+    const ctx = this.ensureContext()
+    const scheduledStart = Math.max(0, startIndex)
+    let scheduledEnd = this.scheduled[this.scheduled.length - 1]?.endAt ?? ctx.currentTime
+    let scheduledCount = 0
+
+    for (let index = scheduledStart; index < chunks.length; index += 1) {
       const chunk = chunks[index]
       if (!chunk?.buffer) break
 
@@ -108,7 +167,7 @@ export class ClockedAudioSink {
       source.playbackRate.value = rate
       source.connect(ctx.destination)
 
-      const seekSeconds = index === startIndex
+      const seekSeconds = index === scheduledStart
         ? tapOffsetSeekSeconds(chunk.start, tapOffset, chunk.cues)
         : 0
       const startAt = audioBufferSourceStartTime(ctx.currentTime, scheduledEnd)
@@ -122,25 +181,26 @@ export class ClockedAudioSink {
 
       scheduledEnd = endAt
       const scheduledChunk = { index, chunk, source, startAt, endAt, seekSeconds }
-      scheduled.push(scheduledChunk)
+      source.onended = () => this.handleSourceEnded(scheduledChunk, token)
+      this.scheduled.push(scheduledChunk)
       this.sources.push(source)
+      scheduledCount += 1
     }
 
-    if (scheduled.length === 0) return 0
+    return scheduledCount
+  }
 
-    this.scheduled = scheduled
-    const lastIndex = scheduled[scheduled.length - 1].index
-    for (const item of scheduled) {
-      item.source.onended = () => {
-        this.sources = this.sources.filter((source) => source !== item.source)
-        if (signal.aborted || token !== this.runToken || item.index !== lastIndex) return
-        this.stopProgress()
-        onRunDrained(lastIndex + 1)
-      }
-    }
+  private handleSourceEnded(item: ScheduledNativeChunk, token: number) {
+    const run = this.activeRun
+    this.sources = this.sources.filter((source) => source !== item.source)
+    if (!run || run.signal.aborted || token !== this.runToken) return
 
-    this.startProgress({ signal, onChunkStart, onProgress })
-    return scheduled.length
+    const lastScheduled = this.scheduled[this.scheduled.length - 1]
+    if (!lastScheduled || item.index !== lastScheduled.index) return
+
+    this.stopProgress()
+    this.activeRun = null
+    run.onRunDrained(lastScheduled.index + 1)
   }
 
   private startProgress({

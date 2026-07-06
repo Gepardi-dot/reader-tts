@@ -507,6 +507,9 @@ export function useTtsSessionController({
     const unsubscribe = queue.subscribe(() => {
       if (sessionId !== sessionIdRef.current) return
       const nextIndex = currentIndexRef.current
+      if (laneRef.current === 'native') {
+        nativeSinkRef.current.extendReadyRun(queue.allChunks)
+      }
       emitSnapshot()
       if (
         laneRef.current === 'fallback' &&
