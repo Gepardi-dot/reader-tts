@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react'
 import {
   isModelReady,
   startWarmup,
-  waitForModelReady,
 } from '@/shared/storage/modelCache'
 import {
   elapsedMs,
@@ -15,24 +14,16 @@ import {
   PREFETCH_AHEAD_TARGET,
   audioSelectionKey,
   nativePrefetchStartIndexForFallback,
-  pacingFor,
 } from '../audioPlayback'
-import {
-  audioErrorMessage,
-  liveAudioCooldownRemainingMs,
-  loadLiveAudioBlob,
-  requestLiveAudio,
-  type LiveAudioPayload,
-} from './liveAudio'
+import { audioErrorMessage } from './liveAudio'
 import { BrowserSpeechLane } from './browserSpeechLane'
 import { ClockedAudioSink } from './clockedAudioSink'
+import { createNativeAudioSource } from './nativeAudioSource'
 import { TtsNativeQueue } from './nativeQueue'
 import { buildTtsChunks } from './segmenter'
 import { TtsSessionState } from './sessionState'
 import { FirstAudioGate } from './sessionTelemetry'
-import { synthesizeKokoroLocal } from './kokoroAudio'
 import type {
-  NativeAudioResult,
   TtsAudioChunk,
   TtsGridChunk,
   TtsPhase,
@@ -89,10 +80,6 @@ const EMPTY_SNAPSHOT: TtsSnapshot = {
   nativeReadyChunks: 0,
   bufferedSeconds: 0,
   error: null,
-}
-
-async function decodeBlob(ctx: AudioContext, blob: Blob) {
-  return ctx.decodeAudioData(await blob.arrayBuffer())
 }
 
 export function useTtsSessionController({
@@ -214,125 +201,14 @@ export function useTtsSessionController({
     })
   }, [bookId])
 
-  const fetchNativeChunk = useCallback(async (
-    chunk: TtsAudioChunk,
-    signal: AbortSignal,
-    background: boolean,
-  ): Promise<NativeAudioResult | null> => {
-    const selectedProvider = providerRef.current
-    const selectedVoice = voiceRef.current
-    const requestSelectionKey = selectionKeyRef.current
-
-    const selectionChanged = () => selectionKeyRef.current !== requestSelectionKey
-
-    if (selectedProvider === 'kokoro') {
-      if (!selectedVoice) return null
-      if (!isModelReady()) {
-        const ready = await waitForModelReady(signal)
-        if (!ready || signal.aborted || selectionChanged()) return null
-      }
-      const { lengthScale } = pacingFor('kokoro')
-      const speed = lengthScale > 0 ? 1 / lengthScale : 1
-      const synthesized = await synthesizeKokoroLocal(chunk.text, selectedVoice, speed, signal)
-      if (signal.aborted || selectionChanged()) return null
-      if (!synthesized) throw new Error('Kokoro synthesis timed out or returned no audio.')
-
-      const ctx = nativeSinkRef.current.ensureContext()
-      const buffer = await decodeBlob(ctx, synthesized.blob)
-      if (signal.aborted || selectionChanged()) return null
-      return {
-        url: null,
-        buffer,
-        cues: [],
-        durationSec: synthesized.duration ?? buffer.duration,
-        cacheHit: synthesized.cacheHit,
-        cacheStorage: synthesized.cacheHit ? 'indexeddb' : 'generated',
-      }
-    }
-
-    if (!bookId || selectedProvider === BROWSER_TTS_PROVIDER_ID) return null
-
-    const cooldownMs = liveAudioCooldownRemainingMs(selectedProvider)
-    if (cooldownMs > 0) {
-      queuePerformanceTelemetry({
-        eventName: 'tts.live_audio_backoff_v2',
-        bookId,
-        provider: selectedProvider,
-        value: Math.ceil(cooldownMs / 1000),
-        metadata: {
-          chunkIndex: chunk.index,
-          chunkChars: chunk.text.length,
-          background,
-        },
-      })
-      return null
-    }
-
-    const { lengthScale, sentenceSilence } = pacingFor(selectedProvider)
-    const payload: LiveAudioPayload = {
-      provider: selectedProvider,
-      voice: selectedVoice,
-      model: null,
-      output_format: 'mp3',
-      narration_style: '',
-      length_scale: lengthScale,
-      sentence_silence: sentenceSilence,
-      pageNumber: 1,
-      start: chunk.start,
-      end: chunk.end,
-      text: chunk.text,
-    }
-    const fetchStartedAt = performanceNow()
-    let liveAudio
-    try {
-      liveAudio = await requestLiveAudio(bookId, payload)
-    } catch (error) {
-      queuePerformanceTelemetry({
-        eventName: 'tts.live_audio_error_v2',
-        bookId,
-        provider: selectedProvider,
-        durationMs: elapsedMs(fetchStartedAt),
-        metadata: {
-          chunkIndex: chunk.index,
-          chunkChars: chunk.text.length,
-          background,
-          rateLimited: liveAudioCooldownRemainingMs(selectedProvider) > 0,
-        },
-      })
-      throw error
-    }
-    if (signal.aborted || selectionChanged()) return null
-
-    queuePerformanceTelemetry({
-      eventName: 'tts.live_audio_fetch_v2',
-      bookId,
-      provider: selectedProvider,
-      durationMs: elapsedMs(fetchStartedAt),
-      cacheHit: liveAudio.cacheHit,
-      cacheStorage: liveAudio.cacheStorage,
-      metadata: {
-        chunkIndex: chunk.index,
-        chunkChars: chunk.text.length,
-        background,
-      },
-    })
-
-    const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
-    if (signal.aborted || selectionChanged()) return null
-    const ctx = nativeSinkRef.current.ensureContext()
-    const buffer = await decodeBlob(ctx, blob)
-    if (signal.aborted || selectionChanged()) return null
-    const url = URL.createObjectURL(blob)
-    objectUrlsRef.current.add(url)
-    return {
-      url,
-      buffer,
-      cues,
-      durationSec: liveAudio.duration ?? buffer.duration,
-      cacheHit: liveAudio.cacheHit,
-      cacheStorage: liveAudio.cacheStorage,
-    }
-  }, [bookId])
+  const fetchNativeChunk = useMemo(() => createNativeAudioSource({
+    bookId,
+    getProvider: () => providerRef.current,
+    getVoice: () => voiceRef.current,
+    getSelectionKey: () => selectionKeyRef.current,
+    ensureAudioContext: () => nativeSinkRef.current.ensureContext(),
+    trackObjectUrl: (url) => objectUrlsRef.current.add(url),
+  }), [bookId])
 
   const startNativeAt = useCallback((
     index: number,
