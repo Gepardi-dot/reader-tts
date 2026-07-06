@@ -2362,7 +2362,14 @@ export function ReaderRoute() {
     : null
   const useProviderFallback = Boolean(providersData?.providers && fallbackProviderInfo && (!activeProviderInfo || !activeProviderInfo.available))
   const effectiveTtsProvider = useProviderFallback && fallbackProviderInfo ? fallbackProviderInfo.id : ttsProvider
-  const effectiveTtsVoice = useProviderFallback && fallbackProviderInfo ? defaultVoiceForProvider(fallbackProviderInfo) : ttsVoice
+  const activeVoiceIsValid = Boolean(
+    ttsVoice &&
+    (!providersData?.providers || activeProviderInfo?.voices.some(v => v.id === ttsVoice)),
+  )
+  const selectedTtsVoice = ttsProvider === BROWSER_TTS_PROVIDER_ID
+    ? null
+    : (activeVoiceIsValid ? ttsVoice : defaultVoiceForProvider(activeProviderInfo))
+  const effectiveTtsVoice = useProviderFallback && fallbackProviderInfo ? defaultVoiceForProvider(fallbackProviderInfo) : selectedTtsVoice
   const effectiveProviderInfo = providerCatalog.find(p => p.id === effectiveTtsProvider)
   const playBarVoiceLabel = effectiveProviderInfo
     ?.voices.find(v => v.id === effectiveTtsVoice)
@@ -2466,10 +2473,12 @@ export function ReaderRoute() {
   // synth-and-persisting every chunk to IndexedDB. Voice-agnostic from the
   // worker's perspective; pacingFor gives Kokoro a slight stretch so prosody
   // doesn't sound rushed.
-  const commitVoiceForBook = useCallback(() => {
+  const commitVoiceForBook = useCallback((selection?: { provider: string; voice: string | null }) => {
+    const providerToCache = selection?.provider ?? effectiveTtsProvider
+    const voiceToCache = selection ? selection.voice : effectiveTtsVoice
     if (!bookId || !payload?.text) return false
-    if (effectiveTtsProvider !== 'kokoro') return false
-    if (!effectiveTtsVoice) return false
+    if (providerToCache !== 'kokoro') return false
+    if (!voiceToCache) return false
     if (!isModelReady()) return false
     const grid = presynthGridRef.current
     if (!grid || !grid.length) return false
@@ -2484,7 +2493,7 @@ export function ReaderRoute() {
     }
     return startRollingCache({
       bookId,
-      voice: effectiveTtsVoice,
+      voice: voiceToCache,
       speed,
       text: payload.text,
       grid,

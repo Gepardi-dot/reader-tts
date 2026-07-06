@@ -50,7 +50,7 @@ export interface AudioPreviewPanelProps {
   onError?: (message: string) => void
   rate?: number
   onRateChange?: (rate: number) => void
-  onCommitVoice?: () => boolean
+  onCommitVoice?: (selection: { provider: string; voice: string | null }) => boolean
   rollingCacheState?: RollingCacheState
   currentBookId?: string | null
 }
@@ -146,6 +146,7 @@ export function AudioPreviewPanel({
     setErrorMsg(null)
     onProviderChange(draftProvider)
     onVoiceChange(appliedVoice)
+    onCommitVoice?.({ provider: draftProvider, voice: appliedVoice })
     queuePerformanceTelemetry({
       eventName: 'tts.voice_apply',
       provider: draftProvider,
@@ -543,7 +544,7 @@ export function AudioPreviewPanel({
               <div className="mt-2">
                 <button
                   type="button"
-                  onClick={() => { onCommitVoice() }}
+                  onClick={() => { onCommitVoice({ provider, voice }) }}
                   disabled={isActive}
                   className="w-full h-9 rounded-md text-[12px] font-medium transition-all active:scale-[0.99] disabled:cursor-not-allowed"
                   style={{

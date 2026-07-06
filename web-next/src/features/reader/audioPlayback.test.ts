@@ -85,7 +85,7 @@ describe('audio playback chunking', () => {
     expect(chunks.map((chunk) => chunk.text).join('')).toBe(text.slice(tapOffset))
   })
 
-  it('keeps Gemini startup chunks short for faster cloud synthesis and browser masking', () => {
+  it('keeps Gemini startup chunks short for faster cloud synthesis', () => {
     const text = [
       `${'quick '.repeat(32)}first boundary. `,
       `${'steady '.repeat(80)}second boundary. `,
@@ -127,7 +127,7 @@ describe('audio playback startup plan', () => {
     expect(shouldPrimeNativeAudio(startupPlan)).toBe(false)
   })
 
-  it('masks Gemini cloud startup with browser speech while fetching native audio', () => {
+  it('starts Gemini as native audio so the selected voice is honored', () => {
     const startupPlan = buildPlaybackStartupPlan({
       provider: 'google',
       chunkCount: 4,
@@ -138,27 +138,27 @@ describe('audio playback startup plan', () => {
     expect(startupPlan).toEqual({
       startReadyChunkCount: 1,
       bootstrapCount: 2,
-      useBrowserSpeech: true,
-      fetchNativeInBackground: true,
+      useBrowserSpeech: false,
+      fetchNativeInBackground: false,
     })
     expect(shouldPrimeNativeAudio(startupPlan)).toBe(true)
     expect(PREFETCH_AHEAD_TARGET.google).toBe(1)
   })
 
-  it('bridges late Gemini native chunks with browser speech instead of silence', () => {
-    expect(shouldBridgeNativeAudioGap('google', true)).toBe(true)
+  it('does not bridge native providers with browser speech', () => {
+    expect(shouldBridgeNativeAudioGap('google', true)).toBe(false)
     expect(shouldBridgeNativeAudioGap('google', false)).toBe(false)
     expect(shouldBridgeNativeAudioGap('kokoro', true)).toBe(false)
     expect(shouldBridgeNativeAudioGap(BROWSER_TTS_PROVIDER_ID, true)).toBe(false)
   })
 
-  it('prefetches native audio after the chunk already covered by browser fallback', () => {
-    expect(nativePrefetchStartIndexForFallback('kokoro', 0)).toBe(1)
-    expect(nativePrefetchStartIndexForFallback('google', 2)).toBe(3)
+  it('does not skip native chunks when browser fallback is used', () => {
+    expect(nativePrefetchStartIndexForFallback('kokoro', 0)).toBe(0)
+    expect(nativePrefetchStartIndexForFallback('google', 2)).toBe(2)
     expect(nativePrefetchStartIndexForFallback(BROWSER_TTS_PROVIDER_ID, 2)).toBe(2)
   })
 
-  it('falls back to native startup when browser speech is unavailable for Gemini', () => {
+  it('uses native startup for Gemini regardless of browser speech support', () => {
     expect(buildPlaybackStartupPlan({
       provider: 'google',
       chunkCount: 1,
@@ -172,7 +172,7 @@ describe('audio playback startup plan', () => {
     })
   })
 
-  it('uses browser speech for cold Kokoro without pretending native audio is ready', () => {
+  it('waits for native Kokoro startup when the model is cold', () => {
     expect(buildPlaybackStartupPlan({
       provider: 'kokoro',
       chunkCount: 3,
@@ -180,7 +180,7 @@ describe('audio playback startup plan', () => {
       kokoroModelReady: false,
     })).toMatchObject({
       bootstrapCount: 2,
-      useBrowserSpeech: true,
+      useBrowserSpeech: false,
       fetchNativeInBackground: false,
     })
   })

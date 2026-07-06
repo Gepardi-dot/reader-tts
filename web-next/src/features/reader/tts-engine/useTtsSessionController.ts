@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 
 import {
   isModelReady,
   startWarmup,
+  subscribeModelStatus,
 } from '@/shared/storage/modelCache'
 import {
   elapsedMs,
@@ -75,6 +76,31 @@ type SpeakFallbackAt = (
   sessionId: number,
   reason?: 'voice-switch',
 ) => boolean
+
+function waitForKokoroModelReady(signal: AbortSignal): Promise<boolean> {
+  if (isModelReady()) return Promise.resolve(true)
+  if (signal.aborted) return Promise.resolve(false)
+
+  return new Promise((resolve) => {
+    let done = false
+    let unsubscribe: (() => void) | null = null
+    const finish = (ready: boolean) => {
+      if (done) return
+      done = true
+      unsubscribe?.()
+      signal.removeEventListener('abort', onAbort)
+      resolve(ready)
+    }
+    const onAbort = () => finish(false)
+
+    signal.addEventListener('abort', onAbort, { once: true })
+    unsubscribe = subscribeModelStatus((state) => {
+      if (state.status === 'ready') finish(true)
+      if (state.status === 'error') finish(false)
+    })
+    startWarmup()
+  })
+}
 
 const EMPTY_SNAPSHOT: TtsSnapshot = {
   phase: 'idle',
@@ -231,15 +257,19 @@ export function useTtsSessionController({
   ): Promise<NativeAudioResult | null> => {
     const selectedProvider = providerRef.current
     const selectedVoice = voiceRef.current
-    const ctx = nativeSinkRef.current.ensureContext()
 
     if (selectedProvider === 'kokoro') {
-      if (!selectedVoice || !isModelReady()) return null
+      if (!selectedVoice) return null
+      if (!isModelReady()) {
+        const ready = await waitForKokoroModelReady(signal)
+        if (!ready || signal.aborted) return null
+      }
       const { lengthScale } = pacingFor('kokoro')
       const speed = lengthScale > 0 ? 1 / lengthScale : 1
       const synthesized = await synthesizeKokoroLocal(chunk.text, selectedVoice, speed, signal)
       if (!synthesized || signal.aborted) return null
 
+      const ctx = nativeSinkRef.current.ensureContext()
       const buffer = await decodeBlob(ctx, synthesized.blob)
       return {
         url: null,
@@ -320,6 +350,7 @@ export function useTtsSessionController({
 
     const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
     if (signal.aborted) return null
+    const ctx = nativeSinkRef.current.ensureContext()
     const buffer = await decodeBlob(ctx, blob)
     const url = URL.createObjectURL(blob)
     objectUrlsRef.current.add(url)
@@ -381,19 +412,6 @@ export function useTtsSessionController({
         }
 
         queue.prefetchFrom(nextIndex, PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD, ctrl.signal)
-        if (fallbackLaneRef.current.canSpeak()) {
-          queuePerformanceTelemetry({
-            eventName: 'tts.native_underrun_bridge_v2',
-            bookId,
-            provider: providerRef.current,
-            metadata: {
-              chunkIndex: nextIndex,
-              chunkStatus: nextChunk?.status ?? 'missing',
-            },
-          })
-          void speakFallbackAtRef.current(nextIndex, ctrl, startedAt, sessionId, reason)
-          return
-        }
         phaseRef.current = 'buffering'
         emitSnapshot()
         void queue.ensure(nextIndex, ctrl.signal, false).then((result) => {
@@ -403,7 +421,7 @@ export function useTtsSessionController({
       },
     })
     return scheduledCount > 0
-  }, [bookId, emitSnapshot, markFirstAudio, markNativeHandoff, stopWordAudio])
+  }, [emitSnapshot, markFirstAudio, markNativeHandoff, stopWordAudio])
 
   const speakFallbackAt = useCallback((
     index: number,
@@ -528,20 +546,13 @@ export function useTtsSessionController({
         startOffset,
         selectedChars: word.length,
         chunkCount: chunks.length,
-        browserFallback: fallbackLaneRef.current.canSpeak(),
+        browserFallback: providerRef.current === BROWSER_TTS_PROVIDER_ID && fallbackLaneRef.current.canSpeak(),
         kokoroModelReady: isModelReady(),
       },
     })
     emitSnapshot()
 
-    if (fallbackLaneRef.current.canSpeak()) {
-      if (providerRef.current !== BROWSER_TTS_PROVIDER_ID) {
-        queue.prefetchFrom(
-          nativePrefetchStartIndexForFallback(providerRef.current, 0),
-          PREFETCH_AHEAD_TARGET[providerRef.current] ?? DEFAULT_PREFETCH_AHEAD,
-          ctrl.signal,
-        )
-      }
+    if (providerRef.current === BROWSER_TTS_PROVIDER_ID && fallbackLaneRef.current.canSpeak()) {
       const started = speakFallbackAt(0, ctrl, startedAt, sessionId, reason)
       if (started) return
     }

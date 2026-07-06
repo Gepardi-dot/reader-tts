@@ -56,6 +56,10 @@ function withBrowserProvider(providers?: ProviderInfo[]) {
     : [BROWSER_PROVIDER, ...catalog]
 }
 
+function defaultVoiceForProvider(provider: ProviderInfo | undefined) {
+  return provider?.defaultVoice ?? provider?.voices[0]?.id ?? null
+}
+
 function loadAudioPrefs() {
   const defaults = { provider: BROWSER_PROVIDER_ID, voice: null as string | null, version: AUDIO_PREFS_VERSION }
   try {
@@ -99,7 +103,10 @@ export function AudioSettingsRoute() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const prefs = { provider: selectedProvider, voice: selectedVoice, version: AUDIO_PREFS_VERSION }
+      const voiceToSave = selectedProvider === BROWSER_PROVIDER_ID
+        ? null
+        : (selectedVoice ?? defaultVoiceForProvider(currentProvider))
+      const prefs = { provider: selectedProvider, voice: voiceToSave, version: AUDIO_PREFS_VERSION }
       localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify(prefs))
       try { await api.patch('/api/settings/audio', { speed: parseFloat(speed) }) } catch { /* optional */ }
     },
@@ -136,8 +143,9 @@ export function AudioSettingsRoute() {
             <Label>TTS Provider</Label>
             <Select value={selectedProvider} onValueChange={(v) => {
               if (v == null) return
+              const nextProvider = providers.find(p => p.id === v)
               setSelectedProvider(v)
-              setSelectedVoice(null)
+              setSelectedVoice(v === BROWSER_PROVIDER_ID ? null : defaultVoiceForProvider(nextProvider))
             }}>
               <SelectTrigger>
                 <SelectValue />
@@ -166,7 +174,7 @@ export function AudioSettingsRoute() {
             <div className="space-y-2">
               <Label>Voice</Label>
               <Select
-                value={selectedVoice ?? (currentProvider?.defaultVoice ?? availableVoices[0]?.id ?? '')}
+                value={selectedVoice ?? (defaultVoiceForProvider(currentProvider) ?? '')}
                 onValueChange={(v) => v != null && setSelectedVoice(v)}
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>

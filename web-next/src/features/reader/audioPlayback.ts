@@ -28,7 +28,7 @@ export const AUDIO_CONTEXT_START_LEAD_SEC = 0.002
 
 // How many chunks to bootstrap when playback begins. Cloud chunks are fetched
 // sequentially by the native queue so Gemini quota is not burned in bursts.
-// The first chunk is awaited only when no instant browser mask is active.
+// Native providers stay native-first so the selected voice is always honored.
 export const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
   google: 2,
   kokoro: 2,
@@ -261,12 +261,10 @@ export function buildPlaybackStartupPlan({
   browserSpeechSupported: boolean
   kokoroModelReady: boolean
 }): PlaybackStartupPlan {
+  void browserSpeechSupported
+  void kokoroModelReady
   const boundedChunkCount = Math.max(0, Math.floor(chunkCount))
-  const cloudBrowserMask = provider === CLOUD_TTS_PROVIDER_ID && browserSpeechSupported
-  const useBrowserSpeech =
-    provider === BROWSER_TTS_PROVIDER_ID ||
-    (provider === 'kokoro' && !kokoroModelReady) ||
-    cloudBrowserMask
+  const useBrowserSpeech = provider === BROWSER_TTS_PROVIDER_ID
 
   const startReadyChunkCount = Math.min(
     boundedChunkCount,
@@ -281,7 +279,7 @@ export function buildPlaybackStartupPlan({
     startReadyChunkCount,
     bootstrapCount,
     useBrowserSpeech,
-    fetchNativeInBackground: cloudBrowserMask,
+    fetchNativeInBackground: false,
   }
 }
 
@@ -290,10 +288,13 @@ export function shouldPrimeNativeAudio(startupPlan: PlaybackStartupPlan): boolea
 }
 
 export function shouldBridgeNativeAudioGap(provider: string, browserSpeechSupported: boolean): boolean {
-  return provider === CLOUD_TTS_PROVIDER_ID && browserSpeechSupported
+  void provider
+  void browserSpeechSupported
+  return false
 }
 
 export function nativePrefetchStartIndexForFallback(provider: string, currentIndex: number) {
   const safeIndex = Math.max(0, Math.floor(currentIndex))
-  return provider === BROWSER_TTS_PROVIDER_ID ? safeIndex : safeIndex + 1
+  void provider
+  return safeIndex
 }
