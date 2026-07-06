@@ -5,6 +5,7 @@ import {
   FIRST_AUDIO_CHARS,
   PREFETCH_AHEAD_TARGET,
   audioPreferenceDraftChanged,
+  audioSelectionKey,
   audioBufferScheduledEndTime,
   audioBufferSourceStartTime,
   audioSliceStart,
@@ -213,6 +214,8 @@ describe('audio preference drafts', () => {
   it('does not commit browser voices because browser voice selection is local', () => {
     expect(committedVoiceForDraft(BROWSER_TTS_PROVIDER_ID, 'Samantha')).toBeNull()
     expect(committedVoiceForDraft('kokoro', 'af_heart')).toBe('af_heart')
+    expect(audioSelectionKey('kokoro', 'am_adam')).toBe('kokoro:am_adam')
+    expect(audioSelectionKey(BROWSER_TTS_PROVIDER_ID, null)).toBe('browser:')
   })
 
   it('detects provider and voice draft changes', () => {

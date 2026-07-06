@@ -91,8 +91,9 @@ export class TtsNativeQueue {
         })
         return result
       })
-      .catch(() => {
+      .catch((error) => {
         if (!signal.aborted) this.patch(index, { status: background ? 'idle' : 'error' })
+        if (!background) throw error
         return null
       })
       .finally(() => {

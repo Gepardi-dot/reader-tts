@@ -188,6 +188,12 @@ export function audioErrorMessage(error: unknown) {
   if (/preparing|model is not ready|voice model/i.test(message)) {
     return 'The on-device voice is still preparing. Try again in a moment.'
   }
+  if (/kokoro|on-device|synthesis failed|synthesis timed out|could not generate/i.test(message)) {
+    return 'The on-device voice could not generate audio. Try another Kokoro voice or retry after preparation finishes.'
+  }
+  if (/Audio provider did not return playable audio/i.test(message)) {
+    return 'The selected voice did not return playable audio. Try another voice or start playback again.'
+  }
   if (/text does not match|range/i.test(message)) {
     return 'Could not match this passage to the book text. Move slightly and try again.'
   }

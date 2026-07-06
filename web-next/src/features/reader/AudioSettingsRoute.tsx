@@ -7,6 +7,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/shared/api/client'
+import { BROWSER_TTS_PROVIDER_ID } from './audioPlayback'
+import {
+  audioPrefsWithSelection,
+  loadAudioPrefs,
+  resolvedVoiceForProvider,
+  saveAudioPrefs,
+} from './audioPreferences'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -36,11 +43,8 @@ interface ProvidersResponse {
   defaultNarrationStyle: string
 }
 
-const BROWSER_PROVIDER_ID = 'browser'
-const AUDIO_PREFS_KEY = 'reader-audio-prefs'
-const AUDIO_PREFS_VERSION = 2
 const BROWSER_PROVIDER: ProviderInfo = {
-  id: BROWSER_PROVIDER_ID,
+  id: BROWSER_TTS_PROVIDER_ID,
   name: 'Browser speech',
   available: true,
   recommended: true,
@@ -51,28 +55,13 @@ const BROWSER_PROVIDER: ProviderInfo = {
 
 function withBrowserProvider(providers?: ProviderInfo[]) {
   const catalog = providers ?? []
-  return catalog.some((provider) => provider.id === BROWSER_PROVIDER_ID)
+  return catalog.some((provider) => provider.id === BROWSER_TTS_PROVIDER_ID)
     ? catalog
     : [BROWSER_PROVIDER, ...catalog]
 }
 
 function defaultVoiceForProvider(provider: ProviderInfo | undefined) {
   return provider?.defaultVoice ?? provider?.voices[0]?.id ?? null
-}
-
-function loadAudioPrefs() {
-  const defaults = { provider: BROWSER_PROVIDER_ID, voice: null as string | null, version: AUDIO_PREFS_VERSION }
-  try {
-    const raw = localStorage.getItem(AUDIO_PREFS_KEY)
-    if (!raw) return defaults
-    const parsed = JSON.parse(raw) as Partial<typeof defaults>
-    if (parsed.version !== AUDIO_PREFS_VERSION && parsed.provider !== BROWSER_PROVIDER_ID) {
-      return defaults
-    }
-    return { ...defaults, ...parsed }
-  } catch {
-    return defaults
-  }
 }
 
 // ── Main settings page ────────────────────────────────────────────────────────
@@ -103,11 +92,13 @@ export function AudioSettingsRoute() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const voiceToSave = selectedProvider === BROWSER_PROVIDER_ID
+      const voiceToSave = selectedProvider === BROWSER_TTS_PROVIDER_ID
         ? null
         : (selectedVoice ?? defaultVoiceForProvider(currentProvider))
-      const prefs = { provider: selectedProvider, voice: voiceToSave, version: AUDIO_PREFS_VERSION }
-      localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify(prefs))
+      saveAudioPrefs(audioPrefsWithSelection(loadAudioPrefs(), {
+        provider: selectedProvider,
+        voice: voiceToSave,
+      }))
       try { await api.patch('/api/settings/audio', { speed: parseFloat(speed) }) } catch { /* optional */ }
     },
     onSuccess: () => {
@@ -145,7 +136,7 @@ export function AudioSettingsRoute() {
               if (v == null) return
               const nextProvider = providers.find(p => p.id === v)
               setSelectedProvider(v)
-              setSelectedVoice(v === BROWSER_PROVIDER_ID ? null : defaultVoiceForProvider(nextProvider))
+              setSelectedVoice(resolvedVoiceForProvider(v, nextProvider, loadAudioPrefs()))
             }}>
               <SelectTrigger>
                 <SelectValue />
