@@ -59,6 +59,10 @@ export function committedVoiceForDraft(provider: string, draftVoice: string | nu
   return provider === BROWSER_TTS_PROVIDER_ID ? null : (draftVoice ?? null)
 }
 
+export function audioSelectionKey(provider: string, voice: string | null | undefined): string {
+  return `${provider}:${voice ?? ''}`
+}
+
 export function audioPreferenceDraftChanged({
   committedProvider,
   committedVoice,

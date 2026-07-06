@@ -47,11 +47,17 @@ import {
 } from './browserSpeech'
 import { AudioPreviewPanel } from './AudioPreviewPanel'
 import {
-  defaultVoiceForProvider,
   pickFallbackProvider,
   withBrowserProvider,
   type ProvidersResponse,
 } from './audioProviderCatalog'
+import {
+  audioPrefsWithSelection,
+  loadAudioPrefs,
+  resolvedVoiceForProvider,
+  saveAudioPrefs,
+  type AudioSelection,
+} from './audioPreferences'
 import { synthesizeKokoroLocal } from './tts-engine/kokoroAudio'
 import {
   type AudioPhase,
@@ -153,23 +159,6 @@ const HIGHLIGHT_COLORS = [
 
 const APPEARANCE_KEY  = 'reader-appearance'
 const PROGRESS_KEY    = 'storybook-reader-progress'
-const AUDIO_PREFS_KEY = 'reader-audio-prefs'
-const AUDIO_PREFS_VERSION = 2
-
-interface AudioPrefs { provider: string; voice: string | null; version: number }
-
-function loadAudioPrefs(): AudioPrefs {
-  const defaults = { provider: BROWSER_TTS_PROVIDER_ID, voice: null, version: AUDIO_PREFS_VERSION }
-  try {
-    const raw = localStorage.getItem(AUDIO_PREFS_KEY)
-    if (!raw) return defaults
-    const parsed = JSON.parse(raw) as Partial<AudioPrefs>
-    if (parsed.version !== AUDIO_PREFS_VERSION && parsed.provider !== BROWSER_TTS_PROVIDER_ID) {
-      return defaults
-    }
-    return { ...defaults, ...parsed }
-  } catch { return defaults }
-}
 
 function aiErrorMessage(error: unknown, fallback = 'Something went wrong.') {
   const raw = error instanceof Error ? error.message : String(error)
@@ -2312,9 +2301,9 @@ export function ReaderRoute() {
   const [toast,         setToast]         = useState<string | null>(null)
   const [audioFollowRects, setAudioFollowRects] = useState<SelectionRect[]>([])
   const [rollingCacheState, setRollingCacheState] = useState<RollingCacheState>(() => getRollingCacheState())
-  const [ttsProvider,   setTtsProvider]   = useState(() => loadAudioPrefs().provider)
-  const [ttsVoice,      setTtsVoice]      = useState<string | null>(() => loadAudioPrefs().voice)
+  const [audioPrefs, setAudioPrefs] = useState(loadAudioPrefs)
   const [audioRate,     setAudioRate]     = useState(1.0)
+  const ttsProvider = audioPrefs.provider
 
   const lastScrollY           = useRef(0)
   const latestScrollPct       = useRef(0)
@@ -2335,6 +2324,9 @@ export function ReaderRoute() {
   const showToast = useCallback((msg: string) => {
     setToast(msg)
     setTimeout(() => setToast(t => (t === msg ? null : t)), 2200)
+  }, [])
+  const applyAudioSelection = useCallback((selection: AudioSelection) => {
+    setAudioPrefs((current) => audioPrefsWithSelection(current, selection))
   }, [])
 
   // Fetch
@@ -2363,14 +2355,10 @@ export function ReaderRoute() {
     : null
   const useProviderFallback = Boolean(providersData?.providers && fallbackProviderInfo && (!activeProviderInfo || !activeProviderInfo.available))
   const effectiveTtsProvider = useProviderFallback && fallbackProviderInfo ? fallbackProviderInfo.id : ttsProvider
-  const activeVoiceIsValid = Boolean(
-    ttsVoice &&
-    (!providersData?.providers || activeProviderInfo?.voices.some(v => v.id === ttsVoice)),
-  )
-  const selectedTtsVoice = ttsProvider === BROWSER_TTS_PROVIDER_ID
-    ? null
-    : (activeVoiceIsValid ? ttsVoice : defaultVoiceForProvider(activeProviderInfo))
-  const effectiveTtsVoice = useProviderFallback && fallbackProviderInfo ? defaultVoiceForProvider(fallbackProviderInfo) : selectedTtsVoice
+  const selectedTtsVoice = resolvedVoiceForProvider(ttsProvider, activeProviderInfo, audioPrefs)
+  const effectiveTtsVoice = useProviderFallback && fallbackProviderInfo
+    ? resolvedVoiceForProvider(fallbackProviderInfo.id, fallbackProviderInfo, audioPrefs)
+    : selectedTtsVoice
   const effectiveProviderInfo = providerCatalog.find(p => p.id === effectiveTtsProvider)
   const playBarVoiceLabel = effectiveProviderInfo
     ?.voices.find(v => v.id === effectiveTtsVoice)
@@ -2448,14 +2436,11 @@ export function ReaderRoute() {
     localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance))
   }, [appearance])
 
-  // Persist audio prefs
+  // Persist only the user's explicit selection. Fallbacks are runtime-only so a
+  // temporary unavailable provider cannot overwrite the chosen voice.
   useEffect(() => {
-    localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify({
-      provider: effectiveTtsProvider,
-      voice: effectiveTtsVoice,
-      version: AUDIO_PREFS_VERSION,
-    }))
-  }, [effectiveTtsProvider, effectiveTtsVoice])
+    saveAudioPrefs(audioPrefs)
+  }, [audioPrefs])
 
   // Rolling cache: subscribe to its progress for inline UI in the audio panel.
   useEffect(() => {
@@ -3354,9 +3339,8 @@ export function ReaderRoute() {
                       key={`${effectiveTtsProvider}:${effectiveTtsVoice ?? ''}`}
                       colors={colors}
                       provider={effectiveTtsProvider}
-                      onProviderChange={setTtsProvider}
                       voice={effectiveTtsVoice}
-                      onVoiceChange={setTtsVoice}
+                      onSelectionChange={applyAudioSelection}
                       onError={showToast}
                       rate={audioRate}
                       onRateChange={setAudioRate}

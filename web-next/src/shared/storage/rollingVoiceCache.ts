@@ -33,12 +33,17 @@ export interface RollingCacheState {
   completed: number
   total: number
   active: boolean
+  current: number | null
+  error: string | null
 }
 
 const listeners = new Set<(state: RollingCacheState) => void>()
 let state: RollingCacheState = {
-  bookId: null, voice: null, completed: 0, total: 0, active: false,
+  bookId: null, voice: null, completed: 0, total: 0, active: false, current: null, error: null,
 }
+
+const ROLLING_SYNTH_TIMEOUT_MS = 45_000
+const ROLLING_CHUNK_TIMEOUT_MS = 45_000
 
 function setState(next: Partial<RollingCacheState>) {
   state = { ...state, ...next }
@@ -103,7 +108,7 @@ export function cancelRollingCache(): void {
   const cancel = currentSynthCancel
   currentSynthCancel = null
   try { cancel?.() } catch { /* best effort */ }
-  setState({ active: false })
+  setState({ active: false, current: null, error: null })
 }
 
 export function startRollingCache(opts: RollingCacheStart): boolean {
@@ -121,6 +126,8 @@ export function startRollingCache(opts: RollingCacheStart): boolean {
     completed: 0,
     total: opts.grid.length,
     active: true,
+    current: null,
+    error: null,
   })
   void runLoop(opts, ctrl.signal)
   return true
@@ -136,33 +143,24 @@ async function runLoop(opts: RollingCacheStart, signal: AbortSignal): Promise<vo
 
     await awaitPlaybackIdle(signal)
     if (signal.aborted) return
+    setState({ current: idx, error: null })
 
     const chunk = grid[idx]
-    if (!chunk || chunk.end <= chunk.start) {
-      completed += 1
-      setState({ completed })
-      continue
-    }
-
-    const chunkText = text.slice(chunk.start, chunk.end)
-    if (!chunkText.trim()) {
-      completed += 1
-      setState({ completed })
-      continue
-    }
-
-    let cacheKey: string
-    try {
-      cacheKey = await localKokoroCacheKey(voice, speed, chunkText)
-    } catch {
-      continue
-    }
+    const result = await withChunkTimeout(
+      prepareChunk({ chunk, text, voice, speed, signal }),
+      signal,
+    )
     if (signal.aborted) return
-
-    const hit = await getCachedAudio(cacheKey, LOCAL_KOKORO_CACHE_VERSION).catch(() => null)
-    if (!hit) {
-      await synthAndPersist(chunkText, voice, speed, cacheKey, signal)
-      if (signal.aborted) return
+    if (result === 'cancelled') {
+      idx -= 1
+      continue
+    }
+    if (result !== 'done') {
+      const message = result === 'timeout'
+        ? 'Voice preparation timed out. Try again after Kokoro finishes warming, or use normal playback.'
+        : 'Voice preparation failed. Try a different voice or retry after Kokoro finishes warming.'
+      setState({ active: false, current: null, error: message })
+      return
     }
 
     completed += 1
@@ -173,8 +171,84 @@ async function runLoop(opts: RollingCacheStart, signal: AbortSignal): Promise<vo
   }
 
   if (!signal.aborted) {
-    setState({ active: false })
+    setState({ active: false, current: null, error: null })
   }
+}
+
+type SynthPersistResult = 'saved' | 'cancelled' | 'failed' | 'timeout'
+type ChunkPrepareResult = 'done' | 'cancelled' | 'failed' | 'timeout'
+
+async function prepareChunk({
+  chunk,
+  text,
+  voice,
+  speed,
+  signal,
+}: {
+  chunk: { start: number; end: number } | undefined
+  text: string
+  voice: string
+  speed: number
+  signal: AbortSignal
+}): Promise<ChunkPrepareResult> {
+  if (!chunk || chunk.end <= chunk.start) return 'done'
+
+  const chunkText = text.slice(chunk.start, chunk.end)
+  if (!chunkText.trim()) return 'done'
+
+  let cacheKey: string
+  try {
+    cacheKey = await localKokoroCacheKey(voice, speed, chunkText)
+  } catch {
+    return 'failed'
+  }
+  if (signal.aborted) return 'cancelled'
+
+  const hit = await getCachedAudio(cacheKey, LOCAL_KOKORO_CACHE_VERSION).catch(() => null)
+  if (signal.aborted) return 'cancelled'
+  if (hit) return 'done'
+
+  const result = await synthAndPersist(chunkText, voice, speed, cacheKey, signal)
+  if (result === 'saved') return 'done'
+  return result
+}
+
+function cancelCurrentRollingSynth(): void {
+  const cancel = currentSynthCancel
+  currentSynthCancel = null
+  try { cancel?.() } catch { /* best effort */ }
+}
+
+function withChunkTimeout(
+  work: Promise<ChunkPrepareResult>,
+  signal: AbortSignal,
+): Promise<ChunkPrepareResult> {
+  if (signal.aborted) return Promise.resolve('cancelled')
+  return new Promise((resolve) => {
+    let settled = false
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    let removeAbortListener: (() => void) | null = null
+    const finish = (result: ChunkPrepareResult) => {
+      if (settled) return
+      settled = true
+      if (timeoutId) clearTimeout(timeoutId)
+      removeAbortListener?.()
+      resolve(result)
+    }
+    const onAbort = () => {
+      cancelCurrentRollingSynth()
+      finish('cancelled')
+    }
+
+    timeoutId = setTimeout(() => {
+      cancelCurrentRollingSynth()
+      finish('timeout')
+    }, ROLLING_CHUNK_TIMEOUT_MS)
+
+    signal.addEventListener('abort', onAbort, { once: true })
+    removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+    work.then(finish, () => finish('failed'))
+  })
 }
 
 function synthAndPersist(
@@ -183,16 +257,30 @@ function synthAndPersist(
   speed: number,
   cacheKey: string,
   signal: AbortSignal,
-): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal.aborted) { resolve(); return }
+): Promise<SynthPersistResult> {
+  return new Promise<SynthPersistResult>((resolve) => {
+    if (signal.aborted) { resolve('cancelled'); return }
     let settled = false
-    const finish = () => { if (!settled) { settled = true; resolve() } }
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    let removeAbortListener: (() => void) | null = null
+    let synthCancel: (() => void) | null = null
+    let cancelCurrentSynth: (() => void) | null = null
+    const finish = (result: SynthPersistResult) => {
+      if (settled) return
+      settled = true
+      if (timeoutId) clearTimeout(timeoutId)
+      removeAbortListener?.()
+      if (cancelCurrentSynth && currentSynthCancel === cancelCurrentSynth) currentSynthCancel = null
+      resolve(result)
+    }
+    cancelCurrentSynth = () => {
+      try { synthCancel?.() } catch { /* best effort */ }
+      finish('cancelled')
+    }
 
     const handle = synthesizeLocalStreaming(text, voice, speed, {
       onComplete: async (result) => {
-        currentSynthCancel = null
-        if (signal.aborted) { finish(); return }
+        if (signal.aborted) { finish('cancelled'); return }
         try {
           const blob = new Blob([result.wav], { type: 'audio/wav' })
           await putCachedAudio({
@@ -204,28 +292,34 @@ function synthAndPersist(
             contentType: 'audio/wav',
             byteLength: blob.size,
           })
-        } catch { /* persistence failure non-fatal */ }
-        finish()
+        } catch {
+          finish('failed')
+          return
+        }
+        finish('saved')
       },
       onError: () => {
-        currentSynthCancel = null
-        finish()
+        finish('failed')
       },
     })
 
-    if (!handle) { finish(); return }
-    currentSynthCancel = handle.cancel
+    if (!handle) { finish('failed'); return }
+    if (settled) return
+    synthCancel = handle.cancel
+    currentSynthCancel = cancelCurrentSynth
+    timeoutId = setTimeout(() => {
+      try { synthCancel?.() } catch { /* best effort */ }
+      finish('timeout')
+    }, ROLLING_SYNTH_TIMEOUT_MS)
 
     const onAbort = () => {
-      const cancel = currentSynthCancel
-      currentSynthCancel = null
-      try { cancel?.() } catch { /* best effort */ }
-      finish()
+      cancelCurrentSynth?.()
     }
     if (signal.aborted) {
       onAbort()
     } else {
       signal.addEventListener('abort', onAbort, { once: true })
+      removeAbortListener = () => signal.removeEventListener('abort', onAbort)
     }
   })
 }

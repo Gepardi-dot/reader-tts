@@ -17,6 +17,8 @@ export interface KokoroAudioResult {
   cacheHit: boolean
 }
 
+const KOKORO_SYNTH_TIMEOUT_MS = 45_000
+
 export async function synthesizeKokoroLocal(
   text: string,
   voice: string,
@@ -46,22 +48,45 @@ export async function synthesizeKokoroLocal(
       sampleRate: number
       durationSec: number
     } | null>((resolve) => {
+      let settled = false
+      let timeoutId: ReturnType<typeof setTimeout> | null = null
+      let removeAbortListener: (() => void) | null = null
+      let synthCancel: (() => void) | null = null
+      const finish = (value: { wav: ArrayBuffer; sampleRate: number; durationSec: number } | null) => {
+        if (settled) return
+        settled = true
+        if (timeoutId) clearTimeout(timeoutId)
+        removeAbortListener?.()
+        resolve(value)
+      }
       const handle = synthesizeLocalStreaming(text, voice, speed, {
-        onComplete: (res) => resolve(res),
-        onError: () => resolve(null),
+        onComplete: (res) => finish(res),
+        onError: () => finish(null),
       })
       if (!handle) {
-        resolve(null)
+        finish(null)
         return
       }
-      signal.addEventListener('abort', () => {
+      if (settled) return
+      synthCancel = handle.cancel
+      timeoutId = setTimeout(() => {
         try {
-          handle.cancel()
+          synthCancel?.()
         } catch {
           // Best effort.
         }
-        resolve(null)
-      }, { once: true })
+        finish(null)
+      }, KOKORO_SYNTH_TIMEOUT_MS)
+      const onAbort = () => {
+        try {
+          synthCancel?.()
+        } catch {
+          // Best effort.
+        }
+        finish(null)
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      removeAbortListener = () => signal.removeEventListener('abort', onAbort)
     })
   } finally {
     notePlaybackFetchEnd()
@@ -88,4 +113,3 @@ export async function synthesizeKokoroLocal(
     cacheHit: false,
   }
 }
-

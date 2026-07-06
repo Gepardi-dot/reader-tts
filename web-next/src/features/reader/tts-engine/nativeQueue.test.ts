@@ -125,4 +125,14 @@ describe('tts v2 native queue', () => {
 
     expect(queue.allChunks[0].status).toBe('idle')
   })
+
+  it('rethrows foreground provider errors so the controller can show the real message', async () => {
+    const queue = new TtsNativeQueue([chunk(0)], async () => {
+      throw new Error('Gemini TTS failed (429): RESOURCE_EXHAUSTED')
+    })
+    const ctrl = new AbortController()
+
+    await expect(queue.ensure(0, ctrl.signal, false)).rejects.toThrow(/RESOURCE_EXHAUSTED/)
+    expect(queue.allChunks[0].status).toBe('error')
+  })
 })

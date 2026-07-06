@@ -48,9 +48,8 @@ export interface AudioPreviewColors {
 export interface AudioPreviewPanelProps {
   colors: AudioPreviewColors
   provider: string
-  onProviderChange: (provider: string) => void
   voice: string | null
-  onVoiceChange: (voice: string | null) => void
+  onSelectionChange: (selection: { provider: string; voice: string | null }) => void
   onError?: (message: string) => void
   rate?: number
   onRateChange?: (rate: number) => void
@@ -62,9 +61,8 @@ export interface AudioPreviewPanelProps {
 export function AudioPreviewPanel({
   colors,
   provider,
-  onProviderChange,
   voice,
-  onVoiceChange,
+  onSelectionChange,
   onError,
   rate: rateProp,
   onRateChange,
@@ -148,8 +146,7 @@ export function AudioPreviewPanel({
     }
     stopPlayback()
     setErrorMsg(null)
-    onProviderChange(draftProvider)
-    onVoiceChange(appliedVoice)
+    onSelectionChange({ provider: draftProvider, voice: appliedVoice })
     onCommitVoice?.({ provider: draftProvider, voice: appliedVoice })
     queuePerformanceTelemetry({
       eventName: 'tts.voice_apply',
@@ -190,7 +187,7 @@ export function AudioPreviewPanel({
           const speed = lengthScale > 0 ? 1 / lengthScale : 1
           const preview = await synthesizeKokoroLocal(KOKORO_PREVIEW_TEXT, voiceId, speed, signal)
           if (signal.aborted) return null
-          if (!preview) throw new Error('The on-device voice is still preparing. Try again in a moment.')
+          if (!preview) throw new Error('Kokoro could not generate this voice sample. Try another voice or retry after preparation finishes.')
 
           const url = URL.createObjectURL(preview.blob)
           rememberAudioObjectUrl(url)
@@ -565,11 +562,20 @@ export function AudioPreviewPanel({
             const total = isThisBookVoice ? (rcs?.total ?? 0) : 0
             const pct = total > 0 ? Math.round((completed / total) * 100) : 0
             const isDone = isThisBookVoice && !rcs?.active && total > 0 && completed >= total
+            const preparationError = isThisBookVoice && !isActive ? rcs?.error : null
             return (
               <div className="mt-2">
                 <button
                   type="button"
-                  onClick={() => { onCommitVoice({ provider, voice }) }}
+                  onClick={() => {
+                    setErrorMsg(null)
+                    const started = onCommitVoice({ provider, voice })
+                    if (!started) {
+                      const message = 'Kokoro is still preparing. Try playback now, or retry voice preparation shortly.'
+                      setErrorMsg(message)
+                      onError?.(message)
+                    }
+                  }}
                   disabled={isActive}
                   className="w-full h-9 rounded-md text-[12px] font-medium transition-all active:scale-[0.99] disabled:cursor-not-allowed"
                   style={{
@@ -580,7 +586,9 @@ export function AudioPreviewPanel({
                 >
                   {isActive
                     ? `Preparing voice… ${pct}%`
-                    : isDone
+                    : preparationError
+                      ? 'Retry voice preparation'
+                      : isDone
                       ? 'Voice ready · re-cache'
                       : 'Use this voice for this book'}
                 </button>
@@ -591,6 +599,11 @@ export function AudioPreviewPanel({
                       style={{ width: `${pct}%`, background: colors.text, opacity: 0.4 }}
                     />
                   </div>
+                )}
+                {preparationError && (
+                  <p className="mt-1.5 text-[11px] leading-4 opacity-55">
+                    {preparationError}
+                  </p>
                 )}
               </div>
             )

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   getCachedAudio: vi.fn(),
@@ -31,6 +31,7 @@ import { synthesizeKokoroLocal } from './kokoroAudio'
 
 describe('kokoro audio helper', () => {
   beforeEach(() => {
+    vi.useRealTimers()
     vi.clearAllMocks()
     mocks.isModelReady.mockReturnValue(true)
     mocks.localKokoroCacheKey.mockResolvedValue('local:kokoro:test')
@@ -49,6 +50,10 @@ describe('kokoro audio helper', () => {
       })
       return { cancel: vi.fn() }
     })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('returns null while the model is not ready', async () => {
@@ -87,6 +92,16 @@ describe('kokoro audio helper', () => {
     expect(result?.cacheKey).toBe('local:kokoro:test')
     expect(result?.duration).toBe(1.25)
     expect(result?.blob.type).toBe('audio/wav')
+    expect(mocks.localKokoroCacheKey).toHaveBeenCalledWith('af_bella', 1, 'hello')
+    expect(mocks.synthesizeLocalStreaming).toHaveBeenCalledWith(
+      'hello',
+      'af_bella',
+      1,
+      expect.objectContaining({
+        onComplete: expect.any(Function),
+        onError: expect.any(Function),
+      }),
+    )
     expect(mocks.notePlaybackFetchStart).toHaveBeenCalledTimes(1)
     expect(mocks.notePlaybackFetchEnd).toHaveBeenCalledTimes(1)
     expect(mocks.putCachedAudio).toHaveBeenCalledWith(expect.objectContaining({
@@ -96,5 +111,18 @@ describe('kokoro audio helper', () => {
       contentType: 'audio/wav',
     }))
   })
-})
 
+  it('times out a hung local synthesis and releases the playback gate', async () => {
+    vi.useFakeTimers()
+    const cancel = vi.fn()
+    mocks.synthesizeLocalStreaming.mockReturnValue({ cancel })
+
+    const promise = synthesizeKokoroLocal('hello', 'am_adam', 1, new AbortController().signal)
+    await vi.advanceTimersByTimeAsync(45_000)
+
+    await expect(promise).resolves.toBeNull()
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(mocks.notePlaybackFetchStart).toHaveBeenCalledTimes(1)
+    expect(mocks.notePlaybackFetchEnd).toHaveBeenCalledTimes(1)
+  })
+})

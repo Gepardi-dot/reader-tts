@@ -57,4 +57,16 @@ describe('live audio quota backoff', () => {
       'Gemini TTS hit the free-tier rate limit. Browser speech will continue; try Gemini again shortly.',
     )
   })
+
+  it('keeps separate memory cache entries for different Gemini voices', async () => {
+    requestMock.mockResolvedValue({
+      url: 'data:audio/wav;base64,test',
+      duration: 1,
+    })
+
+    await requestLiveAudio('book-1', { ...payload(), voice: 'Kore' })
+    await requestLiveAudio('book-1', { ...payload(), voice: 'Puck' })
+
+    expect(requestMock).toHaveBeenCalledTimes(2)
+  })
 })

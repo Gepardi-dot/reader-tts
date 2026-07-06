@@ -13,6 +13,7 @@ import {
   BROWSER_TTS_PROVIDER_ID,
   DEFAULT_PREFETCH_AHEAD,
   PREFETCH_AHEAD_TARGET,
+  audioSelectionKey,
   nativePrefetchStartIndexForFallback,
   pacingFor,
 } from '../audioPlayback'
@@ -120,6 +121,7 @@ export function useTtsSessionController({
   const rateRef = useRef(rate)
   const providerRef = useRef(provider)
   const voiceRef = useRef(voice)
+  const selectionKeyRef = useRef(audioSelectionKey(provider, voice))
   const syncAudioFollowCueRef = useRef(syncAudioFollowCue)
   const clearAudioFollowRef = useRef(clearAudioFollow)
   const showToastRef = useRef(showToast)
@@ -129,6 +131,7 @@ export function useTtsSessionController({
   rateRef.current = rate
   providerRef.current = provider
   voiceRef.current = voice
+  selectionKeyRef.current = audioSelectionKey(provider, voice)
   syncAudioFollowCueRef.current = syncAudioFollowCue
   clearAudioFollowRef.current = clearAudioFollow
   showToastRef.current = showToast
@@ -232,20 +235,25 @@ export function useTtsSessionController({
   ): Promise<NativeAudioResult | null> => {
     const selectedProvider = providerRef.current
     const selectedVoice = voiceRef.current
+    const requestSelectionKey = selectionKeyRef.current
+
+    const selectionChanged = () => selectionKeyRef.current !== requestSelectionKey
 
     if (selectedProvider === 'kokoro') {
       if (!selectedVoice) return null
       if (!isModelReady()) {
         const ready = await waitForModelReady(signal)
-        if (!ready || signal.aborted) return null
+        if (!ready || signal.aborted || selectionChanged()) return null
       }
       const { lengthScale } = pacingFor('kokoro')
       const speed = lengthScale > 0 ? 1 / lengthScale : 1
       const synthesized = await synthesizeKokoroLocal(chunk.text, selectedVoice, speed, signal)
-      if (!synthesized || signal.aborted) return null
+      if (signal.aborted || selectionChanged()) return null
+      if (!synthesized) throw new Error('Kokoro synthesis timed out or returned no audio.')
 
       const ctx = nativeSinkRef.current.ensureContext()
       const buffer = await decodeBlob(ctx, synthesized.blob)
+      if (signal.aborted || selectionChanged()) return null
       return {
         url: null,
         buffer,
@@ -307,7 +315,7 @@ export function useTtsSessionController({
       })
       throw error
     }
-    if (signal.aborted) return null
+    if (signal.aborted || selectionChanged()) return null
 
     queuePerformanceTelemetry({
       eventName: 'tts.live_audio_fetch_v2',
@@ -324,9 +332,10 @@ export function useTtsSessionController({
     })
 
     const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
-    if (signal.aborted) return null
+    if (signal.aborted || selectionChanged()) return null
     const ctx = nativeSinkRef.current.ensureContext()
     const buffer = await decodeBlob(ctx, blob)
+    if (signal.aborted || selectionChanged()) return null
     const url = URL.createObjectURL(blob)
     objectUrlsRef.current.add(url)
     return {
@@ -392,6 +401,10 @@ export function useTtsSessionController({
         void queue.ensure(nextIndex, ctrl.signal, false).then((result) => {
           if (ctrl.signal.aborted || sessionId !== sessionIdRef.current || !result?.buffer) return
           startNativeAtRef.current(nextIndex, ctrl, startedAt, sessionId, reason)
+        }).catch((error) => {
+          if (ctrl.signal.aborted || sessionId !== sessionIdRef.current) return
+          showToastRef.current(audioErrorMessage(error))
+          stopWordAudio()
         })
       },
     })
@@ -461,6 +474,7 @@ export function useTtsSessionController({
     stopWordAudio()
     const startedAt = performanceNow()
     const sessionId = sessionIdRef.current + 1
+    const startSelectionKey = selectionKeyRef.current
     sessionIdRef.current = sessionId
     const ctrl = new AbortController()
     abortRef.current = ctrl
@@ -480,6 +494,7 @@ export function useTtsSessionController({
       presynthGrid: presynthGridRef.current,
       kokoroModelReady: isModelReady(),
     })
+    if (selectionKeyRef.current !== startSelectionKey) return
     if (!chunks.length) {
       showToastRef.current('There is no readable text at this position.')
       stopWordAudio()
@@ -541,6 +556,7 @@ export function useTtsSessionController({
     try {
       const first = await queue.ensure(0, ctrl.signal, false)
       if (ctrl.signal.aborted || sessionId !== sessionIdRef.current) return
+      if (selectionKeyRef.current !== startSelectionKey) return
       if (!first?.buffer) throw new Error('Audio provider did not return playable audio.')
       startNativeAt(0, ctrl, startedAt, sessionId, reason)
     } catch (error) {
