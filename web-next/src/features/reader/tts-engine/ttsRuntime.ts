@@ -16,6 +16,7 @@ import { BrowserSpeechLane } from './browserSpeechLane'
 import { createChunkLoader } from './chunkLoader'
 import { KokoroEngine, PREHEAT_SEGMENTS } from './kokoroEngine'
 import { audioErrorMessage } from './liveAudio'
+import { warmLiveAudioFromOffset } from './liveAudioWarm'
 import { buildTtsChunks } from './segmenter'
 import { FirstAudioGate } from './sessionTelemetry'
 import type {
@@ -148,7 +149,7 @@ export class TtsRuntime {
     this.kokoro.setRate(rate)
   }
 
-  /** Preheat SegmentCache around the reading position (makes taps instant). */
+  /** Preheat SegmentCache around the reading position (legacy on-device path). */
   prepareKokoroWindow(input: {
     bookText: string
     offset: number
@@ -161,6 +162,31 @@ export class TtsRuntime {
       offset: input.offset,
       voice: input.voice,
       maxSegments: input.maxSegments ?? PREHEAT_SEGMENTS,
+    })
+  }
+
+  /**
+   * Speculative warm for hosted Kokoro/Gemini: fetch first chunk(s) into the
+   * live-audio memory cache so Play is often a cache hit.
+   */
+  warmCloudAtOffset(input: {
+    bookId?: string
+    bookText: string
+    startOffset: number
+    provider: string
+    voice: string | null
+    signal?: AbortSignal
+  }) {
+    if (!input.bookId) return Promise.resolve()
+    if (input.provider !== 'kokoro' && input.provider !== 'google') return Promise.resolve()
+    return warmLiveAudioFromOffset({
+      bookId: input.bookId,
+      bookText: input.bookText,
+      startOffset: input.startOffset,
+      provider: input.provider,
+      voice: input.voice,
+      chunkCount: input.provider === 'kokoro' ? 2 : 1,
+      signal: input.signal,
     })
   }
 
@@ -439,6 +465,13 @@ export class TtsRuntime {
     try {
       this.clock.setExpectMore(true)
       this.loadingChunkIndexes.add(0)
+      // Kick follow-up fetch immediately (hosted path is sequential; first chunk
+      // often already warm from selection speculative fetch).
+      void pool.prefetchFrom(
+        1,
+        PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD,
+        controller.signal,
+      )
       await pool.ensure(0, controller.signal, false)
       this.loadingChunkIndexes.delete(0)
       if (generation !== this.generation) return

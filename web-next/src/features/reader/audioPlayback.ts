@@ -12,15 +12,17 @@ export interface AudioTextChunk {
 // follow-ups while the first unit plays. Kokoro worker synth is serialized, so
 // follow-ups must be long enough to cover the next job without multi-second
 // prebuffer (prebuffer felt like a hang).
-// Cloud path (hosted Kokoro + Gemini): short first chunk, larger follow-ups.
+// Cloud path (hosted Kokoro + Gemini): short first chunk for fast cold start,
+// larger follow-ups once audio is already playing.
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
   google: 120,
-  kokoro: 120,
+  // Smaller first unit → faster hosted Kokoro synth on Play (or selection warm).
+  kokoro: 80,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {
   google: 280,
-  kokoro: 260,
+  kokoro: 240,
 }
 
 export const DEFAULT_FIRST_AUDIO_CHARS = 180

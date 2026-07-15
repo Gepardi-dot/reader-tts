@@ -26,7 +26,7 @@ export interface TtsSessionController {
   toggleWordAudio: () => void
   stopWordAudio: () => void
   isAudioActive: () => boolean
-  /** Preheat Kokoro SegmentCache around a reading offset (instant taps). */
+  /** Preheat Kokoro SegmentCache around a reading offset (legacy on-device). */
   prepareKokoroWindow: (input: {
     bookText: string
     offset: number
@@ -34,6 +34,8 @@ export interface TtsSessionController {
     maxSegments?: number
     signal?: AbortSignal
   }) => Promise<void>
+  /** Speculative live-audio warm so Play is often instant (hosted Kokoro/Gemini). */
+  warmCloudAtOffset: (startOffset: number) => void
 }
 
 /**
@@ -147,6 +149,25 @@ export function useTtsSessionController({
     await ensureRuntime().prepareKokoroWindow(input)
   }, [])
 
+  const warmAbortRef = useRef<AbortController | null>(null)
+  const warmCloudAtOffset = useCallback((startOffset: number) => {
+    warmAbortRef.current?.abort()
+    const ctrl = new AbortController()
+    warmAbortRef.current = ctrl
+    void ensureRuntime().warmCloudAtOffset({
+      bookId: bookIdRef.current,
+      bookText: bookTextRef.current,
+      startOffset,
+      provider: providerRef.current,
+      voice: voiceRef.current,
+      signal: ctrl.signal,
+    })
+  }, [])
+
+  useEffect(() => () => {
+    warmAbortRef.current?.abort()
+  }, [])
+
   const snapshot = ensureRuntime().getSnapshot()
 
   return {
@@ -159,5 +180,6 @@ export function useTtsSessionController({
     stopWordAudio,
     isAudioActive,
     prepareKokoroWindow,
+    warmCloudAtOffset,
   }
 }

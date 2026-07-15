@@ -29,7 +29,6 @@ import {
 } from '@/shared/storage/rollingVoiceCache'
 import { cn } from '@/lib/utils'
 import {
-  BROWSER_TTS_PROVIDER_ID,
   CHUNK_CHARS,
   pacingFor,
 } from './audioPlayback'
@@ -2366,6 +2365,7 @@ export function ReaderRoute() {
     toggleWordAudio,
     stopWordAudio,
     isAudioActive,
+    warmCloudAtOffset,
   } = useTtsSessionController({
     bookId,
     bookText: payload?.text ?? '',
@@ -2743,9 +2743,12 @@ export function ReaderRoute() {
       // Clear native selection immediately → suppresses browser's selection toolbar
       sel.removeAllRanges()
       setSelection(state)
+      if (effectiveTtsProvider === 'kokoro' || effectiveTtsProvider === 'google') {
+        warmCloudAtOffset(state.startOffset)
+      }
     } catch { /* swallow */ }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload?.text, scrollPct])
+  }, [payload?.text, scrollPct, effectiveTtsProvider, warmCloudAtOffset])
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (justShowedMenu.current) { justShowedMenu.current = false; return }
@@ -2768,9 +2771,13 @@ export function ReaderRoute() {
     if (!state) return
 
     // Show selection menu only — TTS starts from the Play action, not on tap.
+    // Speculatively warm hosted Kokoro/Gemini so Play is often a cache hit.
     setSelection(state)
+    if (effectiveTtsProvider === 'kokoro' || effectiveTtsProvider === 'google') {
+      warmCloudAtOffset(state.startOffset)
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection, payload?.text, scrollPct])
+  }, [selection, payload?.text, scrollPct, effectiveTtsProvider, warmCloudAtOffset])
 
   // ── Mobile drag-to-select ─────────────────────────────────────────────────
   // Touch a word and slide your finger across the sentence to grow the
