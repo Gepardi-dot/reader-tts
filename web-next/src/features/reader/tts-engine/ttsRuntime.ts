@@ -7,6 +7,9 @@ import {
 import {
   BROWSER_TTS_PROVIDER_ID,
   DEFAULT_PREFETCH_AHEAD,
+  KOKORO_MIN_START_BUFFER_SEC,
+  KOKORO_MIN_START_FLOOR_SEC,
+  KOKORO_MIN_START_FRAMES,
   PREFETCH_AHEAD_TARGET,
   audioSelectionKey,
 } from '../audioPlayback'
@@ -18,6 +21,7 @@ import { audioErrorMessage } from './liveAudio'
 import { buildTtsChunks } from './segmenter'
 import { FirstAudioGate } from './sessionTelemetry'
 import type {
+  NativeAudioResult,
   TtsAudioChunk,
   TtsGridChunk,
   TtsPhase,
@@ -75,6 +79,14 @@ export class TtsRuntime {
   private sessionId = 0
   private reason: 'voice-switch' | 'tap' = 'tap'
   private loadingChunkIndexes = new Set<number>()
+  /** Kokoro: hold early stream frames until a smoothness watermark is met. */
+  private holdPlayback = false
+  private heldFrames: Array<{
+    chunkIndex: number
+    buffer: AudioBuffer
+    cues: NativeAudioResult['cues']
+  }> = []
+  private heldDurationSec = 0
   private hooks: TtsRuntimeHooks = {
     syncAudioFollowCue: () => undefined,
     clearAudioFollow: () => undefined,
@@ -132,6 +144,9 @@ export class TtsRuntime {
     this.pool = null
     this.chunks = []
     this.loadingChunkIndexes.clear()
+    this.holdPlayback = false
+    this.heldFrames = []
+    this.heldDurationSec = 0
     this.firstAudio.reset()
     this.revokeObjectUrls()
     this.hooks.clearAudioFollow()
@@ -332,43 +347,71 @@ export class TtsRuntime {
       },
     })
 
-    // Streamed / decoded frames go straight onto the clock.
+    // Streamed / decoded frames: Kokoro holds until a buffer watermark so the
+    // first audible stretch covers the next worker job (serialized ONNX).
+    this.holdPlayback = params.provider === 'kokoro'
+    this.heldFrames = []
+    this.heldDurationSec = 0
+
     const unsubFrames = pool.onFrame((chunkIndex, frame) => {
       if (generation !== this.generation || controller.signal.aborted) return
       if (this.scheduledBuffers.has(frame.buffer)) return
       this.scheduledBuffers.add(frame.buffer)
-
       this.refreshExpectMore(chunkIndex)
-      this.clock.append(frame.buffer, {
-        chunkIndex,
-        seekSeconds: 0,
-        cues: frame.cues,
-      })
 
-      if (this.phase === 'buffering' || this.phase === 'idle') {
-        this.phase = 'playing'
-        this.lane = 'native'
-        this.emit()
+      if (this.holdPlayback) {
+        this.heldFrames.push({
+          chunkIndex,
+          buffer: frame.buffer,
+          cues: frame.cues,
+        })
+        this.heldDurationSec += frame.buffer.duration
+        const firstChunkDone = this.chunks[0]?.status === 'ready'
+        const enoughTime = this.heldDurationSec >= KOKORO_MIN_START_BUFFER_SEC
+        const enoughFrames = this.heldFrames.length >= KOKORO_MIN_START_FRAMES
+          && this.heldDurationSec >= KOKORO_MIN_START_FLOOR_SEC
+        if (enoughTime || enoughFrames || firstChunkDone) {
+          this.flushHeldFrames()
+        } else {
+          this.phase = 'buffering'
+          this.emit()
+        }
+        return
       }
+
+      this.appendFrame(chunkIndex, frame.buffer, frame.cues)
     })
     controller.signal.addEventListener('abort', unsubFrames, { once: true })
 
     pool.subscribe(() => {
       if (generation !== this.generation) return
+      // First-chunk completion can release a held Kokoro prebuffer.
+      if (this.holdPlayback && this.chunks[0]?.status === 'ready' && this.heldFrames.length > 0) {
+        this.flushHeldFrames()
+      }
       this.emit()
     })
 
     try {
-      // Kick first chunk immediately; frames schedule as they arrive.
       this.clock.setExpectMore(true)
       this.loadingChunkIndexes.add(0)
-      void pool.prefetchFrom(1, PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD, controller.signal)
+      // Load first chunk before queueing follow-ups so the worker's first job
+      // is the tapped text (serialized synth queue still preserves order).
       await pool.ensure(0, controller.signal, false)
       this.loadingChunkIndexes.delete(0)
       if (generation !== this.generation) return
 
-      // If nothing was scheduled (loader returned empty), surface an error.
-      if (this.clock.scheduledCount === 0) {
+      if (this.holdPlayback && this.heldFrames.length > 0) {
+        this.flushHeldFrames()
+      }
+
+      void pool.prefetchFrom(
+        1,
+        PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD,
+        controller.signal,
+      )
+
+      if (this.clock.scheduledCount === 0 && this.heldFrames.length === 0) {
         throw new Error('Audio provider did not return playable audio.')
       }
 
@@ -378,6 +421,37 @@ export class TtsRuntime {
       if (controller.signal.aborted || generation !== this.generation) return
       this.hooks.showToast(audioErrorMessage(error))
       this.stop()
+    }
+  }
+
+  private appendFrame(
+    chunkIndex: number,
+    buffer: AudioBuffer,
+    cues: NativeAudioResult['cues'],
+  ) {
+    this.clock.append(buffer, {
+      chunkIndex,
+      seekSeconds: 0,
+      cues,
+    })
+    if (this.phase === 'buffering' || this.phase === 'idle') {
+      this.phase = 'playing'
+      this.lane = 'native'
+      this.emit()
+    }
+  }
+
+  private flushHeldFrames() {
+    if (!this.heldFrames.length) {
+      this.holdPlayback = false
+      return
+    }
+    const frames = this.heldFrames
+    this.heldFrames = []
+    this.heldDurationSec = 0
+    this.holdPlayback = false
+    for (const frame of frames) {
+      this.appendFrame(frame.chunkIndex, frame.buffer, frame.cues)
     }
   }
 

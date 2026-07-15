@@ -70,6 +70,9 @@ let state: ModelState = { status: 'idle', progress: 0, error: null }
 const listeners = new Set<(state: ModelState) => void>()
 const pending = new Map<string, StreamHandle>()
 let nextId = 1
+/** One in-flight synth at a time — concurrent jobs thrash the single ONNX pipeline. */
+let synthTail: Promise<void> = Promise.resolve()
+const synthWaiters = new Map<string, { resolve: () => void; reject: (err: Error) => void }>()
 
 let broadcast: BroadcastChannel | null = null
 try {
@@ -145,6 +148,11 @@ function handleWorkerMessage(event: MessageEvent<WorkerMsg>) {
         pending.delete(msg.id)
         slot.onComplete({ wav: msg.wav, sampleRate: msg.sampleRate, durationSec: msg.durationSec })
       }
+      const waiter = synthWaiters.get(msg.id)
+      if (waiter) {
+        synthWaiters.delete(msg.id)
+        waiter.resolve()
+      }
       break
     }
     case 'error': {
@@ -152,6 +160,11 @@ function handleWorkerMessage(event: MessageEvent<WorkerMsg>) {
       if (slot) {
         pending.delete(msg.id)
         slot.onError(new Error(msg.message))
+      }
+      const waiter = synthWaiters.get(msg.id)
+      if (waiter) {
+        synthWaiters.delete(msg.id)
+        waiter.resolve()
       }
       break
     }
@@ -238,20 +251,51 @@ export function synthesizeLocalStreaming(
   if (!w) return null
 
   const id = String(nextId++)
-  pending.set(id, handle)
-  try {
-    w.postMessage({ type: 'synthesize', id, text, voice, speed })
-  } catch (err) {
-    pending.delete(id)
-    handle.onError(err instanceof Error ? err : new Error(String(err)))
-    return null
+  let cancelled = false
+  let started = false
+
+  // Serialize synthesis: the ONNX worker degrades badly with concurrent jobs,
+  // and overlapping synths cause underruns when the active one is delayed.
+  const run = async () => {
+    if (cancelled) return
+    const activeWorker = worker
+    if (!activeWorker || state.status !== 'ready') {
+      if (!cancelled) handle.onError(new Error('Kokoro model is not ready.'))
+      return
+    }
+    started = true
+    pending.set(id, handle)
+    const done = new Promise<void>((resolve) => {
+      synthWaiters.set(id, { resolve, reject: () => resolve() })
+    })
+    try {
+      activeWorker.postMessage({ type: 'synthesize', id, text, voice, speed })
+    } catch (err) {
+      pending.delete(id)
+      synthWaiters.delete(id)
+      if (!cancelled) handle.onError(err instanceof Error ? err : new Error(String(err)))
+      return
+    }
+    await done
   }
+
+  synthTail = synthTail.then(run, run)
 
   return {
     cancel: () => {
+      cancelled = true
+      if (!started) {
+        // Job never reached the worker; the caller's abort handler settles.
+        return
+      }
       if (!pending.has(id)) return
       pending.delete(id)
-      try { w.postMessage({ type: 'cancel', id }) } catch { /* best effort */ }
+      const waiter = synthWaiters.get(id)
+      if (waiter) {
+        synthWaiters.delete(id)
+        waiter.resolve()
+      }
+      try { worker?.postMessage({ type: 'cancel', id }) } catch { /* best effort */ }
     },
   }
 }

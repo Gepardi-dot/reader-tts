@@ -199,15 +199,16 @@ describe('modelCache state machine', () => {
 
     const wavBuffer = new ArrayBuffer(64)
     const pending = mc.synthesizeLocal('hello', 'af_heart', 1.0)
+    // Synth is queued on a microtask chain (serialized worker access).
+    await Promise.resolve()
+    await Promise.resolve()
 
-    // Inspect the message the cache posted to the worker
     const lastMsg = MockWorker.instances[0].posted.at(-1) as { type: string; id: string; text: string; voice: string; speed: number }
     expect(lastMsg.type).toBe('synthesize')
     expect(lastMsg.text).toBe('hello')
     expect(lastMsg.voice).toBe('af_heart')
     expect(lastMsg.speed).toBe(1.0)
 
-    // Simulate worker emitting the result
     MockWorker.instances[0].emit({
       type: 'result',
       id: lastMsg.id,
@@ -229,7 +230,10 @@ describe('modelCache state machine', () => {
     MockWorker.instances[0].emit({ type: 'ready' })
 
     const pending = mc.synthesizeLocal('boom', 'af_heart', 1.0)
-    const lastMsg = MockWorker.instances[0].posted.at(-1) as { id: string }
+    await Promise.resolve()
+    await Promise.resolve()
+    const lastMsg = MockWorker.instances[0].posted.at(-1) as { id: string; type: string }
+    expect(lastMsg.type).toBe('synthesize')
 
     MockWorker.instances[0].emit({ type: 'error', id: lastMsg.id, message: 'synth failed' })
 
@@ -237,32 +241,46 @@ describe('modelCache state machine', () => {
     expect(result).toBeNull()
   })
 
-  it('multiple concurrent synthesizeLocal calls are correlated independently', async () => {
+  it('serializes concurrent synthesizeLocal calls onto the worker', async () => {
     const mc = await loadModule()
     mc.startWarmup()
     MockWorker.instances[0].emit({ type: 'ready' })
 
     const a = mc.synthesizeLocal('first', 'af_heart', 1.0)
     const b = mc.synthesizeLocal('second', 'af_heart', 1.0)
+    await Promise.resolve()
+    await Promise.resolve()
 
-    const messages = MockWorker.instances[0].posted.filter(
+    // Only the first job is in-flight until it completes.
+    let messages = MockWorker.instances[0].posted.filter(
+      (m): m is { type: 'synthesize'; id: string; text: string } =>
+        typeof m === 'object' && m !== null && (m as { type?: string }).type === 'synthesize',
+    )
+    expect(messages).toHaveLength(1)
+    expect(messages[0].text).toBe('first')
+
+    MockWorker.instances[0].emit({
+      type: 'result', id: messages[0].id, wav: new ArrayBuffer(16), sampleRate: 24000, durationSec: 0.4,
+    })
+    const resA = await a
+    expect(resA?.wav.byteLength).toBe(16)
+
+    // Second job only posts after the first fully settles.
+    await Promise.resolve()
+    await Promise.resolve()
+    messages = MockWorker.instances[0].posted.filter(
       (m): m is { type: 'synthesize'; id: string; text: string } =>
         typeof m === 'object' && m !== null && (m as { type?: string }).type === 'synthesize',
     )
     expect(messages).toHaveLength(2)
+    expect(messages[1].text).toBe('second')
     expect(messages[0].id).not.toBe(messages[1].id)
 
-    // Reply in reverse order to prove correlation
     MockWorker.instances[0].emit({
       type: 'result', id: messages[1].id, wav: new ArrayBuffer(8), sampleRate: 24000, durationSec: 0.2,
     })
-    MockWorker.instances[0].emit({
-      type: 'result', id: messages[0].id, wav: new ArrayBuffer(16), sampleRate: 24000, durationSec: 0.4,
-    })
 
-    const resA = await a
     const resB = await b
-    expect(resA?.wav.byteLength).toBe(16)
     expect(resB?.wav.byteLength).toBe(8)
   })
 })

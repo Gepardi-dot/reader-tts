@@ -10,23 +10,32 @@ export interface AudioTextChunk {
 
 // Streaming-style playback: keep the first request small so audio can start quickly,
 // then synthesize larger follow-up chunks while the first chunk is playing.
-// Keep first units short so Kokoro can stream first-sentence PCM quickly and
-// Gemini can return a small cold chunk. Follow-up chunks are larger for throughput.
+// Gemini: short first chunk for cold network latency.
+// Kokoro: slightly longer first unit so on-device synth produces enough audio to
+// cover the next job (worker is single-threaded / serialized).
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
   google: 140,
-  kokoro: 48,
+  kokoro: 90,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {
   google: 280,
-  kokoro: 120,
+  // Larger follow-ups = fewer worker round-trips and fewer boundary underruns.
+  kokoro: 220,
 }
+
+/** Seconds of Kokoro audio to hold before starting the clock (smoothness). */
+export const KOKORO_MIN_START_BUFFER_SEC = 1.6
+/** Or start once this many stream frames are held (whichever first with min floor). */
+export const KOKORO_MIN_START_FRAMES = 2
+export const KOKORO_MIN_START_FLOOR_SEC = 0.85
 
 export const DEFAULT_FIRST_AUDIO_CHARS = 180
 export const DEFAULT_AUDIO_CHARS = 800
 export const PREFETCH_CHUNK_LIMIT = 3
 export const AUDIO_SLICE_CHARS = 2200
-export const AUDIO_CONTEXT_START_LEAD_SEC = 0.002
+// Slight lead hides scheduling jitter between concatenated PCM frames.
+export const AUDIO_CONTEXT_START_LEAD_SEC = 0.012
 
 // How many chunks to bootstrap when playback begins. Cloud chunks are fetched
 // sequentially by the native queue so Gemini quota is not burned in bursts.
@@ -45,7 +54,8 @@ export const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
 export const PREFETCH_AHEAD_TARGET: Record<string, number> = {
   google: 1,
-  kokoro: 4,
+  // Keep several jobs queued; modelCache serializes actual worker synth.
+  kokoro: 5,
 }
 
 export const DEFAULT_PREFETCH_AHEAD = 2
