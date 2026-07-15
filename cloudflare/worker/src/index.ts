@@ -166,8 +166,38 @@ export default {
   },
 }
 
+function primaryAppOrigin(env: Env) {
+  const configured = (env.APP_ORIGIN ?? '')
+    .split(',')
+    .map((item) => item.trim().replace(/\/$/, ''))
+    .filter(Boolean)
+  return configured[0] || 'https://readertts.vercel.app'
+}
+
+/** Friendly landing when someone opens the API host in a browser (not the SPA). */
+function apiLanding(env: Env, request: Request) {
+  const app = primaryAppOrigin(env)
+  const accept = request.headers.get('Accept') || ''
+  if (accept.includes('text/html')) {
+    // Send humans to the real app UI.
+    return Response.redirect(app, 302)
+  }
+  return json({
+    service: 'reader-tts-api',
+    status: 'ok',
+    message: 'This host is the API only. Open the app URL in your browser to use the reader.',
+    app,
+    health: '/api/health',
+  })
+}
+
 async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext): Promise<Response> {
   const path = normalizePath(url.pathname)
+
+  // Root / non-API paths: never demand auth (browsers often open the workers.dev URL).
+  if (path === '/' || path === '' || !path.startsWith('/api/')) {
+    return apiLanding(env, request)
+  }
 
   if (path === '/api/health' && request.method === 'GET') return health(env)
   if (path.startsWith('/api/auth/')) return handleAuth(request, env, path)
@@ -268,14 +298,29 @@ function withCors(response: Response, request: Request, env: Env) {
 function corsHeaders(request: Request, env: Env) {
   const headers = new Headers()
   const origin = request.headers.get('Origin')
-  const configured = (env.APP_ORIGIN ?? '').split(',').map((item) => item.trim()).filter(Boolean)
-  const allowOrigin = origin && (configured.length === 0 || configured.includes(origin))
+  const configured = (env.APP_ORIGIN ?? '')
+    .split(',')
+    .map((item) => item.trim().replace(/\/$/, ''))
+    .filter(Boolean)
+  // Always allow the production Vercel app + local Vite ports, even if APP_ORIGIN is unset.
+  const defaults = [
+    'https://readertts.vercel.app',
+    'http://localhost:5175',
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://127.0.0.1:5175',
+    'http://127.0.0.1:5173',
+  ]
+  const allowed = new Set([...configured, ...defaults])
+  const allowOrigin = origin && allowed.has(origin)
     ? origin
-    : configured[0] ?? '*'
+    : (configured[0] || defaults[0])
   headers.set('Access-Control-Allow-Origin', allowOrigin)
   headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
   headers.set('Access-Control-Allow-Headers', 'Authorization,Content-Type')
   headers.set('Access-Control-Max-Age', '86400')
+  // Required so the Vercel app can use COEP require-corp (SharedArrayBuffer / Kokoro WASM).
+  headers.set('Cross-Origin-Resource-Policy', 'cross-origin')
   headers.set('Vary', 'Origin')
   return headers
 }
