@@ -30,6 +30,9 @@ export interface TtsSessionController {
 /**
  * Thin React adapter around the imperative TtsRuntime.
  * No audio timing lives here — only subscription and command forwarding.
+ *
+ * Note: React Strict Mode runs mount→cleanup→mount. Dispose must not leave
+ * effects calling methods on a nulled runtime; always re-create via ensure().
  */
 export function useTtsSessionController({
   bookId,
@@ -43,7 +46,11 @@ export function useTtsSessionController({
   showToast,
 }: UseTtsSessionControllerParams): TtsSessionController {
   const runtimeRef = useRef<TtsRuntime | null>(null)
-  if (!runtimeRef.current) runtimeRef.current = new TtsRuntime()
+  const ensureRuntime = () => {
+    if (!runtimeRef.current) runtimeRef.current = new TtsRuntime()
+    return runtimeRef.current
+  }
+  ensureRuntime()
 
   const bookTextRef = useRef(bookText)
   const providerRef = useRef(provider)
@@ -60,7 +67,7 @@ export function useTtsSessionController({
   const selectionKey = audioSelectionKey(provider, voice)
 
   useEffect(() => {
-    const runtime = runtimeRef.current!
+    const runtime = ensureRuntime()
     runtime.setHooks({
       syncAudioFollowCue,
       clearAudioFollow,
@@ -70,7 +77,7 @@ export function useTtsSessionController({
   }, [syncAudioFollowCue, clearAudioFollow, showToast])
 
   useEffect(() => {
-    runtimeRef.current?.setRate(rate)
+    ensureRuntime().setRate(rate)
   }, [rate])
 
   useEffect(() => () => {
@@ -83,9 +90,7 @@ export function useTtsSessionController({
     startOffset: number,
     reason?: 'voice-switch',
   ) => {
-    const runtime = runtimeRef.current
-    if (!runtime) return
-    await runtime.start({
+    await ensureRuntime().start({
       word,
       startOffset,
       bookText: bookTextRef.current,
@@ -123,12 +128,12 @@ export function useTtsSessionController({
     runtimeRef.current?.isAudibleOrLoading() ?? false
   ), [])
 
-  const snapshot = runtimeRef.current?.getSnapshot()
+  const snapshot = ensureRuntime().getSnapshot()
 
   return {
-    wordAudioPhase: snapshot?.phase ?? 'idle',
-    wordAudioCurIdx: snapshot?.currentIndex ?? 0,
-    wordAudioTotal: snapshot?.totalChunks ?? 0,
+    wordAudioPhase: snapshot.phase,
+    wordAudioCurIdx: snapshot.currentIndex,
+    wordAudioTotal: snapshot.totalChunks,
     playWord,
     toggleWordAudio,
     stopWordAudio,
