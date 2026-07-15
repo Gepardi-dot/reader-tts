@@ -17,8 +17,15 @@ const USER_KEY = 'reader-tts-auth-user'
 let cachedUser: AuthUser | null = readStoredUser()
 const listeners = new Set<(user: AuthUser | null) => void>()
 
+/** Cloudflare Worker API. Must stay absolute in production (Vercel static host ≠ API). */
+const PRODUCTION_API_ORIGIN = 'https://reader-tts-api.reader-tts-ari.workers.dev'
+
 function configuredApiOrigin() {
-  const configured = import.meta.env.VITE_API_ORIGIN?.trim()
+  const fromEnv = (import.meta.env.VITE_API_ORIGIN as string | undefined)?.trim()
+  // Production builds must never fall back to same-origin /api on Vercel —
+  // that path is the legacy Python FastAPI ("Authentication required.").
+  const configured = fromEnv
+    || (import.meta.env.PROD ? PRODUCTION_API_ORIGIN : '')
   return configured ? configured.replace(/\/$/, '') : ''
 }
 
