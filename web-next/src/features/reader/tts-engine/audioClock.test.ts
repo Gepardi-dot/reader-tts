@@ -69,7 +69,36 @@ afterEach(() => {
 })
 
 function audioBuffer(duration: number) {
-  return { duration, length: Math.round(duration * 24_000) } as AudioBuffer
+  const length = Math.max(1, Math.round(duration * 24_000))
+  const data = new Float32Array(length)
+  return {
+    duration,
+    length,
+    sampleRate: 24_000,
+    numberOfChannels: 1,
+    getChannelData: () => data,
+  } as unknown as AudioBuffer
+}
+
+class FakeHtmlAudio {
+  src = ''
+  currentTime = 0
+  playbackRate = 1
+  preservesPitch = false
+  mozPreservesPitch = false
+  webkitPreservesPitch = false
+  paused = true
+  onended: (() => void) | null = null
+  onerror: (() => void) | null = null
+  preload = 'auto'
+  readonly play = vi.fn(async () => {
+    this.paused = false
+  })
+  readonly pause = vi.fn(() => {
+    this.paused = true
+  })
+  readonly load = vi.fn()
+  readonly removeAttribute = vi.fn()
 }
 
 describe('AudioClock', () => {
@@ -81,6 +110,9 @@ describe('AudioClock', () => {
     expect(first).not.toBeNull()
     expect(second).not.toBeNull()
     expect(contexts[0]?.sources).toHaveLength(2)
+    // Pitch-safe: Web Audio always stays at 1.0
+    expect(contexts[0]!.sources[0].playbackRate.value).toBe(1)
+    expect(contexts[0]!.sources[1].playbackRate.value).toBe(1)
 
     const start0 = contexts[0]!.sources[0].starts[0].when
     const start1 = contexts[0]!.sources[1].starts[0].when
@@ -126,6 +158,30 @@ describe('AudioClock', () => {
 
     clock.setExpectMore(false)
     expect(ended).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses HTMLAudio with preservesPitch for non-1.0 rates (no chipmunk)', async () => {
+    const fake = new FakeHtmlAudio()
+    vi.stubGlobal('Audio', class {
+      constructor() {
+        return fake
+      }
+    })
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:fake'),
+      revokeObjectURL: vi.fn(),
+    })
+
+    const clock = new AudioClock()
+    clock.setRate(1.5)
+    const unit = clock.append(audioBuffer(0.5), { chunkIndex: 0 })
+    expect(unit).not.toBeNull()
+    // No Web Audio buffer sources for sped-up playback
+    expect(contexts).toHaveLength(0)
+    await Promise.resolve()
+    expect(fake.preservesPitch).toBe(true)
+    expect(fake.playbackRate).toBe(1.5)
+    expect(fake.play).toHaveBeenCalled()
   })
 })
 
