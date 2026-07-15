@@ -7,7 +7,6 @@ import { api, request } from '@/shared/api/client'
 import type { RollingCacheState } from '@/shared/storage/rollingVoiceCache'
 import { queuePerformanceTelemetry } from '@/shared/telemetry/performanceTelemetry'
 import {
-  BROWSER_TTS_PROVIDER_ID,
   DEFAULT_PREFETCH_AHEAD,
   PREFETCH_AHEAD_TARGET,
   SILENT_WAV_DATA_URL,
@@ -22,10 +21,6 @@ import {
   type ProvidersResponse,
   type ProviderTestResult,
 } from './audioProviderCatalog'
-import {
-  preferredBrowserSpeechVoice,
-  supportsBrowserSpeech,
-} from './browserSpeech'
 import {
   audioErrorMessage,
   playableAudioUrl,
@@ -82,7 +77,6 @@ export function AudioPreviewPanel({
   const audioObjectUrlsRef = useRef<Set<string>>(new Set())
   const chunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
   const primedAudioRef = useRef<HTMLAudioElement | null>(null)
-  const speechPreviewRef = useRef<SpeechSynthesisUtterance | null>(null)
   rateRef.current = rate
   chunksRef.current = chunks
 
@@ -98,8 +92,6 @@ export function AudioPreviewPanel({
   useEffect(() => () => {
     abortRef.current?.abort()
     audioRef.current?.pause()
-    if (supportsBrowserSpeech()) window.speechSynthesis.cancel()
-    speechPreviewRef.current = null
     primedAudioRef.current = null
     chunkFetchesRef.current.clear()
     revokeAudioObjectUrls()
@@ -111,22 +103,35 @@ export function AudioPreviewPanel({
     staleTime: 5 * 60_000,
   })
   const providerOptions = providerOptionsFromCatalog(providersRes?.providers)
-  const [draftProvider, setDraftProvider] = useState(provider)
+  const initialProvider = providerOptions.some((p) => p.id === provider)
+    ? provider
+    : (providerOptions.find((p) => p.recommended)?.id ?? providerOptions[0]?.id ?? 'kokoro')
+  const [draftProvider, setDraftProvider] = useState(initialProvider)
   const [draftVoice, setDraftVoice] = useState<string | null>(voice)
+
+  // If parent prefs still pointed at a removed provider (browser), snap to Kokoro/Gemini.
+  const draftProviderKnown = providerOptions.some((p) => p.id === draftProvider)
+  useEffect(() => {
+    if (draftProviderKnown) return
+    const next = providerOptions.find((p) => p.recommended)?.id
+      ?? providerOptions[0]?.id
+      ?? 'kokoro'
+    const nextProvider = providerOptions.find((p) => p.id === next)
+    setDraftProvider(next)
+    setDraftVoice(defaultVoiceForProvider(nextProvider))
+  }, [draftProviderKnown, providerOptions])
 
   const activeProvider = providerOptions.find(p => p.id === draftProvider)
   const providerVoices = activeProvider?.voices ?? []
   const selectedProviderUnavailable = Boolean(providersRes?.providers?.length && (!activeProvider || !activeProvider.available))
   const draftVoiceIsAvailable = Boolean(draftVoice && providerVoices.some((item) => item.id === draftVoice))
-  const selectedVoiceId = draftProvider === BROWSER_TTS_PROVIDER_ID
-    ? null
-    : (draftVoiceIsAvailable ? draftVoice : defaultVoiceForProvider(activeProvider))
+  const selectedVoiceId = draftVoiceIsAvailable ? draftVoice : defaultVoiceForProvider(activeProvider)
   const selectedVoiceIndex = providerVoices.findIndex((item) => item.id === selectedVoiceId)
   const appliedVoice = committedVoiceForDraft(draftProvider, selectedVoiceId)
   const committedProviderInfo = providerOptions.find(p => p.id === provider)
   const committedVoiceLabel = committedProviderInfo
     ?.voices.find((item) => item.id === voice)
-    ?.label ?? voice ?? committedProviderInfo?.label ?? 'Browser speech'
+    ?.label ?? voice ?? committedProviderInfo?.label ?? 'Kokoro'
   const hasDraftChanges = audioPreferenceDraftChanged({
     committedProvider: provider,
     committedVoice: voice,
@@ -326,54 +331,6 @@ export function AudioPreviewPanel({
       return
     }
 
-    if (draftProvider === BROWSER_TTS_PROVIDER_ID) {
-      if (!supportsBrowserSpeech()) {
-        const message = 'Browser speech is not supported by this browser.'
-        setErrorMsg(message)
-        onError?.(message)
-        return
-      }
-
-      const utterance = new SpeechSynthesisUtterance(sampleText)
-      const voice = preferredBrowserSpeechVoice()
-      if (voice) utterance.voice = voice
-      utterance.lang = voice?.lang || 'en-US'
-      utterance.rate = Math.max(0.5, Math.min(rateRef.current, 2))
-      utterance.pitch = 1
-      utterance.volume = 1
-      utterance.onstart = () => setPhase('playing')
-      utterance.onend = () => {
-        if (speechPreviewRef.current === utterance) {
-          speechPreviewRef.current = null
-          setPhase('idle')
-        }
-      }
-      utterance.onerror = (event) => {
-        if (event.error === 'interrupted') return
-        speechPreviewRef.current = null
-        setErrorMsg('Browser speech stopped. Tap play to try again.')
-        setPhase('idle')
-      }
-
-      window.speechSynthesis.cancel()
-      speechPreviewRef.current = utterance
-      const initial: AudioChunk[] = [{
-        start: 0,
-        end: sampleText.length,
-        text: sampleText,
-        url: null,
-        buffer: null,
-        status: 'ready',
-      }]
-      setChunks(initial)
-      chunksRef.current = initial
-      setCurIdx(0)
-      curIdxRef.current = 0
-      setPhase('buffering')
-      window.speechSynthesis.speak(utterance)
-      return
-    }
-
     if (!selectedVoiceId) {
       setErrorMsg('Choose a voice to preview.')
       return
@@ -398,8 +355,6 @@ export function AudioPreviewPanel({
   function stopPlayback() {
     abortRef.current?.abort()
     audioRef.current?.pause()
-    if (supportsBrowserSpeech()) window.speechSynthesis.cancel()
-    speechPreviewRef.current = null
     primedAudioRef.current = null
     revokeAudioObjectUrls()
     chunkFetchesRef.current.clear()
@@ -410,19 +365,10 @@ export function AudioPreviewPanel({
 
   function togglePlay() {
     if (phase === 'playing') {
-      if (draftProvider === BROWSER_TTS_PROVIDER_ID && supportsBrowserSpeech()) {
-        window.speechSynthesis.pause()
-      } else {
-        audioRef.current?.pause()
-      }
+      audioRef.current?.pause()
       setPhase('paused')
     } else if (phase === 'paused') {
       setErrorMsg(null)
-      if (draftProvider === BROWSER_TTS_PROVIDER_ID && supportsBrowserSpeech()) {
-        window.speechSynthesis.resume()
-        setPhase('playing')
-        return
-      }
       const audio = audioRef.current
       if (!audio) return
       audio.muted = false
@@ -433,7 +379,7 @@ export function AudioPreviewPanel({
           setPhase('paused')
         })
     } else if (phase === 'idle') {
-      if (draftProvider !== BROWSER_TTS_PROVIDER_ID) primeAudioElement()
+      primeAudioElement()
       void startPlayback()
     }
   }
@@ -442,7 +388,7 @@ export function AudioPreviewPanel({
   const isBuffering = phase === 'buffering'
   const isPlaying = phase === 'playing'
   const isPaused = phase === 'paused'
-  const playDisabled = isBuffering || selectedProviderUnavailable || (draftProvider !== BROWSER_TTS_PROVIDER_ID && !selectedVoiceId)
+  const playDisabled = isBuffering || selectedProviderUnavailable || !selectedVoiceId
 
   const totalChunks = chunks.length
   const readyChunks = chunks.filter(c => c.status === 'ready').length

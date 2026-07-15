@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Layers, LayoutGrid, AlignLeft, ChevronDown, ChevronUp } from 'lucide-react'
 import { api } from '@/shared/api/client'
+import { lookupWordDefinition } from '@/shared/storage/dictionaryLookup'
+import { isUsableDefinition } from '@/features/studio/vocabUtils'
 
 type CardState = 'new' | 'learning' | 'review' | 'relearning'
 type Layout = 'grid' | 'list'
@@ -12,6 +14,8 @@ interface DeckSummary {
   id: string
   title: string
   dueNow: number
+  noteCount?: number
+  cardCount?: number
 }
 
 interface VocabNoteCard {
@@ -124,8 +128,17 @@ function StagePill({ state }: { state: CardState }) {
   )
 }
 
-function WordCard({ note }: { note: VocabNote }) {
-  const def = note.back ?? note.explanation ?? note.extra
+function displayDefinition(note: VocabNote): string | null {
+  for (const candidate of [note.back, note.explanation, note.extra]) {
+    if (!candidate) continue
+    if (candidate.startsWith('/')) continue // phonetic
+    if (isUsableDefinition(candidate, note.front)) return candidate.trim()
+  }
+  return null
+}
+
+function WordCard({ note, lookingUp }: { note: VocabNote; lookingUp?: boolean }) {
+  const def = displayDefinition(note)
   const phonetic = note.extra && note.extra.startsWith('/') ? note.extra : null
   const state = noteState(note)
   const due = isDue(note)
@@ -168,12 +181,18 @@ function WordCard({ note }: { note: VocabNote }) {
         <StageRing state={state} due={due} />
       </div>
 
-      {/* Definition */}
-      {def && (
-        <p style={{ fontSize: 13.5, color: '#374151', lineHeight: 1.6, margin: 0 }}
-           className="line-clamp-3"
-        >
+      {/* Definition — always reserve space so Practice-ready cards are obvious */}
+      {def ? (
+        <p style={{ fontSize: 13.5, color: '#374151', lineHeight: 1.6, margin: 0 }} className="line-clamp-3">
           {def}
+        </p>
+      ) : lookingUp ? (
+        <p style={{ fontSize: 12.5, color: '#9ca3af', lineHeight: 1.5, margin: 0, fontStyle: 'italic' }}>
+          Looking up definition…
+        </p>
+      ) : (
+        <p style={{ fontSize: 12.5, color: '#d97706', lineHeight: 1.5, margin: 0 }}>
+          No definition yet — will fill in automatically
         </p>
       )}
 
@@ -207,13 +226,15 @@ function WordRow({
   expanded,
   onToggle,
   isLast,
+  lookingUp,
 }: {
   note: VocabNote
   expanded: boolean
   onToggle: () => void
   isLast: boolean
+  lookingUp?: boolean
 }) {
-  const def = note.back ?? note.explanation ?? note.extra
+  const def = displayDefinition(note)
   const state = noteState(note)
   return (
     <div
@@ -236,7 +257,13 @@ function WordRow({
       </button>
       {expanded && (
         <div className="px-4 pb-3 space-y-1">
-          {def && <p className="text-[13px] text-[#9b9a97] leading-[1.6]">{def}</p>}
+          {def ? (
+            <p className="text-[13px] text-[#9b9a97] leading-[1.6]">{def}</p>
+          ) : lookingUp ? (
+            <p className="text-[12.5px] text-[#9b9a97] italic">Looking up definition…</p>
+          ) : (
+            <p className="text-[12.5px] text-amber-600">No definition yet</p>
+          )}
           {note.topic && <p className="text-[11px] text-[#9b9a97]/60">{note.topic}</p>}
         </div>
       )}
@@ -280,37 +307,97 @@ export function VocabularyRoute() {
     enabled: Boolean(deck?.id),
   })
 
-  // Silently upgrade any notes whose definition came from WordNet
+  // Backfill missing / unusable definitions so cards are Practice-ready.
+  const attemptedBackfillRef = useRef(new Set<string>())
+  const [lookingUpIds, setLookingUpIds] = useState<Set<string>>(() => new Set())
+
   useEffect(() => {
     if (!dashboard?.notes || !deck?.id) return
-    const stale = dashboard.notes.filter(
-      (n) => n.metadata?.dictionarySource === 'Open English WordNet' || n.back === 'Saved from reading',
-    )
+    const stale = dashboard.notes.filter((n) => {
+      if (attemptedBackfillRef.current.has(n.id)) return false
+      return !isUsableDefinition(n.back, n.front)
+        && !isUsableDefinition(n.explanation, n.front)
+    })
     if (stale.length === 0) return
-    let refreshed = 0
+
+    let cancelled = false
     const refresh = async () => {
+      setLookingUpIds((prev) => {
+        const next = new Set(prev)
+        for (const n of stale) next.add(n.id)
+        return next
+      })
+
+      let refreshed = 0
       for (const note of stale) {
+        if (cancelled) return
+        attemptedBackfillRef.current.add(note.id)
         try {
-          await api.post(`/api/vocabulary/notes/${note.id}/refresh-definition`, {})
+          const hit = await lookupWordDefinition(note.front)
+          if (!hit || !isUsableDefinition(hit.definition, note.front)) continue
+
+          await api.post(`/api/vocabulary/decks/${deck.id}/notes`, {
+            noteType: 'basic',
+            front: note.front,
+            back: hit.definition,
+            extra: hit.pronunciation ?? note.extra,
+            exampleSentence: hit.example,
+            topic: note.topic ?? 'Reading',
+            metadata: {
+              ...(note.metadata ?? {}),
+              dictionarySource: hit.source === 'online' ? 'free-dictionary' : 'local-seed',
+              bookId: note.sourceBookId,
+            },
+          })
+
+          // Optimistic UI update so cards show defs immediately.
+          queryClient.setQueryData<DeckDashboard>(['deck-dashboard', deck.id], (prev) => {
+            if (!prev) return prev
+            return {
+              ...prev,
+              notes: prev.notes.map((n) => (
+                n.id === note.id
+                  ? {
+                      ...n,
+                      back: hit.definition,
+                      extra: hit.pronunciation ?? n.extra,
+                      metadata: {
+                        ...(n.metadata ?? {}),
+                        dictionarySource: hit.source === 'online' ? 'free-dictionary' : 'local-seed',
+                      },
+                    }
+                  : n
+              )),
+            }
+          })
           refreshed++
         } catch { /* ignore individual failures */ }
+        finally {
+          if (!cancelled) {
+            setLookingUpIds((prev) => {
+              const next = new Set(prev)
+              next.delete(note.id)
+              return next
+            })
+          }
+        }
       }
-      if (refreshed > 0) {
+
+      if (!cancelled && refreshed > 0) {
         queryClient.invalidateQueries({ queryKey: ['deck-dashboard', deck.id] })
+        queryClient.invalidateQueries({ queryKey: ['decks'] })
       }
     }
-    refresh()
-  }, [dashboard?.notes?.length, deck?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+    void refresh()
+    return () => { cancelled = true }
+  }, [dashboard?.notes, deck?.id, queryClient])
 
   const isLoading = decksLoading || (Boolean(deck) && dashLoading)
   const words = (dashboard?.notes ?? []).filter(
     (n) => n.front.trim().split(/\s+/).length === 1,
   )
-
-  const retention = dashboard?.analytics?.rollingRetention7d
-  const retentionLabel = retention != null ? `${Math.round(retention * 100)}%` : '—'
-  const streak = dashboard?.analytics?.studyStreak
-  const streakLabel = streak && streak > 0 ? `${streak} days 🔥` : '—'
+  const readyCount = words.filter((w) => displayDefinition(w)).length
+  const missingDefs = words.length - readyCount
 
   const filtered = words.filter((w) => {
     if (search && !w.front.toLowerCase().includes(search.toLowerCase())) return false
@@ -332,7 +419,10 @@ export function VocabularyRoute() {
           <div>
             <h1 className="text-[22px] font-semibold text-foreground tracking-tight">Vocabulary</h1>
             <p className="text-[13px] text-muted-foreground mt-1">
-              {deck ? `${words.length} words saved · ${deck.dueNow} due for review` : 'Saved words from reading'}
+              {deck
+                ? `${words.length} word${words.length === 1 ? '' : 's'} · ${readyCount} ready · ${deck.dueNow} due`
+                : 'Saved words from reading'}
+              {missingDefs > 0 && lookingUpIds.size > 0 ? ' · filling definitions…' : ''}
             </p>
           </div>
           <Link to="/studio">
@@ -346,8 +436,8 @@ export function VocabularyRoute() {
         <div className="grid grid-cols-3 gap-3 mb-5">
           {[
             { label: 'Total words',   value: words.length || '—' },
-            { label: 'Avg retention', value: retentionLabel },
-            { label: 'Study streak',  value: streakLabel },
+            { label: 'With definition', value: readyCount || '—' },
+            { label: 'Due to practice', value: deck?.dueNow ?? '—' },
           ].map((s, i) => (
             <div key={i} className="p-4 rounded-[12px] border border-border bg-white">
               <div className="text-[22px] font-bold text-foreground mb-0.5">{s.value}</div>
@@ -424,7 +514,9 @@ export function VocabularyRoute() {
           <p className="text-[13px] text-muted-foreground py-8 text-center">No words match your filters.</p>
         ) : layout === 'grid' ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 items-start">
-            {filtered.map((w) => <WordCard key={w.id} note={w} />)}
+            {filtered.map((w) => (
+              <WordCard key={w.id} note={w} lookingUp={lookingUpIds.has(w.id)} />
+            ))}
           </div>
         ) : (
           <div className="border border-[#e9e9e7] rounded-[12px] overflow-hidden bg-white">
@@ -432,6 +524,7 @@ export function VocabularyRoute() {
               <WordRow
                 key={w.id}
                 note={w}
+                lookingUp={lookingUpIds.has(w.id)}
                 expanded={expanded === w.id}
                 onToggle={() => setExpanded(expanded === w.id ? null : w.id)}
                 isLast={i === filtered.length - 1}

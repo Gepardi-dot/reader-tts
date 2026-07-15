@@ -1,8 +1,8 @@
 import { BROWSER_TTS_PROVIDER_ID, committedVoiceForDraft } from './audioPlayback'
-import { defaultVoiceForProvider, type TtsProviderInfo } from './audioProviderCatalog'
+import { DEFAULT_TTS_PROVIDER_ID, defaultVoiceForProvider, type TtsProviderInfo } from './audioProviderCatalog'
 
 export const AUDIO_PREFS_KEY = 'reader-audio-prefs'
-export const AUDIO_PREFS_VERSION = 3
+export const AUDIO_PREFS_VERSION = 4
 
 export interface AudioPrefs {
   provider: string
@@ -17,7 +17,7 @@ export interface AudioSelection {
 }
 
 const DEFAULT_AUDIO_PREFS: AudioPrefs = {
-  provider: BROWSER_TTS_PROVIDER_ID,
+  provider: DEFAULT_TTS_PROVIDER_ID,
   voice: null,
   voicesByProvider: {},
   version: AUDIO_PREFS_VERSION,
@@ -41,51 +41,54 @@ function normalizedVoiceMap(value: unknown): Record<string, string | null> {
   return out
 }
 
+function normalizeProviderId(value: unknown): string {
+  const raw = typeof value === 'string' && value ? value : DEFAULT_TTS_PROVIDER_ID
+  // Browser speech was removed — migrate anyone still on it to Kokoro.
+  if (raw === BROWSER_TTS_PROVIDER_ID || raw === 'browser') return DEFAULT_TTS_PROVIDER_ID
+  if (raw === 'kokoro' || raw === 'google') return raw
+  return DEFAULT_TTS_PROVIDER_ID
+}
+
 export function loadAudioPrefs(): AudioPrefs {
   try {
     const raw = storage()?.getItem(AUDIO_PREFS_KEY)
-    if (!raw) return DEFAULT_AUDIO_PREFS
+    if (!raw) return { ...DEFAULT_AUDIO_PREFS }
     const parsed = JSON.parse(raw) as Partial<AudioPrefs>
-    const provider = typeof parsed.provider === 'string' && parsed.provider
-      ? parsed.provider
-      : DEFAULT_AUDIO_PREFS.provider
-    const voice = provider === BROWSER_TTS_PROVIDER_ID
-      ? null
-      : normalizedVoice(parsed.voice)
+    const provider = normalizeProviderId(parsed.provider)
     const voicesByProvider = normalizedVoiceMap(parsed.voicesByProvider)
-
-    if (provider !== BROWSER_TTS_PROVIDER_ID) {
-      voicesByProvider[provider] = voice
-    }
+    const voice = normalizedVoice(parsed.voice)
+    if (voice) voicesByProvider[provider] = voice
 
     return {
       provider,
-      voice,
+      voice: voicesByProvider[provider] ?? voice,
       voicesByProvider,
       version: AUDIO_PREFS_VERSION,
     }
   } catch {
-    return DEFAULT_AUDIO_PREFS
+    return { ...DEFAULT_AUDIO_PREFS }
   }
 }
 
 export function saveAudioPrefs(prefs: AudioPrefs): void {
+  const provider = normalizeProviderId(prefs.provider)
   storage()?.setItem(AUDIO_PREFS_KEY, JSON.stringify({
-    provider: prefs.provider,
-    voice: committedVoiceForDraft(prefs.provider, prefs.voice),
+    provider,
+    voice: committedVoiceForDraft(provider, prefs.voice),
     voicesByProvider: prefs.voicesByProvider,
     version: AUDIO_PREFS_VERSION,
   }))
 }
 
 export function audioPrefsWithSelection(prefs: AudioPrefs, selection: AudioSelection): AudioPrefs {
-  const voice = committedVoiceForDraft(selection.provider, selection.voice)
+  const provider = normalizeProviderId(selection.provider)
+  const voice = committedVoiceForDraft(provider, selection.voice)
   return {
-    provider: selection.provider,
+    provider,
     voice,
     voicesByProvider: {
       ...prefs.voicesByProvider,
-      [selection.provider]: voice,
+      [provider]: voice,
     },
     version: AUDIO_PREFS_VERSION,
   }
@@ -96,12 +99,10 @@ export function resolvedVoiceForProvider(
   provider: Pick<TtsProviderInfo, 'voices' | 'defaultVoice'> | undefined,
   prefs: AudioPrefs,
 ): string | null {
-  if (providerId === BROWSER_TTS_PROVIDER_ID) return null
-
-  const remembered = prefs.voicesByProvider[providerId] ?? (prefs.provider === providerId ? prefs.voice : null)
+  const id = normalizeProviderId(providerId)
+  const remembered = prefs.voicesByProvider[id] ?? (prefs.provider === id ? prefs.voice : null)
   if (!provider) return remembered
   if (remembered && provider.voices.some((voice) => voice.id === remembered)) return remembered
 
   return defaultVoiceForProvider(provider)
 }
-

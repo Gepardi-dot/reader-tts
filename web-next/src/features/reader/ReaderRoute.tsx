@@ -40,14 +40,13 @@ import {
   pacingFor,
 } from './audioPlayback'
 import {
-  preferredBrowserSpeechVoice,
   primeBrowserSpeechVoices,
-  supportsBrowserSpeech,
 } from './browserSpeech'
+import { speakStudioText } from '@/features/studio/studioVoice'
 import { AudioPreviewPanel } from './AudioPreviewPanel'
 import {
+  normalizeTtsProviders,
   pickFallbackProvider,
-  withBrowserProvider,
   type ProvidersResponse,
 } from './audioProviderCatalog'
 import {
@@ -155,6 +154,54 @@ const HIGHLIGHT_COLORS = [
   { id: 'sky'   as const, hex: '#38bdf8', label: 'Blue'   },
 ]
 
+const HIGHLIGHT_BG: Record<'amber' | 'rose' | 'sky', string> = {
+  amber: 'rgba(251, 191, 36, 0.40)',
+  rose:  'rgba(251, 113, 133, 0.34)',
+  sky:   'rgba(56, 189, 248, 0.34)',
+}
+
+type ReaderHighlight = ReaderPayload['highlights'][number]
+
+function firstDictionaryDefinition(payload: DictionaryResponse | null | undefined): {
+  term: string
+  definition: string | null
+  pronunciation: string | null
+  example: string | null
+} {
+  const term = (payload?.term ?? '').trim()
+  const entries = payload?.entries ?? []
+  for (const entry of entries) {
+    for (const def of entry.definitions ?? []) {
+      if (def.definition?.trim()) {
+        return {
+          term: term || '',
+          definition: def.definition.trim(),
+          pronunciation: payload?.pronunciation ?? null,
+          example: def.examples?.find((ex) => ex.trim())?.trim() ?? null,
+        }
+      }
+    }
+  }
+  return {
+    term: term || '',
+    definition: null,
+    pronunciation: payload?.pronunciation ?? null,
+    example: null,
+  }
+}
+
+function appendReaderHighlight(
+  payload: ReaderPayload | undefined,
+  highlight: ReaderHighlight,
+): ReaderPayload | undefined {
+  if (!payload) return payload
+  if (payload.highlights.some((h) => h.id === highlight.id)) return payload
+  return {
+    ...payload,
+    highlights: [...payload.highlights, highlight].sort((a, b) => a.start - b.start),
+  }
+}
+
 const APPEARANCE_KEY  = 'reader-appearance'
 const PROGRESS_KEY    = 'storybook-reader-progress'
 
@@ -166,8 +213,11 @@ function aiErrorMessage(error: unknown, fallback = 'Something went wrong.') {
   if (/Authentication required|Unauthorized|Session expired/i.test(message)) {
     return 'Your session expired. Sign in again, then try again.'
   }
-  if (/AI service is not configured|not configured|configured yet/i.test(message)) {
-    return 'AI is not available on this server right now.'
+  if (/AI service is not configured|not configured|configured yet|GEMINI_API_KEY/i.test(message)) {
+    return 'AI is not configured yet. Add GEMINI_API_KEY to the worker.'
+  }
+  if (/quota|rate limit|429/i.test(message)) {
+    return 'Gemini quota exceeded. Wait a minute or check billing / free-tier limits.'
   }
   if (/Failed to fetch|NetworkError|fetch|timeout/i.test(message)) {
     return 'Could not reach the AI service. Check the connection and try again.'
@@ -201,9 +251,50 @@ function toBionicNodes(text: string): ReactNode[] {
   })
 }
 
+function splitParagraphByHighlights(
+  text: string,
+  paragraphStart: number,
+  highlights: ReaderHighlight[],
+): Array<{ text: string; color: 'amber' | 'rose' | 'sky' | null; key: string }> {
+  const paraEnd = paragraphStart + text.length
+  const ranges = highlights
+    .filter((h) => h.end > paragraphStart && h.start < paraEnd)
+    .map((h) => ({
+      id: h.id,
+      color: (h.color === 'rose' || h.color === 'sky' ? h.color : 'amber') as 'amber' | 'rose' | 'sky',
+      start: Math.max(0, h.start - paragraphStart),
+      end: Math.min(text.length, h.end - paragraphStart),
+    }))
+    .filter((h) => h.end > h.start)
+    .sort((a, b) => a.start - b.start || a.end - b.end)
+
+  if (ranges.length === 0) return [{ text, color: null, key: 'plain' }]
+
+  const parts: Array<{ text: string; color: 'amber' | 'rose' | 'sky' | null; key: string }> = []
+  let cursor = 0
+  for (const range of ranges) {
+    const start = Math.max(cursor, range.start)
+    if (start > cursor) {
+      parts.push({ text: text.slice(cursor, start), color: null, key: `t-${cursor}` })
+    }
+    if (range.end > start) {
+      parts.push({
+        text: text.slice(start, range.end),
+        color: range.color,
+        key: `h-${range.id}-${start}`,
+      })
+      cursor = range.end
+    }
+  }
+  if (cursor < text.length) {
+    parts.push({ text: text.slice(cursor), color: null, key: `t-${cursor}` })
+  }
+  return parts
+}
+
 // Paragraph list, isolated from the parent's frequent state updates (audio ticks, scroll %, etc).
 // React.memo means audio/scroll re-renders skip the entire paragraph subtree as long as
-// `paragraphs` and `bionicNodes` keep stable references (both are useMemo-backed in the parent).
+// `paragraphs` / `bionic` / `highlights` keep stable references.
 //
 // `content-visibility: auto` is the actual heavy-lift fix for bionic mode: the browser skips
 // layout AND paint for paragraphs that are far from the viewport and treats them as
@@ -213,22 +304,46 @@ function toBionicNodes(text: string): ReactNode[] {
 // each paragraph's measured size after first render so the scrollbar stops jumping.
 const ReaderParagraphs = memo(function ReaderParagraphs({
   paragraphs,
-  bionicNodes,
+  bionic,
+  highlights,
 }: {
   paragraphs: ReaderParagraph[]
-  bionicNodes: ReactNode[][] | null
+  bionic: boolean
+  highlights: ReaderHighlight[]
 }) {
   return (
     <>
-      {paragraphs.map((p, i) => (
-        <p
-          key={`${p.startOffset}-${i}`}
-          className="mb-[1.4em] [content-visibility:auto] [contain-intrinsic-size:auto_6em]"
-          data-reader-paragraph-start={p.startOffset}
-        >
-          {bionicNodes ? bionicNodes[i] : p.text}
-        </p>
-      ))}
+      {paragraphs.map((p, i) => {
+        const parts = splitParagraphByHighlights(p.text, p.startOffset, highlights)
+        return (
+          <p
+            key={`${p.startOffset}-${i}`}
+            className="mb-[1.4em] [content-visibility:auto] [contain-intrinsic-size:auto_6em]"
+            data-reader-paragraph-start={p.startOffset}
+          >
+            {parts.map((part) => {
+              const content = bionic ? toBionicNodes(part.text) : part.text
+              if (!part.color) {
+                return <span key={part.key}>{content}</span>
+              }
+              return (
+                <mark
+                  key={part.key}
+                  data-reader-highlight="true"
+                  style={{
+                    backgroundColor: HIGHLIGHT_BG[part.color],
+                    color: 'inherit',
+                    borderRadius: 2,
+                    padding: '0 0.04em',
+                  }}
+                >
+                  {content}
+                </mark>
+              )
+            })}
+          </p>
+        )
+      })}
     </>
   )
 })
@@ -658,24 +773,32 @@ function SelectionMenu({
           if (!deckId) { onToast('No vocabulary deck'); break }
           const contextStart = Math.max(0, sel.startOffset - 140)
           const contextEnd = Math.min(fullText.length, sel.endOffset + 140)
+          const context = fullText.slice(contextStart, contextEnd)
+          // Resolve definition so Vocabulary / Studio show a real answer card.
+          const dict = await fetchClientDictionary(sel.text).catch(() => null)
+          const resolved = firstDictionaryDefinition(dict as DictionaryResponse | null)
+          const front = (resolved.term || sel.text).trim()
           await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
             noteType: 'basic',
-            front: sel.text,
-            back: null,
+            front,
+            back: resolved.definition,
+            extra: resolved.pronunciation,
+            exampleSentence: resolved.example,
             topic: 'Reading',
             tags: ['reader'],
-            sourceRef: `reader-vocab:${sel.text.trim().toLocaleLowerCase()}`,
+            sourceRef: `reader-vocab:${front.toLowerCase()}`,
             metadata: {
               source: 'reader-selection',
               bookId,
               start: sel.startOffset,
               end: sel.endOffset,
-              context: fullText.slice(contextStart, contextEnd),
+              context,
+              dictionarySource: resolved.definition ? 'dictionary' : null,
             },
           })
           queryClient.invalidateQueries({ queryKey: ['decks'] })
           queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
-          onToast('Saved to Vocabulary ✓')
+          onToast(resolved.definition ? 'Saved to Vocabulary ✓' : 'Saved (no definition found)')
         } catch (err) {
           console.error('Vocabulary save failed', err)
           if (err instanceof AuthError) {
@@ -734,15 +857,30 @@ function SelectionMenu({
   async function handleColor(colorId: 'amber' | 'rose' | 'sky') {
     setBusyColor(colorId)
     try {
-      await api.post(`/api/books/${bookId}/highlights`, {
+      const created = await api.post<ReaderHighlight>(`/api/books/${bookId}/highlights`, {
         start: sel.startOffset, end: sel.endOffset,
         color: colorId, kind: 'highlight', text: sel.text, note: null,
       })
+      queryClient.setQueryData<ReaderPayload>(['reader', bookId], (prev) =>
+        appendReaderHighlight(prev, {
+          id: created.id,
+          start: created.start,
+          end: created.end,
+          color: (created.color === 'rose' || created.color === 'sky' ? created.color : colorId),
+          text: created.text,
+          note: created.note ?? null,
+          kind: created.kind === 'note' || created.kind === 'vocabulary' ? created.kind : 'highlight',
+        }),
+      )
       queryClient.invalidateQueries({ queryKey: ['highlights', bookId] })
       queryClient.invalidateQueries({ queryKey: ['reader', bookId] })
       queryClient.invalidateQueries({ queryKey: ['books'] })
       onToast('Highlighted ✓')
-    } catch { onToast('Could not highlight') }
+    } catch (err) {
+      console.error('Highlight save failed', err)
+      if (err instanceof AuthError) onToast('Sign in to highlight')
+      else onToast('Could not highlight')
+    }
     setBusyColor(null)
     onClose()
   }
@@ -848,7 +986,39 @@ interface DisplayData {
 const DICTIONARY_STALE_TIME_MS = 5 * 60_000
 
 function normalizeLookupWord(value: string) {
-  return value.trim().toLowerCase()
+  return value
+    .trim()
+    .toLowerCase()
+    // strip wrapping quotes / punctuation commonly selected with words
+    .replace(/^[\s"'“”‘’(\[{«]+/, '')
+    .replace(/[\s"'“”‘’)\]},.;:!?»]+$/g, '')
+    .replace(/[’']/g, "'")
+}
+
+/** Candidate headwords to try when the exact form is missing (masters → master). */
+function dictionaryLookupVariants(term: string): string[] {
+  const base = normalizeLookupWord(term)
+  if (!base) return []
+  const out: string[] = [base]
+  const push = (v: string) => {
+    const t = normalizeLookupWord(v)
+    if (t && t.length >= 2 && !out.includes(t)) out.push(t)
+  }
+  if (base.endsWith("'s")) push(base.slice(0, -2))
+  if (base.endsWith('ies') && base.length > 4) push(`${base.slice(0, -3)}y`)
+  if (base.endsWith('ves') && base.length > 4) push(`${base.slice(0, -3)}f`)
+  if (base.endsWith('ing') && base.length > 5) {
+    push(base.slice(0, -3))
+    push(`${base.slice(0, -3)}e`)
+  }
+  if (base.endsWith('ed') && base.length > 4) {
+    push(base.slice(0, -2))
+    push(base.slice(0, -1))
+  }
+  if (base.endsWith('es') && base.length > 3) push(base.slice(0, -2))
+  if (base.endsWith('s') && !base.endsWith('ss') && base.length > 3) push(base.slice(0, -1))
+  if (base.endsWith('ly') && base.length > 4) push(base.slice(0, -2))
+  return out
 }
 
 function dictionaryQueryKey(word: string) {
@@ -856,104 +1026,166 @@ function dictionaryQueryKey(word: string) {
 }
 
 function fetchOfflineDictionary(word: string) {
-  return api.get<DictResponse>(`/api/dictionary/lookup?term=${encodeURIComponent(normalizeLookupWord(word))}`)
+  return api.get<DictResponse | FreeEntry[] | FreeEntry>(
+    `/api/dictionary/lookup?term=${encodeURIComponent(normalizeLookupWord(word))}`,
+  )
 }
 
 function dictionaryHasDefinitions(payload: DictResponse | null | undefined) {
   return hasDictionaryDefinitions(payload as DictionaryResponse | null)
 }
 
-/**
- * Instant-first dictionary resolve:
- * 1) memory/seed/IDB (no network)
- * 2) free dictionary API + backend API in parallel — first with defs wins
- */
-async function fetchClientDictionary(word: string): Promise<DictResponse> {
-  const normalized = normalizeLookupWord(word)
-  await ensureDictionarySeed()
+/** Accept both our DictResponse shape and raw Free Dictionary API payloads. */
+function coerceDictionaryPayload(raw: unknown, fallbackTerm: string): DictResponse | null {
+  if (!raw || typeof raw !== 'object') return null
 
-  const local = await resolveLocalDictionary(normalized)
-  if (dictionaryHasDefinitions(local)) {
-    return local as DictResponse
-  }
-
-  // Race network sources so a slow backend doesn't block Free Dictionary.
-  const freePromise = (async (): Promise<DictResponse | null> => {
-    try {
-      const r = await fetch(
-        `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(normalized)}`,
-        { signal: AbortSignal.timeout(5000) },
-      )
-      if (!r.ok) return null
-      const j = await r.json()
-      if (!Array.isArray(j) || !j[0]) return null
-      const fe = j[0] as FreeEntry
-      const payload: DictResponse = {
-        term: fe.word || normalized,
+  // Already normalized worker/client shape
+  const asDict = raw as DictResponse
+  if (Array.isArray(asDict.entries)) {
+    if (dictionaryHasDefinitions(asDict)) {
+      return {
+        ...asDict,
+        term: asDict.term || fallbackTerm,
         available: true,
         message: null,
-        pronunciation: fe.phonetic ?? null,
-        entries: fe.meanings.slice(0, 4).map((m) => ({
-          partOfSpeech: m.partOfSpeech,
-          definitions: m.definitions.slice(0, 4).map((d) => ({
-            definition: d.definition,
-            examples: d.example ? [d.example] : [],
-            synonyms: [...(d.synonyms ?? []), ...(m.synonyms ?? [])].slice(0, 6),
-          })),
-        })),
-        relatedTerms: [],
+        pronunciation: asDict.pronunciation ?? null,
+        relatedTerms: asDict.relatedTerms ?? [],
       }
-      return dictionaryHasDefinitions(payload) ? payload : null
-    } catch {
-      return null
     }
-  })()
-
-  const backendPromise = fetchOfflineDictionary(normalized).catch(() => null)
-
-  const [free, backend] = await Promise.all([freePromise, backendPromise])
-  const winner = (dictionaryHasDefinitions(backend) ? backend : null)
-    ?? (dictionaryHasDefinitions(free) ? free : null)
-    ?? backend
-    ?? free
-    ?? local
-    ?? {
-      term: normalized,
-      available: false,
-      message: 'No definition found.',
-      pronunciation: null,
-      entries: [],
-      relatedTerms: [],
-    }
-
-  if (dictionaryHasDefinitions(winner)) {
-    void putCachedDictionary(normalized, winner as DictionaryResponse)
+    return null
   }
-  return winner as DictResponse
+
+  // Raw Free Dictionary: [{ word, meanings, phonetic }]
+  const rows = Array.isArray(raw) ? raw : [raw]
+  const fe = rows[0] as FreeEntry | undefined
+  if (!fe?.meanings?.length) return null
+
+  const payload: DictResponse = {
+    term: fe.word || fallbackTerm,
+    available: true,
+    message: null,
+    pronunciation: fe.phonetic ?? null,
+    entries: fe.meanings.slice(0, 5).map((m) => ({
+      partOfSpeech: m.partOfSpeech,
+      definitions: (m.definitions ?? []).slice(0, 5).map((d) => ({
+        definition: d.definition,
+        examples: d.example ? [d.example] : [],
+        synonyms: [...(d.synonyms ?? []), ...(m.synonyms ?? [])].slice(0, 8),
+      })),
+    })),
+    relatedTerms: [],
+  }
+  return dictionaryHasDefinitions(payload) ? payload : null
+}
+
+async function fetchFreeDictionary(term: string): Promise<DictResponse | null> {
+  try {
+    const r = await fetch(
+      `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`,
+      { signal: AbortSignal.timeout(7000) },
+    )
+    if (!r.ok) return null
+    return coerceDictionaryPayload(await r.json(), term)
+  } catch {
+    return null
+  }
+}
+
+async function fetchBackendDictionary(term: string): Promise<DictResponse | null> {
+  try {
+    const raw = await fetchOfflineDictionary(term)
+    return coerceDictionaryPayload(raw, term)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Instant-first dictionary resolve with strong fallbacks:
+ * 1) memory/seed/IDB
+ * 2) Free Dictionary + worker proxy (normalized)
+ * 3) lemma variants (masters → master)
+ * Never cache empty misses for long — UI can retry.
+ */
+async function fetchClientDictionary(word: string): Promise<DictResponse> {
+  const variants = dictionaryLookupVariants(word)
+  const primary = variants[0] || normalizeLookupWord(word) || word.trim().toLowerCase()
+  await ensureDictionarySeed()
+
+  for (const candidate of variants) {
+    const local = await resolveLocalDictionary(candidate)
+    if (dictionaryHasDefinitions(local)) {
+      const hit = local as DictResponse
+      // Also remember under the original typed form.
+      if (candidate !== primary) void putCachedDictionary(primary, hit as DictionaryResponse)
+      return { ...hit, term: hit.term || primary }
+    }
+  }
+
+  for (const candidate of variants) {
+    // Prefer worker proxy (handles CORS + Gemini last resort) in parallel with direct free dict.
+    const [free, backend] = await Promise.all([
+      fetchFreeDictionary(candidate),
+      fetchBackendDictionary(candidate),
+    ])
+    const winner = (dictionaryHasDefinitions(backend) ? backend : null)
+      ?? (dictionaryHasDefinitions(free) ? free : null)
+    if (winner) {
+      void putCachedDictionary(candidate, winner as DictionaryResponse)
+      void putCachedDictionary(primary, winner as DictionaryResponse)
+      return { ...winner, term: winner.term || primary, available: true }
+    }
+  }
+
+  // Soft empty — short-lived so the next open retries network/Gemini.
+  return {
+    term: primary,
+    available: false,
+    message: 'No definition found.',
+    pronunciation: null,
+    entries: [],
+    relatedTerms: [],
+  }
 }
 
 // ── Dictionary Panel ──────────────────────────────────────────────────────────
 
-function DictionaryPanel({ word: initialWord, onClose, colors }: {
-  word: string; onClose: () => void; colors: typeof THEMES['paper']
+function DictionaryPanel({ word: initialWord, bookId, onClose, colors }: {
+  word: string
+  bookId?: string
+  onClose: () => void
+  colors: typeof THEMES['paper']
 }) {
   const [lookupWord, setLookupWord] = useState(() => normalizeLookupWord(initialWord) || initialWord)
   const [inputValue, setInputValue] = useState(initialWord)
   const [speaking,   setSpeaking]   = useState(false)
-  const [vocabState, setVocabState] = useState<'idle' | 'busy' | 'saved'>('idle')
+  const [vocabState, setVocabState] = useState<'idle' | 'busy' | 'saved' | 'error'>('idle')
+  const [vocabError, setVocabError] = useState<string | null>(null)
   const queryClient = useQueryClient()
 
   // Single query: local seed/IDB first, then raced network. Prefetch on word
   // selection often means this resolves from React Query cache instantly.
-  const { data: dictData, isLoading, isFetching } = useQuery({
+  const { data: dictData, isLoading, isFetching, refetch } = useQuery({
     queryKey: dictionaryQueryKey(lookupWord),
     queryFn: () => fetchClientDictionary(lookupWord),
+    // Default warm cache; empty results are not written to IDB and expire via gc.
     staleTime: DICTIONARY_STALE_TIME_MS,
-    // Prefer any prefetched data so the panel paints without a flash of empty.
-    placeholderData: (previous) => previous,
-  })
+    gcTime: DICTIONARY_STALE_TIME_MS,
+    retry: 2,
+    retryDelay: 600,
+    })
 
   const hasDefs = dictionaryHasDefinitions(dictData ?? null)
+  const autoRetryRef = useRef<string | null>(null)
+
+  // One automatic retry on a miss (covers transient Free Dict / worker failures).
+  useEffect(() => {
+    if (isLoading || isFetching || hasDefs || !dictData) return
+    if (autoRetryRef.current === lookupWord) return
+    autoRetryRef.current = lookupWord
+    const t = window.setTimeout(() => { void refetch() }, 1200)
+    return () => window.clearTimeout(t)
+  }, [dictData, hasDefs, isFetching, isLoading, lookupWord, refetch])
 
   // Unified DisplayData from the single resolved payload
   const displayData = useMemo((): DisplayData | null => {
@@ -980,20 +1212,18 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
     }
   }, [dictData, hasDefs, lookupWord])
 
-  const showLoading = (isLoading || isFetching) && !displayData
+  // Show skeleton while first load OR while a miss is being re-fetched.
+  const showLoading = (isLoading || isFetching) && !hasDefs
 
-  function speak() {
-    if (!supportsBrowserSpeech()) return
-    window.speechSynthesis.cancel()
-    const utt = new SpeechSynthesisUtterance(displayData?.term ?? lookupWord)
-    const voice = preferredBrowserSpeechVoice()
-    if (voice) utt.voice = voice
-    utt.lang = voice?.lang || 'en-US'
-    utt.rate = 0.88
-    utt.onstart = () => setSpeaking(true)
-    utt.onend   = () => setSpeaking(false)
-    utt.onerror = () => setSpeaking(false)
-    window.speechSynthesis.speak(utt)
+  async function speak() {
+    const term = displayData?.term ?? lookupWord
+    if (!term?.trim()) return
+    setSpeaking(true)
+    try {
+      await speakStudioText(term)
+    } finally {
+      setSpeaking(false)
+    }
   }
 
   function navigate(w: string) {
@@ -1005,26 +1235,51 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
   }
 
   async function saveToVocab() {
-    if (vocabState !== 'idle') return
+    if (vocabState === 'busy' || vocabState === 'saved') return
     setVocabState('busy')
+    setVocabError(null)
     try {
       const deckId = await getOrCreateDeck()
-      if (!deckId) { setVocabState('idle'); return }
-      const firstDef = displayData?.entries?.[0]?.definitions?.[0]?.definition ?? null
+      if (!deckId) {
+        setVocabState('error')
+        setVocabError('Could not open vocabulary deck')
+        return
+      }
+      const resolved = firstDictionaryDefinition({
+        term: displayData?.term ?? lookupWord,
+        available: Boolean(displayData),
+        pronunciation: displayData?.pronunciation ?? null,
+        entries: displayData?.entries ?? [],
+        relatedTerms: displayData?.relatedTerms ?? [],
+      })
+      const front = (resolved.term || lookupWord).trim()
+      const firstExample = displayData?.entries
+        ?.flatMap((e) => e.definitions.flatMap((d) => d.examples))
+        .find((ex) => ex.trim())
+        ?? resolved.example
       await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
         noteType: 'basic',
-        front: displayData?.term ?? lookupWord,
-        back: firstDef,
+        front,
+        back: resolved.definition,
+        extra: resolved.pronunciation,
+        exampleSentence: firstExample,
         topic: 'Reading',
-        tags: ['reader'],
-        sourceRef: `reader-vocab:${(displayData?.term ?? lookupWord).trim().toLowerCase()}`,
-        metadata: { source: 'dictionary' },
+        tags: ['reader', 'dictionary'],
+        sourceRef: `reader-vocab:${front.toLowerCase()}`,
+        metadata: {
+          source: 'dictionary',
+          bookId: bookId ?? null,
+          dictionarySource: displayData?.source ?? null,
+        },
       })
       queryClient.invalidateQueries({ queryKey: ['decks'] })
       queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
       setVocabState('saved')
-    } catch {
-      setVocabState('idle')
+    } catch (err) {
+      console.error('Dictionary vocab save failed', err)
+      setVocabState('error')
+      if (err instanceof AuthError) setVocabError('Sign in to save words')
+      else setVocabError(err instanceof Error ? err.message.slice(0, 80) : 'Could not save word')
     }
   }
 
@@ -1130,28 +1385,51 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
                 </div>
 
                 {/* Right: save to vocabulary */}
-                <button
-                  onClick={() => void saveToVocab()}
-                  aria-label="Save to vocabulary"
-                  disabled={vocabState === 'busy'}
-                  className="flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-full transition-all active:scale-95 mt-1"
-                  style={{
-                    background: vocabState === 'saved' ? '#22c55e18' : `${colors.text}0c`,
-                    color: vocabState === 'saved' ? '#22c55e' : `${colors.text}60`,
-                    border: `1px solid ${vocabState === 'saved' ? '#22c55e33' : `${colors.text}14`}`,
-                    fontSize: 11.5,
-                    fontWeight: 600,
-                    letterSpacing: '0.01em',
-                  }}
-                >
-                  {vocabState === 'busy' ? (
-                    <div className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
-                  ) : vocabState === 'saved' ? (
-                    <span>✓ Saved</span>
-                  ) : (
-                    <><Type size={11} /> Save</>
+                <div className="flex flex-col items-end gap-1 mt-1 shrink-0">
+                  <button
+                    onClick={() => void saveToVocab()}
+                    aria-label="Save to vocabulary"
+                    disabled={vocabState === 'busy' || vocabState === 'saved'}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full transition-all active:scale-95"
+                    style={{
+                      background: vocabState === 'saved'
+                        ? '#22c55e18'
+                        : vocabState === 'error'
+                          ? '#ef444418'
+                          : `${colors.text}0c`,
+                      color: vocabState === 'saved'
+                        ? '#22c55e'
+                        : vocabState === 'error'
+                          ? '#ef4444'
+                          : `${colors.text}60`,
+                      border: `1px solid ${
+                        vocabState === 'saved'
+                          ? '#22c55e33'
+                          : vocabState === 'error'
+                            ? '#ef444433'
+                            : `${colors.text}14`
+                      }`,
+                      fontSize: 11.5,
+                      fontWeight: 600,
+                      letterSpacing: '0.01em',
+                    }}
+                  >
+                    {vocabState === 'busy' ? (
+                      <div className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                    ) : vocabState === 'saved' ? (
+                      <span>✓ Saved</span>
+                    ) : vocabState === 'error' ? (
+                      <span>Retry save</span>
+                    ) : (
+                      <><Type size={11} /> Save</>
+                    )}
+                  </button>
+                  {vocabError && (
+                    <span style={{ fontSize: 10, color: '#ef4444', maxWidth: 140, textAlign: 'right' }}>
+                      {vocabError}
+                    </span>
                   )}
-                </button>
+                </div>
               </div>
             </div>
 
@@ -1241,9 +1519,25 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
 
               {/* No definitions */}
               {displayData.entries.length === 0 && (
-                <p style={{ fontSize: 14, color: `${colors.text}45`, fontStyle: 'italic' }}>
-                  No definition found for this word.
-                </p>
+                <div className="space-y-3">
+                  <p style={{ fontSize: 14, color: `${colors.text}45`, fontStyle: 'italic' }}>
+                    No definition found for this word yet.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void refetch()}
+                    disabled={isFetching}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-full"
+                    style={{
+                      background: `${colors.text}0c`,
+                      color: `${colors.text}70`,
+                      border: `1px solid ${colors.text}14`,
+                      opacity: isFetching ? 0.6 : 1,
+                    }}
+                  >
+                    {isFetching ? 'Looking up…' : 'Try again'}
+                  </button>
+                </div>
               )}
 
               {/* Related terms */}
@@ -1279,9 +1573,24 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
 
         {/* Truly nothing */}
         {!showLoading && !displayData && (
-          <p className="px-5 pt-5 text-sm" style={{ color: `${colors.text}50` }}>
-            No definition found for "{lookupWord}".
-          </p>
+          <div className="px-5 pt-5 space-y-3">
+            <p className="text-sm" style={{ color: `${colors.text}50` }}>
+              No definition found for "{lookupWord}".
+            </p>
+            <button
+              type="button"
+              onClick={() => void refetch()}
+              disabled={isFetching}
+              className="text-xs font-semibold px-3 py-1.5 rounded-full"
+              style={{
+                background: `${colors.text}0c`,
+                color: `${colors.text}70`,
+                border: `1px solid ${colors.text}14`,
+              }}
+            >
+              {isFetching ? 'Looking up…' : 'Try again'}
+            </button>
+          </div>
         )}
       </div>
     </div>
@@ -1298,22 +1607,45 @@ function NotesPanel({ text, start, end, bookId, onClose, colors }: {
   const [color, setColor] = useState<'amber' | 'rose' | 'sky'>('amber')
   const [saving, setSaving] = useState(false)
   const [saved,  setSaved]  = useState(false)
+  const [error,  setError]  = useState<string | null>(null)
   const queryClient = useQueryClient()
 
   async function save() {
+    if (saving || saved) return
     setSaving(true)
+    setError(null)
     try {
-      await api.post(`/api/books/${bookId}/highlights`, {
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !text.trim()) {
+        throw new Error('Invalid selection range for this note.')
+      }
+      const created = await api.post<ReaderHighlight>(`/api/books/${bookId}/highlights`, {
         start, end, color, kind: 'note',
         text: text.slice(0, 800),
         note: note.trim() || null,
       })
+      queryClient.setQueryData<ReaderPayload>(['reader', bookId], (prev) =>
+        appendReaderHighlight(prev, {
+          id: created.id,
+          start: created.start,
+          end: created.end,
+          color: (created.color === 'rose' || created.color === 'sky' ? created.color : color),
+          text: created.text,
+          note: created.note ?? (note.trim() || null),
+          kind: 'note',
+        }),
+      )
       queryClient.invalidateQueries({ queryKey: ['highlights', bookId] })
       queryClient.invalidateQueries({ queryKey: ['reader', bookId] })
       queryClient.invalidateQueries({ queryKey: ['books'] })
       setSaved(true)
+      setSaving(false)
       setTimeout(onClose, 700)
-    } catch { setSaving(false) }
+    } catch (err) {
+      console.error('Note save failed', err)
+      setSaving(false)
+      if (err instanceof AuthError) setError('Sign in to save notes')
+      else setError(err instanceof Error ? err.message.slice(0, 100) : 'Could not save note')
+    }
   }
 
   return (
@@ -1373,13 +1705,16 @@ function NotesPanel({ text, start, end, bookId, onClose, colors }: {
         </div>
 
         {/* Save */}
+        {error && (
+          <p className="text-xs text-red-500 leading-snug">{error}</p>
+        )}
         <button
-          onClick={save}
+          onClick={() => void save()}
           disabled={saving || saved}
           className="w-full py-2.5 rounded-xl text-sm font-semibold text-white transition-all active:scale-[0.98] disabled:opacity-60 mb-2"
-          style={{ backgroundColor: '#2383e2' }}
+          style={{ backgroundColor: saved ? '#22c55e' : '#2383e2' }}
         >
-          {saved ? '✓ Saved' : saving ? 'Saving…' : 'Save Highlight & Note'}
+          {saved ? '✓ Saved' : saving ? 'Saving…' : error ? 'Retry save' : 'Save Highlight & Note'}
         </button>
       </div>
     </div>
@@ -1449,8 +1784,11 @@ async function streamSSE(
         const chunk = JSON.parse(raw) as { delta?: string; error?: string }
         if (chunk.error) throw new Error(chunk.error)
         if (chunk.delta) onDelta(chunk.delta)
-      } catch {
-        // Ignore malformed lines — keep streaming
+      } catch (err) {
+        // Surface explicit stream errors; ignore only malformed payload lines.
+        if (err instanceof Error && err.message && !err.message.includes('JSON')) {
+          throw err
+        }
       }
     }
   }
@@ -2363,13 +2701,18 @@ export function ReaderRoute() {
     queryFn:  () => api.get<ProvidersResponse>('/api/providers'),
     staleTime: 5 * 60_000,
   })
-  const providerCatalog = withBrowserProvider(providersData?.providers)
+  const providerCatalog = normalizeTtsProviders(providersData?.providers)
   const activeProviderInfo = providerCatalog.find(p => p.id === ttsProvider)
   const kokoroProviderAvailable = providerCatalog.some(p => p.id === 'kokoro' && p.available)
   const fallbackProviderInfo = providersData?.providers
     ? pickFallbackProvider(providerCatalog)
     : null
-  const useProviderFallback = Boolean(providersData?.providers && fallbackProviderInfo && (!activeProviderInfo || !activeProviderInfo.available))
+  // Prefer Kokoro by default; only fall back when the selected engine is missing/unavailable.
+  const useProviderFallback = Boolean(
+    providersData?.providers
+    && fallbackProviderInfo
+    && (!activeProviderInfo || !activeProviderInfo.available),
+  )
   const effectiveTtsProvider = useProviderFallback && fallbackProviderInfo ? fallbackProviderInfo.id : ttsProvider
   const selectedTtsVoice = resolvedVoiceForProvider(ttsProvider, activeProviderInfo, audioPrefs)
   const effectiveTtsVoice = useProviderFallback && fallbackProviderInfo
@@ -3010,10 +3353,9 @@ export function ReaderRoute() {
     () => buildReaderParagraphs(payload?.text ?? ''),
     [payload?.text],
   )
-  // Pre-compute bionic nodes once per paragraph set, not on every render.
-  const bionicNodes = useMemo(
-    () => appearance.bionic ? paragraphs.map(p => toBionicNodes(p.text)) : null,
-    [paragraphs, appearance.bionic],
+  const readerHighlights = useMemo(
+    () => (payload?.highlights ?? []).filter((h) => h.end > h.start),
+    [payload?.highlights],
   )
   const readPct = Math.round(scrollPct * 100)
   const activePlayBarPhase = wordAudioPhase
@@ -3165,7 +3507,11 @@ export function ReaderRoute() {
           </div>
         ) : (
           <div ref={readerTextRef} style={{ fontFamily, fontSize: `${appearance.fontSize}px`, lineHeight: appearance.lineHeight, textAlign: appearance.align, color: colors.text, overflowWrap: 'break-word', wordBreak: 'break-word' }}>
-            <ReaderParagraphs paragraphs={paragraphs} bionicNodes={bionicNodes} />
+            <ReaderParagraphs
+              paragraphs={paragraphs}
+              bionic={appearance.bionic}
+              highlights={readerHighlights}
+            />
           </div>
         )}
       </div>
@@ -3254,7 +3600,7 @@ export function ReaderRoute() {
           const p = panel ?? panelSnapshotRef.current
           if (!p) return null
           if (p.kind === 'dictionary') return (
-            <DictionaryPanel word={p.word} onClose={closePanel} colors={colors} />
+            <DictionaryPanel word={p.word} bookId={bookId} onClose={closePanel} colors={colors} />
           )
           if (p.kind === 'notes') return (
             <NotesPanel text={p.text} start={p.start} end={p.end}

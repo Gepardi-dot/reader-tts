@@ -46,6 +46,8 @@ interface Env {
   SESSION_DAYS?: string
   GEMINI_API_KEY?: string
   GEMINI_TTS_MODEL?: string
+  /** Optional chat/text model for reader assistant (defaults to gemini-2.0-flash). */
+  GEMINI_CHAT_MODEL?: string
   /** Base URL of the hosted Kokoro FastAPI server (e.g. https://kokoro-reader.fly.dev). */
   KOKORO_REMOTE_URL?: string
   /** Shared secret matching KOKORO_API_KEY on the Kokoro server. */
@@ -74,6 +76,7 @@ const encoder = new TextEncoder()
 const PASSWORD_ITERATIONS = 100_000
 const DEFAULT_SESSION_DAYS = 30
 const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-preview-tts'
+const GEMINI_CHAT_DEFAULT_MODEL = 'gemini-2.0-flash'
 const GEMINI_SAMPLE_RATE = 24_000
 const KOKORO_SAMPLE_RATE = 24_000
 const KOKORO_DEFAULT_VOICE = 'af_heart'
@@ -170,7 +173,7 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   if (path.startsWith('/api/auth/')) return handleAuth(request, env, path)
   if (path === '/api/providers' && request.method === 'GET') return providers(env)
   if (path === '/api/providers/warmup' && request.method === 'POST') return json({ ok: true })
-  if (path === '/api/dictionary/lookup' && request.method === 'GET') return dictionaryLookup(url)
+  if (path === '/api/dictionary/lookup' && request.method === 'GET') return dictionaryLookup(url, env)
 
   const user = await requireUser(request, env)
 
@@ -183,7 +186,7 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   if (path === '/api/vocabulary/decks' && request.method === 'GET') return listDecks(env, user)
   if (path === '/api/vocabulary/decks' && request.method === 'POST') return createDeck(request, env, user)
   if (path === '/api/vocabulary/learning-summary' && request.method === 'GET') {
-    return json({ streakDays: 0, xpToday: 0, xpThisWeek: 0, dailyGoal: 20, dailyGoalProgress: 0 })
+    return learningSummary(env, user)
   }
 
   const bookMatch = path.match(/^\/api\/books\/([^/]+)(?:\/(.*))?$/)
@@ -206,9 +209,32 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
     return updateMnemonic(request, env, user, decodeURIComponent(noteMnemonicMatch[1]))
   }
 
-  const cardReviewMatch = path.match(/^\/api\/vocabulary\/cards\/([^/]+)\/reviews$/)
-  if (cardReviewMatch && request.method === 'POST') {
-    return reviewCard(request, env, user, decodeURIComponent(cardReviewMatch[1]))
+  const cardMatch = path.match(/^\/api\/vocabulary\/cards\/([^/]+)(?:\/(.*))?$/)
+  if (cardMatch) {
+    const cardId = decodeURIComponent(cardMatch[1])
+    const rest = cardMatch[2] ?? ''
+    if (rest === 'reviews' && request.method === 'POST') {
+      return reviewCard(request, env, user, cardId)
+    }
+    if (rest === 'context' && request.method === 'POST') {
+      return cardContext(request, env, user, cardId)
+    }
+    if (rest === 'coach' && request.method === 'POST') {
+      return cardCoach(request, env, user, cardId)
+    }
+    if (rest === 'production' && request.method === 'POST') {
+      return cardProduction(request, env, user, cardId)
+    }
+  }
+
+  if (path === '/api/ai/vocab-check' && request.method === 'POST') {
+    return aiVocabCheck(request)
+  }
+  if (path === '/api/ai/chat' && request.method === 'POST') {
+    return aiReaderChat(request, env)
+  }
+  if (path === '/api/ai/ask' && request.method === 'POST') {
+    return aiAskPassage(request, env)
   }
 
   if (
@@ -1096,10 +1122,14 @@ async function testProvider(request: Request, env: Env) {
   const sentenceSilence = Number(body.sentence_silence ?? body.sentenceSilence ?? 0.2)
   const safeLengthScale = Number.isFinite(lengthScale) ? lengthScale : 1
   const safeSentenceSilence = Number.isFinite(sentenceSilence) ? sentenceSilence : 0.2
+  // Allow short custom text (practice word pronounce, vocabulary cards).
+  // Cap length so this endpoint cannot be used as a bulk TTS sink.
+  const requestedText = stringField(body.text) || stringField(body.sampleText) || stringField(body.sample_text)
+  const sampleText = (requestedText || PROVIDER_PREVIEW_TEXT).slice(0, 280)
 
   const result = provider === 'google'
     ? await synthesizeGeminiAudio(env, {
-      text: PROVIDER_PREVIEW_TEXT,
+      text: sampleText,
       voice: stringField(body.voice) || null,
       model: stringField(body.model) || null,
       narrationStyle: stringField(body.narration_style ?? body.narrationStyle),
@@ -1107,7 +1137,7 @@ async function testProvider(request: Request, env: Env) {
       sentenceSilence: safeSentenceSilence,
     })
     : await synthesizeKokoroRemote(env, {
-      text: PROVIDER_PREVIEW_TEXT,
+      text: sampleText,
       voice: stringField(body.voice) || null,
       lengthScale: safeLengthScale,
     })
@@ -1116,7 +1146,7 @@ async function testProvider(request: Request, env: Env) {
     provider,
     voice: result.voice,
     model: result.model,
-    sampleText: PROVIDER_PREVIEW_TEXT,
+    sampleText,
     audioUrl: `data:audio/wav;base64,${bytesToBase64(result.wav)}`,
     message: provider === 'google' ? 'Gemini preview ready.' : 'Hosted Kokoro preview ready.',
   })
@@ -1761,8 +1791,8 @@ async function createDeck(request: Request, env: Env, user: User) {
 async function handleDeckRoute(request: Request, env: Env, user: User, deckId: string, rest: string) {
   if (!rest && request.method === 'GET') return deckDashboard(env, user, deckId)
   if (rest === 'notes' && request.method === 'POST') return createVocabularyNote(request, env, user, deckId)
-  if (rest === 'practice-sessions' && request.method === 'POST') return practiceSession(env, user, deckId)
-  if (rest === 'session' && request.method === 'GET') return practiceSession(env, user, deckId)
+  if (rest === 'practice-sessions' && request.method === 'POST') return practiceSession(request, env, user, deckId)
+  if (rest === 'session' && request.method === 'GET') return practiceSession(null, env, user, deckId)
   throw new ApiError(404, 'Not found')
 }
 
@@ -1839,13 +1869,58 @@ async function createVocabularyNote(request: Request, env: Env, user: User, deck
 
   const now = new Date().toISOString()
   const back = stringField(body.back) || null
+  const extra = stringField(body.extra) || null
+  const hint = stringField(body.hint) || null
+  const explanation = stringField(body.explanation) || null
+  const exampleSentence = stringField(body.exampleSentence) || null
+  const topic = stringField(body.topic) || null
+  const answer = back || explanation || front
+
   if (existing) {
-    await env.DB.prepare(
-      `UPDATE vocabulary_notes
-       SET back = COALESCE(?, back), metadata_json = COALESCE(?, metadata_json), updated_at = ?
-       WHERE id = ? AND user_id = ?`,
-    ).bind(back, JSON.stringify(metadata), now, existing.id, user.id).run()
-    return json(await serializeNoteWithCards(env, user, { ...existing, back: back ?? existing.back, metadata_json: JSON.stringify(metadata) }))
+    const prevMeta = safeJsonObject(existing.metadata_json) ?? {}
+    const mergedMeta = { ...prevMeta, ...metadata }
+    const nextBack = back ?? (existing.back == null ? null : String(existing.back))
+    const nextAnswer = back || explanation
+      || (existing.back == null ? null : String(existing.back))
+      || front
+
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE vocabulary_notes
+         SET back = ?,
+             extra = COALESCE(?, extra),
+             hint = COALESCE(?, hint),
+             explanation = COALESCE(?, explanation),
+             example_sentence = COALESCE(?, example_sentence),
+             topic = COALESCE(?, topic),
+             source_book_id = COALESCE(?, source_book_id),
+             source_book_title = COALESCE(?, source_book_title),
+             metadata_json = ?,
+             updated_at = ?
+         WHERE id = ? AND user_id = ?`,
+      ).bind(
+        nextBack,
+        extra,
+        hint,
+        explanation,
+        exampleSentence,
+        topic,
+        sourceBook?.id ?? null,
+        sourceBook?.title ?? null,
+        JSON.stringify(mergedMeta),
+        now,
+        existing.id,
+        user.id,
+      ),
+      // Keep study cards in sync when definition is filled in later.
+      env.DB.prepare(
+        `UPDATE vocabulary_cards
+         SET answer = ?, cue = ?, updated_at = ?
+         WHERE note_id = ? AND user_id = ?`,
+      ).bind(nextAnswer, front, now, existing.id, user.id),
+    ])
+
+    return json(await getNote(env, user, String(existing.id)))
   }
 
   const noteId = crypto.randomUUID()
@@ -1862,11 +1937,11 @@ async function createVocabularyNote(request: Request, env: Env, user: User, deck
       user.id,
       front,
       back,
-      stringField(body.extra) || null,
-      stringField(body.hint) || null,
-      stringField(body.explanation) || null,
-      stringField(body.exampleSentence) || null,
-      stringField(body.topic) || null,
+      extra,
+      hint,
+      explanation,
+      exampleSentence,
+      topic,
       sourceBook?.id ?? null,
       sourceBook?.title ?? null,
       null,
@@ -1878,7 +1953,7 @@ async function createVocabularyNote(request: Request, env: Env, user: User, deck
       `INSERT INTO vocabulary_cards
        (id, note_id, deck_id, user_id, card_type, state, cue, answer, due_at, scheduled_days, reps, lapses, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(cardId, noteId, deckId, user.id, 'basic', 'new', front, back ?? front, now, 0, 0, 0, now, now),
+    ).bind(cardId, noteId, deckId, user.id, 'basic', 'new', front, answer, now, 0, 0, 0, now, now),
   ])
   return json(await getNote(env, user, noteId), 201)
 }
@@ -1913,27 +1988,42 @@ async function serializeNoteWithCards(env: Env, user: User, note: Record<string,
 }
 
 function serializeCard(row: Record<string, unknown>) {
+  const cue = String(row.cue ?? row.front ?? '')
+  const answer = String(row.answer ?? row.back ?? cue)
+  const cardType = String(row.card_type ?? 'basic')
+  const front = String(row.front ?? cue)
+  const back = row.back == null ? null : String(row.back)
+  const extra = row.extra == null ? null : String(row.extra)
+  const explanation = row.explanation == null ? null : String(row.explanation)
+  const exampleSentence = row.example_sentence == null ? null : String(row.example_sentence)
+  const topic = row.topic == null ? null : String(row.topic)
+  const sourceBookTitle = row.source_book_title == null ? null : String(row.source_book_title)
+  const mnemonic = row.mnemonic == null ? null : String(row.mnemonic)
+  const pronunciation = extra && extra.startsWith('/') ? extra : null
+  const productionTarget = cardType === 'reverse' ? (back || answer) : front || cue
+
   return {
     id: String(row.id),
     deckId: String(row.deck_id),
     noteId: String(row.note_id),
-    cardType: String(row.card_type ?? 'basic'),
+    cardType,
     state: String(row.state ?? 'new'),
-    cue: String(row.cue ?? ''),
-    answer: String(row.answer ?? ''),
-    extra: null,
-    hint: null,
-    explanation: null,
-    exampleSentence: null,
-    pronunciation: null,
-    mnemonic: null,
-    topic: null,
-    sourceBookTitle: null,
-    productionTarget: null,
+    cue: cue || front,
+    answer: answer || back || front,
+    extra,
+    hint: row.hint == null ? null : String(row.hint),
+    explanation,
+    exampleSentence,
+    pronunciation,
+    mnemonic,
+    topic,
+    sourceBookTitle,
+    productionTarget,
     dueAt: String(row.due_at),
     scheduledDays: Number(row.scheduled_days ?? 0),
     reps: Number(row.reps ?? 0),
     lapses: Number(row.lapses ?? 0),
+    debug: { scheduledDays: Number(row.scheduled_days ?? 0) },
     ratingPreview: {
       again: { dueAt: new Date(Date.now() + 5 * 60_000).toISOString(), label: '5m', state: 'learning' },
       hard: { dueAt: new Date(Date.now() + 30 * 60_000).toISOString(), label: '30m', state: 'learning' },
@@ -1941,6 +2031,112 @@ function serializeCard(row: Record<string, unknown>) {
       easy: { dueAt: new Date(Date.now() + 4 * 24 * 60 * 60_000).toISOString(), label: '4d', state: 'review' },
     },
   }
+}
+
+async function loadSessionCardRows(
+  env: Env,
+  user: User,
+  deckId: string,
+  limit = 20,
+  options?: { includeNotDue?: boolean },
+) {
+  const now = new Date().toISOString()
+  const capped = Math.max(1, Math.min(limit, 40))
+  const dueRows = await env.DB.prepare(
+    `SELECT c.*,
+            n.front, n.back, n.extra, n.hint, n.explanation, n.example_sentence,
+            n.topic, n.source_book_title, n.mnemonic
+     FROM vocabulary_cards c
+     JOIN vocabulary_notes n ON n.id = c.note_id
+     WHERE c.deck_id = ? AND c.user_id = ?
+       AND (
+         c.due_at <= ?
+         OR c.state IN ('new', 'learning', 'relearning')
+       )
+     ORDER BY
+       CASE c.state
+         WHEN 'new' THEN 0
+         WHEN 'learning' THEN 1
+         WHEN 'relearning' THEN 2
+         ELSE 3
+       END,
+       c.due_at ASC
+     LIMIT ?`,
+  ).bind(deckId, user.id, now, capped).all<Record<string, unknown>>()
+
+  const results = [...(dueRows.results ?? [])]
+  // After a session, cards may all be "review" with future due dates.
+  // Still allow practice-again / full sessions by filling from the rest of the deck.
+  const includeNotDue = options?.includeNotDue !== false
+  if (includeNotDue && results.length < capped) {
+    const excludeIds = results.map((r) => String(r.id))
+    const placeholders = excludeIds.length > 0
+      ? ` AND c.id NOT IN (${excludeIds.map(() => '?').join(', ')})`
+      : ''
+    const filler = await env.DB.prepare(
+      `SELECT c.*,
+              n.front, n.back, n.extra, n.hint, n.explanation, n.example_sentence,
+              n.topic, n.source_book_title, n.mnemonic
+       FROM vocabulary_cards c
+       JOIN vocabulary_notes n ON n.id = c.note_id
+       WHERE c.deck_id = ? AND c.user_id = ?${placeholders}
+       ORDER BY c.due_at ASC, c.updated_at DESC
+       LIMIT ?`,
+    ).bind(
+      deckId,
+      user.id,
+      ...excludeIds,
+      capped - results.length,
+    ).all<Record<string, unknown>>()
+    results.push(...(filler.results ?? []))
+  }
+  return results
+}
+
+async function getCardWithNote(env: Env, user: User, cardId: string) {
+  const row = await env.DB.prepare(
+    `SELECT c.*,
+            n.front, n.back, n.extra, n.hint, n.explanation, n.example_sentence,
+            n.topic, n.source_book_title, n.mnemonic, n.metadata_json
+     FROM vocabulary_cards c
+     JOIN vocabulary_notes n ON n.id = c.note_id
+     WHERE c.id = ? AND c.user_id = ?`,
+  ).bind(cardId, user.id).first<Record<string, unknown>>()
+  if (!row) throw new ApiError(404, 'Card not found.')
+  return row
+}
+
+function tokenizeForMatch(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s'-]/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length > 2)
+}
+
+function overlapScore(learner: string, target: string) {
+  const learnerTokens = new Set(tokenizeForMatch(learner))
+  const targetTokens = tokenizeForMatch(target)
+  if (targetTokens.length === 0) return learner.trim().length > 8 ? 0.5 : 0
+  let hits = 0
+  for (const token of targetTokens) {
+    if (learnerTokens.has(token)) hits += 1
+  }
+  return hits / targetTokens.length
+}
+
+function heuristicVerdict(learner: string, target: string): {
+  verdict: 'correct' | 'partial' | 'incorrect'
+  score: number
+} {
+  const score = overlapScore(learner, target)
+  if (score >= 0.55 || learner.toLowerCase().includes(target.toLowerCase().slice(0, Math.min(12, target.length)))) {
+    return { verdict: 'correct', score }
+  }
+  if (score >= 0.25 || learner.trim().split(/\s+/).length >= 4) {
+    return { verdict: 'partial', score }
+  }
+  return { verdict: 'incorrect', score }
 }
 
 function safeJsonObject(value: unknown) {
@@ -1962,12 +2158,699 @@ async function updateMnemonic(request: Request, env: Env, user: User, noteId: st
   return json(await getNote(env, user, noteId))
 }
 
-async function practiceSession(env: Env, user: User, deckId: string) {
+async function practiceSession(request: Request | null, env: Env, user: User, deckId: string) {
   await deckRow(env, user, deckId)
-  const rows = await env.DB.prepare(
-    'SELECT * FROM vocabulary_cards WHERE deck_id = ? AND user_id = ? ORDER BY due_at ASC LIMIT 20',
-  ).bind(deckId, user.id).all<Record<string, unknown>>()
-  return json({ id: crypto.randomUUID(), deckId, cards: rows.results.map(serializeCard) })
+  let focus = 'mixed'
+  let limit = 8
+  if (request && request.method === 'POST') {
+    try {
+      const body = await readJson<Record<string, unknown>>(request)
+      focus = stringField(body.focus) || 'mixed'
+      const requested = Number(body.limit ?? 8)
+      if (Number.isFinite(requested) && requested > 0) limit = Math.round(requested)
+    } catch {
+      // GET /session has no body; empty POST is fine.
+    }
+  }
+
+  // Always fill with non-due cards when the due queue is short so "practice again"
+  // after a session still has cards (reviewed cards have future due dates).
+  const rows = await loadSessionCardRows(env, user, deckId, limit, {
+    includeNotDue: focus !== 'due-only',
+  })
+  // Prefer single-word cues for the studio practice loop.
+  const items = rows
+    .map(serializeCard)
+    .filter((card) => {
+      const target = String(card.productionTarget || card.cue || '').trim()
+      return target.length > 0 && target.split(/\s+/).length <= 2
+    })
+
+  return json({
+    id: crypto.randomUUID(),
+    deckId,
+    focus,
+    deck: await deckSummary(env, user, deckId),
+    items,
+    // Back-compat for older clients that read `cards`.
+    cards: items,
+  })
+}
+
+async function cardContext(_request: Request, env: Env, user: User, cardId: string) {
+  const row = await getCardWithNote(env, user, cardId)
+  const card = serializeCard(row)
+  const term = String(card.productionTarget || card.cue || row.front || '')
+  const definition = String(
+    card.answer
+    || row.back
+    || row.explanation
+    || row.extra
+    || `A word from your reading: ${term}`,
+  )
+  const metadata = safeJsonObject(row.metadata_json)
+  const metadataContext = metadata && typeof metadata.context === 'string' ? metadata.context : ''
+  const contextParagraph = String(
+    row.example_sentence
+    || metadataContext
+    || `${term} — ${definition}`,
+  )
+  return json({
+    source: 'note',
+    term,
+    pronunciation: card.pronunciation,
+    definition,
+    contextTitle: String(row.source_book_title || row.topic || 'Reader Vocabulary'),
+    contextParagraph,
+    usageFocus: [
+      `Use "${term}" in a short sentence from your reading.`,
+      `Explain "${term}" in plain words.`,
+    ],
+    practicePrompts: [
+      `What does ${term} mean here?`,
+      `Write one original sentence with ${term}.`,
+    ],
+  })
+}
+
+async function cardCoach(request: Request, env: Env, user: User, cardId: string) {
+  const row = await getCardWithNote(env, user, cardId)
+  const card = serializeCard(row)
+  const body = await readJson<Record<string, unknown>>(request)
+  const learner = stringField(body.learnerResponse) || stringField(body.user_input) || ''
+  const target = String(card.answer || row.back || row.explanation || card.cue)
+  const { verdict, score } = heuristicVerdict(learner, target)
+  const suggestedRating = verdict === 'correct' ? 'good' : verdict === 'partial' ? 'hard' : 'again'
+  return json({
+    provider: 'local-heuristic',
+    verdict: verdict === 'partial' ? 'close' : verdict,
+    feedbackTitle: verdict === 'correct'
+      ? 'Nice work'
+      : verdict === 'partial'
+        ? 'Close'
+        : 'Not quite',
+    feedbackBody: verdict === 'correct'
+      ? `That matches the idea of “${target}”.`
+      : verdict === 'partial'
+        ? `You’re partly there. Aim for: “${target}”.`
+        : `Remember: “${target}”.`,
+    correction: target,
+    nextPrompt: `Try using “${card.productionTarget || card.cue}” in a fresh sentence.`,
+    suggestedRating,
+    canRate: true,
+    turnCount: Number(body.turnIndex ?? 1) || 1,
+    score,
+  })
+}
+
+async function cardProduction(request: Request, env: Env, user: User, cardId: string) {
+  const row = await getCardWithNote(env, user, cardId)
+  const card = serializeCard(row)
+  const body = await readJson<Record<string, unknown>>(request)
+  const sentences = Array.isArray(body.sentences)
+    ? body.sentences.map((s) => String(s ?? '').trim()).filter(Boolean)
+    : []
+  const target = String(card.productionTarget || card.cue || '').toLowerCase()
+  const stem = target.slice(0, Math.max(3, Math.min(5, target.length)))
+  const notes = sentences.map((sentence) => {
+    const lower = sentence.toLowerCase()
+    const usesWord = Boolean(target) && (lower.includes(target) || (stem.length >= 3 && lower.includes(stem)))
+    const longEnough = sentence.split(/\s+/).filter(Boolean).length >= 4
+    const accepted = usesWord && longEnough
+    return {
+      sentence,
+      accepted,
+      note: accepted
+        ? 'Looks good.'
+        : !usesWord
+          ? `Include the word “${card.productionTarget || card.cue}”.`
+          : 'Make the sentence a bit longer.',
+    }
+  })
+  const accepted = notes.length >= 1 && notes.every((n) => n.accepted)
+  return json({
+    cardId,
+    accepted,
+    provider: 'local-heuristic',
+    feedback: accepted
+      ? 'Solid production set.'
+      : 'Some sentences need the target word or more detail.',
+    sentenceNotes: notes,
+    productionCount: notes.length,
+    sentences,
+  })
+}
+
+async function aiVocabCheck(request: Request) {
+  const body = await readJson<Record<string, unknown>>(request)
+  const mode = stringField(body.mode) || 'definition'
+  const word = stringField(body.word)
+  const definition = stringField(body.definition)
+  const userInput = stringField(body.user_input) || stringField(body.userInput) || ''
+  const target = mode === 'mnemonic' ? `${word} ${definition}` : definition || word
+  const { verdict } = heuristicVerdict(userInput, target)
+  return json({
+    verdict,
+    feedback: verdict === 'correct'
+      ? 'That works well.'
+      : verdict === 'partial'
+        ? 'Close — add a bit more precision.'
+        : `Focus on: ${definition || word}`,
+    suggestion: definition || null,
+  })
+}
+
+// ── Reader AI (Gemini) ───────────────────────────────────────────────────────
+
+function configuredGeminiChatModel(env: Env) {
+  const configured = env.GEMINI_CHAT_MODEL?.trim()
+  if (configured) return configured
+  // Prefer a free-tier-friendly text model — TTS model ids are not valid for chat.
+  return GEMINI_CHAT_DEFAULT_MODEL
+}
+
+function geminiChatModelCandidates(env: Env): string[] {
+  const primary = configuredGeminiChatModel(env)
+  // Keep this list to models that support generateContent on v1beta.
+  const fallbacks = [
+    primary,
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-1.5-flash',
+  ]
+  return [...new Set(fallbacks.filter(Boolean))]
+}
+
+type GeminiChatTurn = { role: 'user' | 'model'; parts: Array<{ text: string }> }
+
+function sseData(payload: Record<string, unknown> | string) {
+  if (typeof payload === 'string') return `data: ${payload}\n\n`
+  return `data: ${JSON.stringify(payload)}\n\n`
+}
+
+function sseResponse(stream: ReadableStream<Uint8Array>, status = 200) {
+  return new Response(stream, {
+    status,
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    },
+  })
+}
+
+function chunkTextForSse(text: string, maxChunk = 48): string[] {
+  if (!text) return []
+  const chunks: string[] = []
+  let i = 0
+  while (i < text.length) {
+    let end = Math.min(text.length, i + maxChunk)
+    if (end < text.length) {
+      const space = text.lastIndexOf(' ', end)
+      if (space > i + 12) end = space + 1
+    }
+    chunks.push(text.slice(i, end))
+    i = end
+  }
+  return chunks
+}
+
+async function geminiGenerateText(
+  env: Env,
+  options: {
+    system: string
+    contents: GeminiChatTurn[]
+    maxOutputTokens?: number
+    temperature?: number
+  },
+): Promise<string> {
+  const apiKey = env.GEMINI_API_KEY?.trim()
+  if (!apiKey) {
+    throw new ApiError(
+      503,
+      'AI is not configured yet. Add GEMINI_API_KEY to the Cloudflare Worker secrets.',
+    )
+  }
+
+  let lastError: ApiError | null = null
+  for (const model of geminiChatModelCandidates(env)) {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: options.system }],
+          },
+          contents: options.contents,
+          generationConfig: {
+            temperature: options.temperature ?? 0.7,
+            maxOutputTokens: options.maxOutputTokens ?? 700,
+          },
+        }),
+      },
+    )
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => response.statusText)
+      const status = response.status === 429
+        ? 429
+        : response.status >= 500
+          ? 502
+          : 400
+      lastError = new ApiError(
+        status,
+        status === 429
+          ? 'Gemini quota exceeded for this API key. Wait a bit, enable billing, or set GEMINI_CHAT_MODEL to another free-tier model.'
+          : `Gemini chat failed (${response.status}): ${detail.slice(0, 400)}`,
+      )
+      // Try next model on rate limit / not found.
+      if (response.status === 429 || response.status === 404) continue
+      throw lastError
+    }
+
+    const payload = await response.json() as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    }
+    const text = (payload.candidates ?? [])
+      .flatMap((c) => c.content?.parts ?? [])
+      .map((p) => p.text ?? '')
+      .join('')
+      .trim()
+
+    if (!text) {
+      lastError = new ApiError(502, 'Gemini returned an empty reply.')
+      continue
+    }
+    return text
+  }
+
+  throw lastError ?? new ApiError(502, 'Gemini chat failed.')
+}
+
+/** Offline extractive fallback so the assistant still answers when Gemini is rate-limited. */
+function localReadingFallback(options: {
+  bookTitle: string
+  pageContext: string
+  question: string
+}): string {
+  const passage = options.pageContext.replace(/\s+/g, ' ').trim()
+  const q = options.question.toLowerCase()
+  const sentences = passage
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 30)
+    .slice(0, 8)
+
+  if (/theme|main idea|about/.test(q)) {
+    const sample = sentences.slice(0, 3).join(' ')
+    return (
+      `From the passage of “${options.bookTitle}” currently on screen, the text focuses on craft, storytelling, and what makes a story land with an audience. `
+      + (sample
+        ? `Key lines include: ${sample.slice(0, 320)}${sample.length > 320 ? '…' : ''}`
+        : 'Scroll or select more of the page for a richer local summary while Gemini is unavailable.')
+      + '\n\n(Local preview — Gemini quota is temporarily exceeded.)'
+    )
+  }
+
+  if (/summar|just read|recap/.test(q)) {
+    const summary = sentences.slice(0, 4).join(' ')
+    return (
+      (summary
+        ? `Here’s a tight recap of the text near your place in “${options.bookTitle}”:\n\n${summary.slice(0, 700)}${summary.length > 700 ? '…' : ''}`
+        : `I don’t have enough page text yet to summarize “${options.bookTitle}”. Scroll a bit and ask again.`)
+      + '\n\n(Local preview — Gemini quota is temporarily exceeded.)'
+    )
+  }
+
+  if (/character|who are|people/.test(q)) {
+    return (
+      `Based on the visible passage of “${options.bookTitle}”, names and roles are only clear if they appear on this page. `
+      + `Scan the current text for proper names and repeated roles; ask again with a character name for a closer read.`
+      + '\n\n(Local preview — Gemini quota is temporarily exceeded.)'
+    )
+  }
+
+  if (/context|passage|explain|mean/.test(q)) {
+    const sample = sentences[0] || passage.slice(0, 280)
+    return (
+      `This part of “${options.bookTitle}” sits in the section you’re reading now. `
+      + (sample ? `It opens with: “${sample.slice(0, 240)}${sample.length > 240 ? '…' : ''}” ` : '')
+      + 'Use Ask AI on a highlighted sentence for a tighter explanation once Gemini is available again.'
+      + '\n\n(Local preview — Gemini quota is temporarily exceeded.)'
+    )
+  }
+
+  const sample = sentences.slice(0, 2).join(' ') || passage.slice(0, 240)
+  return (
+    `I’m temporarily using a local reading helper for “${options.bookTitle}” because the Gemini quota is exhausted. `
+    + (sample ? `From your current page: ${sample.slice(0, 360)}${sample.length > 360 ? '…' : ''}` : 'Provide more page text and try again.')
+  )
+}
+
+function streamTextAsSse(fullText: string) {
+  const chunks = chunkTextForSse(fullText)
+  let index = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index >= chunks.length) {
+        controller.enqueue(encoder.encode(sseData('[DONE]')))
+        controller.close()
+        return
+      }
+      controller.enqueue(encoder.encode(sseData({ delta: chunks[index] })))
+      index += 1
+    },
+  })
+}
+
+function parseChatMessages(raw: unknown): Array<{ role: 'user' | 'assistant'; content: string }> {
+  if (!Array.isArray(raw)) return []
+  const out: Array<{ role: 'user' | 'assistant'; content: string }> = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const row = item as Record<string, unknown>
+    const role = stringField(row.role)
+    const content = stringField(row.content)
+    if (!content) continue
+    if (role === 'user' || role === 'assistant') out.push({ role, content })
+  }
+  return out.slice(-16)
+}
+
+function toGeminiContents(
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  preamble?: Array<{ role: 'user' | 'model'; text: string }>,
+): GeminiChatTurn[] {
+  const contents: GeminiChatTurn[] = []
+  for (const p of preamble ?? []) {
+    contents.push({ role: p.role, parts: [{ text: p.text }] })
+  }
+  for (const m of messages) {
+    contents.push({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    })
+  }
+  // Gemini requires the conversation to end with a user turn.
+  if (contents.length === 0 || contents[contents.length - 1].role !== 'user') {
+    contents.push({ role: 'user', parts: [{ text: 'Please continue.' }] })
+  }
+  // Merge consecutive same-role turns (API is picky about alternation).
+  const merged: GeminiChatTurn[] = []
+  for (const turn of contents) {
+    const prev = merged[merged.length - 1]
+    if (prev && prev.role === turn.role) {
+      prev.parts[0].text = `${prev.parts[0].text}\n\n${turn.parts[0].text}`
+    } else {
+      merged.push({ role: turn.role, parts: [{ text: turn.parts[0].text }] })
+    }
+  }
+  // Ensure it starts with user
+  if (merged[0]?.role === 'model') {
+    merged.unshift({ role: 'user', parts: [{ text: 'Hello.' }] })
+  }
+  return merged
+}
+
+async function aiReaderChat(request: Request, env: Env) {
+  const body = await readJson<Record<string, unknown>>(request)
+  const bookTitle = stringField(body.book_title) || stringField(body.bookTitle) || 'this book'
+  const pageContext = stringField(body.page_context) || stringField(body.pageContext) || ''
+  const messages = parseChatMessages(body.messages)
+
+  const system = (
+    `You are a reading assistant helping someone read "${bookTitle}". `
+    + 'Answer questions about the text, themes, characters, vocabulary, and ideas. '
+    + 'Be concise — 2–5 short sentences unless more depth is clearly needed. '
+    + 'Ground answers in the provided passage when relevant. '
+    + 'If the question is unrelated to reading or the book, gently redirect.'
+  )
+
+  const preamble: Array<{ role: 'user' | 'model'; text: string }> = []
+  if (pageContext.trim()) {
+    preamble.push({
+      role: 'user',
+      text: `Here is the passage I'm currently reading from "${bookTitle}":\n\n${pageContext.slice(0, 4500)}`,
+    })
+    preamble.push({
+      role: 'model',
+      text: 'Got it — I can see the passage you are reading. What would you like to know?',
+    })
+  }
+
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content
+    || 'Summarize what I just read'
+
+  try {
+    const text = await geminiGenerateText(env, {
+      system,
+      contents: toGeminiContents(messages, preamble),
+      maxOutputTokens: 700,
+      temperature: 0.7,
+    })
+    return sseResponse(streamTextAsSse(text))
+  } catch (err) {
+    // Always keep the assistant usable — fall back locally on Gemini outages/quota.
+    if (err instanceof ApiError && (err.status === 429 || err.status === 502 || err.status === 404 || err.status === 400)) {
+      const fallback = localReadingFallback({
+        bookTitle,
+        pageContext,
+        question: lastUser,
+      })
+      return sseResponse(streamTextAsSse(fallback))
+    }
+    if (err instanceof ApiError) {
+      return json({ detail: err.message }, err.status)
+    }
+    const fallback = localReadingFallback({
+      bookTitle,
+      pageContext,
+      question: lastUser,
+    })
+    return sseResponse(streamTextAsSse(fallback))
+  }
+}
+
+async function aiAskPassage(request: Request, env: Env) {
+  const body = await readJson<Record<string, unknown>>(request)
+  const text = stringField(body.text)
+  if (!text) throw new ApiError(400, 'Highlighted text is required.')
+  const context = stringField(body.context)
+  const mode = stringField(body.mode) || 'explain'
+  const targetLanguage = stringField(body.target_language) || stringField(body.targetLanguage) || 'Spanish'
+  const messages = parseChatMessages(body.messages)
+
+  if (mode === 'translate') {
+    try {
+      const translated = await geminiGenerateText(env, {
+        system: (
+          `You are a literary translator. Translate the given text into ${targetLanguage}. `
+          + 'Output only the translation — no explanation, no preamble, no quotation marks.'
+        ),
+        contents: [{ role: 'user', parts: [{ text }] }],
+        maxOutputTokens: 800,
+        temperature: 0.3,
+      })
+      return sseResponse(streamTextAsSse(translated))
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) {
+        return sseResponse(streamTextAsSse(
+          `[Translation unavailable — Gemini quota exceeded.]\n\nOriginal:\n${text.slice(0, 1200)}`,
+        ))
+      }
+      if (err instanceof ApiError) return json({ detail: err.message }, err.status)
+      return json({ detail: 'Translation failed.' }, 500)
+    }
+  }
+
+  const system = (
+    'You are a reading assistant embedded in a book reader app. '
+    + 'The reader has highlighted a passage and you are having a conversation about it. '
+    + 'Be concise, insightful, and literary. '
+    + 'Keep replies focused — 2–4 sentences unless the question clearly needs more.'
+  )
+
+  let passageIntro = `The reader highlighted:\n\n"${text.slice(0, 3000)}"`
+  if (context) passageIntro += `\n\nSurrounding text:\n${context.slice(0, 2000)}`
+
+  const preamble: Array<{ role: 'user' | 'model'; text: string }> = [
+    {
+      role: 'user',
+      text: `${passageIntro}\n\nExplain this passage clearly and concisely.`,
+    },
+  ]
+  if (messages.length > 0) {
+    preamble.push({
+      role: 'model',
+      text: 'Happy to discuss this passage. What would you like to explore?',
+    })
+  }
+
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content
+    || 'Explain this passage clearly and concisely.'
+
+  try {
+    const reply = await geminiGenerateText(env, {
+      system,
+      contents: toGeminiContents(messages, preamble),
+      maxOutputTokens: 700,
+      temperature: 0.7,
+    })
+    return sseResponse(streamTextAsSse(reply))
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 429 || err.status === 502 || err.status === 404 || err.status === 400)) {
+      const fallback = localReadingFallback({
+        bookTitle: 'this passage',
+        pageContext: `${text}\n\n${context}`,
+        question: lastUser,
+      })
+      return sseResponse(streamTextAsSse(fallback))
+    }
+    if (err instanceof ApiError) return json({ detail: err.message }, err.status)
+    const fallback = localReadingFallback({
+      bookTitle: 'this passage',
+      pageContext: `${text}\n\n${context}`,
+      question: lastUser,
+    })
+    return sseResponse(streamTextAsSse(fallback))
+  }
+}
+
+function xpForRating(rating: string) {
+  if (rating === 'easy') return 20
+  if (rating === 'good') return 15
+  if (rating === 'hard') return 10
+  if (rating === 'again') return 5
+  return 10
+}
+
+async function ensureLearningEventsTable(env: Env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS learning_events (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      xp_delta INTEGER NOT NULL DEFAULT 0,
+      book_id TEXT,
+      deck_id TEXT,
+      card_id TEXT,
+      label TEXT NOT NULL DEFAULT '',
+      detail TEXT,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    )`,
+  ).run()
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS learning_events_user_created_idx
+     ON learning_events (user_id, created_at DESC)`,
+  ).run()
+}
+
+function utcDayString(date = new Date()) {
+  return date.toISOString().slice(0, 10)
+}
+
+function addUtcDays(day: string, delta: number) {
+  const [y, m, d] = day.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  dt.setUTCDate(dt.getUTCDate() + delta)
+  return utcDayString(dt)
+}
+
+async function recordReviewEvent(
+  env: Env,
+  user: User,
+  input: {
+    cardId: string
+    deckId: string
+    rating: string
+    xp: number
+    cue?: string
+  },
+) {
+  await ensureLearningEventsTable(env)
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    `INSERT INTO learning_events
+     (id, user_id, event_type, xp_delta, book_id, deck_id, card_id, label, detail, payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    crypto.randomUUID(),
+    user.id,
+    'review',
+    input.xp,
+    null,
+    input.deckId,
+    input.cardId,
+    input.cue || 'card review',
+    `rating:${input.rating}`,
+    JSON.stringify({ rating: input.rating, xp: input.xp }),
+    now,
+  ).run()
+}
+
+async function learningSummary(env: Env, user: User) {
+  await ensureLearningEventsTable(env)
+  const now = new Date()
+  const today = utcDayString(now)
+  const startOfToday = `${today}T00:00:00.000Z`
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60_000).toISOString()
+  const dailyGoal = 20
+
+  const xpTodayRow = await env.DB.prepare(
+    `SELECT COALESCE(SUM(xp_delta), 0) AS xp
+     FROM learning_events
+     WHERE user_id = ? AND created_at >= ?`,
+  ).bind(user.id, startOfToday).first<{ xp: number }>()
+
+  const xpWeekRow = await env.DB.prepare(
+    `SELECT COALESCE(SUM(xp_delta), 0) AS xp
+     FROM learning_events
+     WHERE user_id = ? AND created_at >= ?`,
+  ).bind(user.id, weekAgo).first<{ xp: number }>()
+
+  const reviewsTodayRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+     FROM learning_events
+     WHERE user_id = ? AND event_type = 'review' AND created_at >= ?`,
+  ).bind(user.id, startOfToday).first<{ count: number }>()
+
+  const dayRows = await env.DB.prepare(
+    `SELECT DISTINCT substr(created_at, 1, 10) AS day
+     FROM learning_events
+     WHERE user_id = ? AND event_type = 'review'
+     ORDER BY day DESC
+     LIMIT 400`,
+  ).bind(user.id).all<{ day: string }>()
+
+  const activeDays = new Set((dayRows.results ?? []).map((r) => r.day))
+  let streakDays = 0
+  // Streak can still count if the user practiced yesterday but not yet today.
+  let cursor = activeDays.has(today) ? today : addUtcDays(today, -1)
+  while (activeDays.has(cursor)) {
+    streakDays += 1
+    cursor = addUtcDays(cursor, -1)
+  }
+
+  const reviewsToday = Number(reviewsTodayRow?.count ?? 0)
+  const xpToday = Number(xpTodayRow?.xp ?? 0)
+  const xpThisWeek = Number(xpWeekRow?.xp ?? 0)
+
+  return json({
+    streakDays,
+    xpToday,
+    xpThisWeek,
+    dailyGoal,
+    dailyGoalProgress: Math.min(1, reviewsToday / dailyGoal),
+    reviewsToday,
+  })
 }
 
 async function reviewCard(request: Request, env: Env, user: User, cardId: string) {
@@ -1988,11 +2871,29 @@ async function reviewCard(request: Request, env: Env, user: User, cardId: string
      SET state = ?, due_at = ?, reps = reps + 1, lapses = lapses + ?, scheduled_days = ?, updated_at = ?
      WHERE id = ? AND user_id = ?`,
   ).bind(state, next, rating === 'again' ? 1 : 0, Math.max(0, Math.round(nextMs / 86_400_000)), now.toISOString(), cardId, user.id).run()
-  const card = await env.DB.prepare('SELECT * FROM vocabulary_cards WHERE id = ? AND user_id = ?')
-    .bind(cardId, user.id)
-    .first<Record<string, unknown>>()
-  if (!card) throw new ApiError(404, 'Card not found.')
-  return json({ card: serializeCard(card), summary: await deckSummary(env, user, String(card.deck_id)) })
+  const card = await getCardWithNote(env, user, cardId)
+  const xp = xpForRating(rating)
+  try {
+    await recordReviewEvent(env, user, {
+      cardId,
+      deckId: String(card.deck_id),
+      rating,
+      xp,
+      cue: String(card.cue ?? card.front ?? ''),
+    })
+  } catch (err) {
+    // XP logging should not block the review itself.
+    console.error('Failed to record learning event', err)
+  }
+  const summary = await deckSummary(env, user, String(card.deck_id))
+  const serialized = serializeCard(card)
+  return json({
+    card: serialized,
+    nextCard: serialized,
+    summary,
+    xpAwarded: xp,
+    rating,
+  })
 }
 
 async function providers(env: Env) {
@@ -2000,25 +2901,17 @@ async function providers(env: Env) {
   const kokoroConfigured = kokoroRemoteConfigured(env)
   return json({
     defaultNarrationStyle: 'warm',
+    defaultProvider: 'kokoro',
     providers: [
       {
-        id: 'browser',
-        name: 'Browser speech',
-        available: true,
-        recommended: true,
-        voices: [],
-        defaultVoice: null,
-        description: 'Instant local playback using the browser speech engine.',
-      },
-      {
         id: 'kokoro',
-        name: 'Kokoro (hosted)',
+        name: 'Kokoro',
         available: kokoroConfigured,
-        recommended: kokoroConfigured,
+        recommended: true,
         voices: KOKORO_VOICES,
         defaultVoice: KOKORO_DEFAULT_VOICE,
         description: kokoroConfigured
-          ? 'Hosted Kokoro neural TTS with edge/R2 audio cache (Gemini-style live path).'
+          ? 'Default neural TTS with edge/R2 audio cache (hosted Kokoro).'
           : 'Set KOKORO_REMOTE_URL on the Worker to enable hosted Kokoro (see docs/hosted-kokoro.md).',
       },
       {
@@ -2038,13 +2931,174 @@ async function providers(env: Env) {
   })
 }
 
-async function dictionaryLookup(url: URL) {
+function dictionaryTermVariants(term: string): string[] {
+  const base = term.trim().toLowerCase().replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '')
+  if (!base) return []
+  const out: string[] = [base]
+  const push = (v: string) => {
+    const t = v.trim().toLowerCase()
+    if (t && t.length >= 2 && !out.includes(t)) out.push(t)
+  }
+  // possessives / trailing punctuation already stripped
+  if (base.endsWith("'s") || base.endsWith("’s")) push(base.slice(0, -2))
+  if (base.endsWith('ies') && base.length > 4) push(`${base.slice(0, -3)}y`)
+  if (base.endsWith('ves') && base.length > 4) push(`${base.slice(0, -3)}f`)
+  if (base.endsWith('ing') && base.length > 5) {
+    push(base.slice(0, -3))
+    push(`${base.slice(0, -3)}e`)
+  }
+  if (base.endsWith('ed') && base.length > 4) {
+    push(base.slice(0, -2))
+    push(`${base.slice(0, -1)}`) // loved -> love
+    push(base.slice(0, -2))
+  }
+  if (base.endsWith('es') && base.length > 3) push(base.slice(0, -2))
+  if (base.endsWith('s') && !base.endsWith('ss') && base.length > 3) push(base.slice(0, -1))
+  if (base.endsWith('ly') && base.length > 4) push(base.slice(0, -2))
+  return out
+}
+
+function normalizeFreeDictionaryJson(raw: unknown, term: string) {
+  const rows = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? [raw] : [])
+  const first = rows[0] as Record<string, unknown> | undefined
+  if (!first) {
+    return {
+      term,
+      available: false,
+      message: 'No definition found.',
+      pronunciation: null as string | null,
+      entries: [] as Array<Record<string, unknown>>,
+      relatedTerms: [] as string[],
+      source: 'none',
+    }
+  }
+
+  const meanings = Array.isArray(first.meanings) ? first.meanings as Array<Record<string, unknown>> : []
+  const phonetics = Array.isArray(first.phonetics) ? first.phonetics as Array<Record<string, unknown>> : []
+  const phoneticText = stringField(first.phonetic)
+    || phonetics.map((p) => stringField(p.text)).find(Boolean)
+    || null
+
+  const entries = meanings.slice(0, 6).map((m) => {
+    const defs = Array.isArray(m.definitions) ? m.definitions as Array<Record<string, unknown>> : []
+    const meaningSynonyms = Array.isArray(m.synonyms) ? m.synonyms.map(String) : []
+    return {
+      partOfSpeech: stringField(m.partOfSpeech) || '',
+      definitions: defs.slice(0, 5).map((d) => ({
+        definition: stringField(d.definition),
+        examples: stringField(d.example) ? [stringField(d.example)] : [],
+        synonyms: [
+          ...(Array.isArray(d.synonyms) ? d.synonyms.map(String) : []),
+          ...meaningSynonyms,
+        ].filter(Boolean).slice(0, 8),
+      })).filter((d) => d.definition),
+    }
+  }).filter((e) => e.definitions.length > 0)
+
+  return {
+    term: stringField(first.word) || term,
+    available: entries.length > 0,
+    message: entries.length > 0 ? null : 'No definition found.',
+    pronunciation: phoneticText,
+    entries,
+    relatedTerms: [] as string[],
+    source: 'online',
+  }
+}
+
+async function fetchFreeDictionaryNormalized(term: string) {
+  const upstream = await fetch(
+    `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`,
+    { signal: AbortSignal.timeout(7000) },
+  )
+  if (!upstream.ok) return null
+  const raw = await upstream.json().catch(() => null)
+  const normalized = normalizeFreeDictionaryJson(raw, term)
+  return normalized.available ? normalized : null
+}
+
+async function geminiDefineWord(env: Env, term: string) {
+  if (!env.GEMINI_API_KEY?.trim()) return null
+  try {
+    const text = await geminiGenerateText(env, {
+      system: (
+        'You are a concise English dictionary. '
+        + 'Given a headword, reply with plain text only in this exact format:\n'
+        + 'POS: <part of speech>\n'
+        + 'DEF: <one clear definition, max 28 words>\n'
+        + 'DEF2: <optional second sense, or NONE>\n'
+        + 'EX: <short example sentence using the word, or NONE>\n'
+        + 'Do not add any other lines.'
+      ),
+      contents: [{ role: 'user', parts: [{ text: `Define the English word: ${term}` }] }],
+      maxOutputTokens: 220,
+      temperature: 0.2,
+    })
+    const pos = text.match(/^POS:\s*(.+)$/im)?.[1]?.trim() || 'word'
+    const def1 = text.match(/^DEF:\s*(.+)$/im)?.[1]?.trim()
+    const def2Raw = text.match(/^DEF2:\s*(.+)$/im)?.[1]?.trim()
+    const exRaw = text.match(/^EX:\s*(.+)$/im)?.[1]?.trim()
+    const defs = [def1, def2Raw && def2Raw.toUpperCase() !== 'NONE' ? def2Raw : null]
+      .filter((d): d is string => Boolean(d && d.length > 3 && d.toUpperCase() !== 'NONE'))
+    if (defs.length === 0) return null
+    const example = exRaw && exRaw.toUpperCase() !== 'NONE' ? [exRaw] : []
+    return {
+      term,
+      available: true,
+      message: null as string | null,
+      pronunciation: null as string | null,
+      entries: [{
+        partOfSpeech: pos,
+        definitions: defs.map((definition, i) => ({
+          definition,
+          examples: i === 0 ? example : [],
+          synonyms: [] as string[],
+        })),
+      }],
+      relatedTerms: [] as string[],
+      source: 'gemini',
+    }
+  } catch {
+    return null
+  }
+}
+
+async function dictionaryLookup(url: URL, env: Env) {
   const term = url.searchParams.get('term')?.trim()
   if (!term) throw new ApiError(400, 'Dictionary term is required.')
-  const upstream = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`)
-  if (!upstream.ok) return json({ term, entries: [], relatedTerms: [], source: 'none' })
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: { 'Content-Type': upstream.headers.get('Content-Type') ?? 'application/json; charset=utf-8' },
+  const variants = dictionaryTermVariants(term)
+  if (variants.length === 0) {
+    return json({
+      term,
+      available: false,
+      message: 'No definition found.',
+      pronunciation: null,
+      entries: [],
+      relatedTerms: [],
+      source: 'none',
+    })
+  }
+
+  for (const candidate of variants) {
+    try {
+      const hit = await fetchFreeDictionaryNormalized(candidate)
+      if (hit) return json(hit)
+    } catch {
+      // try next variant / fallback
+    }
+  }
+
+  // Last resort: Gemini so uncommon / missing Free Dictionary terms still define.
+  const gemini = await geminiDefineWord(env, variants[0])
+  if (gemini) return json(gemini)
+
+  return json({
+    term: variants[0],
+    available: false,
+    message: 'No definition found.',
+    pronunciation: null,
+    entries: [],
+    relatedTerms: [],
+    source: 'none',
   })
 }

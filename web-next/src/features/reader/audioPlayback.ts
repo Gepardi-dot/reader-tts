@@ -63,7 +63,9 @@ export interface PlaybackStartupPlan {
 }
 
 export function committedVoiceForDraft(provider: string, draftVoice: string | null | undefined): string | null {
-  return provider === BROWSER_TTS_PROVIDER_ID ? null : (draftVoice ?? null)
+  // Legacy browser id had no voice; all remaining providers need a voice id.
+  if (provider === BROWSER_TTS_PROVIDER_ID) return null
+  return draftVoice ?? null
 }
 
 export function audioSelectionKey(provider: string, voice: string | null | undefined): string {

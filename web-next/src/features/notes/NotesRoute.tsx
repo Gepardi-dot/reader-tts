@@ -168,33 +168,38 @@ export function NotesRoute() {
     },
   })
 
-  const booksWithNotes = useMemo(
-    () => (booksRaw ?? []).filter((b) => b.highlightCount > 0),
-    [booksRaw],
-  )
+  // Prefer books known to have highlights, but always re-check every book so a
+  // stale highlightCount (or cache race after save) cannot hide fresh notes.
+  const books = useMemo(() => booksRaw ?? [], [booksRaw])
 
   const highlightQueries = useQueries({
-    queries: booksWithNotes.map((book) => ({
+    queries: books.map((book) => ({
       queryKey: ['highlights', book.id],
       queryFn: async () => {
         const res = await api.get<{ items: Highlight[] }>(`/api/books/${book.id}/highlights`)
         return res.items ?? []
       },
-      staleTime: 30_000,
+      staleTime: 15_000,
+      enabled: books.length > 0,
     })),
   })
 
-  const isLoading = booksLoading || highlightQueries.some((q) => q.isLoading)
+  const isLoading = booksLoading || (books.length > 0 && highlightQueries.some((q) => q.isLoading || q.isFetching && !q.data))
 
   const entries: Entry[] = useMemo(() => {
-    return booksWithNotes
+    return books
       .flatMap((book, i) =>
         (highlightQueries[i]?.data ?? [])
           .filter((h) => h.kind === 'highlight' || h.kind === 'note')
-          .map((h) => ({ ...h, book })),
+          .map((h) => ({
+            ...h,
+            // Guard against missing/unknown colors from older rows.
+            color: (h.color === 'rose' || h.color === 'sky' ? h.color : 'amber') as ColorKey,
+            book,
+          })),
       )
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-  }, [booksWithNotes, highlightQueries])
+  }, [books, highlightQueries])
 
   const filtered = useMemo(() => entries.filter((e) => {
     if (colorFilter && e.color !== colorFilter) return false

@@ -1,5 +1,3 @@
-import { BROWSER_TTS_PROVIDER_ID } from './audioPlayback'
-
 export interface TtsVoiceOption {
   id: string
   label: string
@@ -12,10 +10,12 @@ export interface TtsProviderInfo {
   recommended?: boolean
   voices: TtsVoiceOption[]
   defaultVoice?: string | null
+  description?: string
 }
 
 export interface ProvidersResponse {
   defaultNarrationStyle: string
+  defaultProvider?: string
   providers: TtsProviderInfo[]
 }
 
@@ -37,19 +37,27 @@ export interface AudioProviderOption {
   defaultVoice: string | null
 }
 
-const BROWSER_TTS_PROVIDER: TtsProviderInfo = {
-  id: BROWSER_TTS_PROVIDER_ID,
-  name: 'Browser speech',
-  available: true,
-  recommended: true,
-  voices: [],
-  defaultVoice: null,
-}
+/** Book TTS is limited to hosted Kokoro + Gemini. */
+export const ALLOWED_TTS_PROVIDER_IDS = new Set(['kokoro', 'google'])
+export const DEFAULT_TTS_PROVIDER_ID = 'kokoro'
 
-const FALLBACK_TTS_PROVIDERS = [
-  { id: BROWSER_TTS_PROVIDER_ID, label: 'Browser speech' },
-  { id: 'kokoro', label: 'Kokoro (on-device)' },
-  { id: 'google', label: 'Gemini Flash (cloud)' },
+const FALLBACK_TTS_PROVIDERS: TtsProviderInfo[] = [
+  {
+    id: 'kokoro',
+    name: 'Kokoro',
+    available: true,
+    recommended: true,
+    voices: [],
+    defaultVoice: null,
+  },
+  {
+    id: 'google',
+    name: 'Gemini TTS',
+    available: true,
+    recommended: false,
+    voices: [],
+    defaultVoice: null,
+  },
 ]
 
 export const PROVIDER_PREVIEW_TEXT = (
@@ -57,32 +65,25 @@ export const PROVIDER_PREVIEW_TEXT = (
   + 'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
 )
 
+/** Filter API/catalog entries down to Kokoro + Gemini only. */
+export function normalizeTtsProviders(providers?: TtsProviderInfo[]): TtsProviderInfo[] {
+  const catalog = (providers ?? []).filter((provider) => ALLOWED_TTS_PROVIDER_IDS.has(provider.id))
+  return catalog.length > 0 ? catalog : FALLBACK_TTS_PROVIDERS
+}
+
+/** @deprecated Use normalizeTtsProviders — kept for older imports. */
 export function withBrowserProvider(providers?: TtsProviderInfo[]) {
-  const catalog = providers ?? []
-  return catalog.some((provider) => provider.id === BROWSER_TTS_PROVIDER_ID)
-    ? catalog
-    : [BROWSER_TTS_PROVIDER, ...catalog]
+  return normalizeTtsProviders(providers)
 }
 
 export function providerOptionsFromCatalog(providers?: TtsProviderInfo[]): AudioProviderOption[] {
-  const catalog = withBrowserProvider(providers)
-  if (catalog.length) {
-    return catalog.map((provider) => ({
-      id: provider.id,
-      label: provider.name,
-      available: provider.available,
-      recommended: Boolean(provider.recommended),
-      voices: provider.voices,
-      defaultVoice: provider.defaultVoice ?? null,
-    }))
-  }
-
-  return FALLBACK_TTS_PROVIDERS.map((provider) => ({
-    ...provider,
-    available: true,
-    recommended: false,
-    voices: [],
-    defaultVoice: null,
+  return normalizeTtsProviders(providers).map((provider) => ({
+    id: provider.id,
+    label: provider.name,
+    available: provider.available,
+    recommended: Boolean(provider.recommended),
+    voices: provider.voices,
+    defaultVoice: provider.defaultVoice ?? null,
   }))
 }
 
@@ -93,11 +94,11 @@ export function defaultVoiceForProvider(
 }
 
 export function pickFallbackProvider(providers: TtsProviderInfo[]) {
-  const available = withBrowserProvider(providers).filter((provider) => provider.available)
+  const available = normalizeTtsProviders(providers).filter((provider) => provider.available)
   return (
-    available.find((provider) => provider.recommended) ??
-    available.find((provider) => provider.id === BROWSER_TTS_PROVIDER_ID) ??
     available.find((provider) => provider.id === 'kokoro') ??
+    available.find((provider) => provider.recommended) ??
+    available.find((provider) => provider.id === 'google') ??
     available[0] ??
     null
   )

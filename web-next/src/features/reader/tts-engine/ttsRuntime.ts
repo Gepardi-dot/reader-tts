@@ -5,15 +5,14 @@ import {
   queuePerformanceTelemetry,
 } from '@/shared/telemetry/performanceTelemetry'
 import {
-  BROWSER_TTS_PROVIDER_ID,
   DEFAULT_PREFETCH_AHEAD,
   PREFETCH_AHEAD_TARGET,
   audioSelectionKey,
   clientClockRateForProvider,
 } from '../audioPlayback'
+import { DEFAULT_TTS_PROVIDER_ID } from '../audioProviderCatalog'
 import { AudioClock } from './audioClock'
 import { BufferPool } from './bufferPool'
-import { BrowserSpeechLane } from './browserSpeechLane'
 import { createChunkLoader } from './chunkLoader'
 import { KokoroEngine, PREHEAT_SEGMENTS } from './kokoroEngine'
 import { audioErrorMessage } from './liveAudio'
@@ -49,9 +48,8 @@ export interface TtsRuntimeHooks {
 /**
  * Imperative TTS runtime. React only observes snapshots and forwards commands.
  *
- * Kokoro: stable segments + SegmentCache + continuous KokoroEngine.
+ * Kokoro: hosted live-audio / engine path.
  * Gemini: BufferPool + live-audio chunks.
- * Browser speech: selected-provider path only (never masks native).
  */
 export class TtsRuntime {
   private generation = 0
@@ -60,7 +58,7 @@ export class TtsRuntime {
   private lane: TtsPlaybackLane = 'none'
   private currentIndex = 0
   private word: string | null = null
-  private provider = BROWSER_TTS_PROVIDER_ID
+  private provider = DEFAULT_TTS_PROVIDER_ID
   private voice: string | null = null
   private rate = 1
   private error: string | null = null
@@ -69,7 +67,6 @@ export class TtsRuntime {
   private bookId: string | undefined
   private readonly clock = new AudioClock()
   private readonly kokoro = new KokoroEngine()
-  private readonly browser = new BrowserSpeechLane()
   private readonly firstAudio = new FirstAudioGate()
   private readonly objectUrls = new Set<string>()
   private readonly listeners = new Set<() => void>()
@@ -130,7 +127,7 @@ export class TtsRuntime {
 
   isAudibleOrLoading() {
     if (this.usingKokoroEngine) return this.kokoro.isActive()
-    return this.phase === 'playing' || this.phase === 'buffering' || this.clock.isActive || this.browser.isActive
+    return this.phase === 'playing' || this.phase === 'buffering' || this.clock.isActive
   }
 
   /** Absolute book offset for a chunk index — used for voice-switch restart. */
@@ -225,7 +222,6 @@ export class TtsRuntime {
     this.generation += 1
     this.controller?.abort()
     this.controller = null
-    this.browser.stop()
     this.clock.stop()
     this.kokoro.stop()
     this.usingKokoroEngine = false
@@ -262,8 +258,7 @@ export class TtsRuntime {
       return
     }
     if (this.phase !== 'playing') return
-    if (this.lane === 'fallback') this.browser.pause()
-    else void this.clock.pause()
+    void this.clock.pause()
     this.phase = 'paused'
     this.emit()
   }
@@ -275,8 +270,7 @@ export class TtsRuntime {
       return
     }
     if (this.phase !== 'paused') return
-    if (this.lane === 'fallback') this.browser.resume()
-    else void this.clock.resume()
+    void this.clock.resume()
     this.phase = 'playing'
     this.emit()
   }
@@ -341,6 +335,12 @@ export class TtsRuntime {
     this.chunks = chunks
     this.emit()
 
+    if (params.provider !== 'kokoro' && params.provider !== 'google') {
+      this.hooks.showToast('Choose Kokoro or Gemini TTS to play audio.')
+      this.stop()
+      return
+    }
+
     queuePerformanceTelemetry({
       eventName: 'tts.play_start_v2',
       bookId: params.bookId,
@@ -350,22 +350,11 @@ export class TtsRuntime {
         startOffset: params.startOffset,
         selectedChars: params.word.length,
         chunkCount: chunks.length,
-        browserFallback: params.provider === BROWSER_TTS_PROVIDER_ID && this.browser.canSpeak(),
+        browserFallback: false,
         kokoroModelReady: isModelReady(),
         engine: params.provider === 'kokoro' ? 'kokoro-hosted' : 'v3',
       },
     })
-
-    // Selected browser speech path only — never masks Kokoro/Gemini.
-    if (params.provider === BROWSER_TTS_PROVIDER_ID) {
-      if (!this.browser.canSpeak()) {
-        this.hooks.showToast('Browser speech is not supported by this browser.')
-        this.stop()
-        return
-      }
-      this.speakBrowserAt(0, generation, controller.signal)
-      return
-    }
 
     const loader = createChunkLoader({
       bookId: params.bookId,
@@ -563,48 +552,6 @@ export class TtsRuntime {
     ))
     const notLastChunk = fromChunkIndex < this.chunks.length - 1
     this.clock.setExpectMore(anyLoading || hasLaterChunks || notLastChunk)
-  }
-
-  private speakBrowserAt(index: number, generation: number, signal: AbortSignal) {
-    const chunk = this.chunks[index]
-    if (!chunk || generation !== this.generation || signal.aborted) return
-
-    this.lane = 'fallback'
-    this.currentIndex = index
-    this.hooks.syncAudioFollowCue(chunk, 0, true)
-    this.emit()
-
-    const started = this.browser.speakChunk({
-      chunk: { index, text: chunk.text },
-      rate: this.rate,
-      signal,
-      onStart: () => {
-        if (generation !== this.generation) return
-        this.phase = 'playing'
-        this.lane = 'fallback'
-        this.markFirstAudio(chunk)
-        this.emit()
-      },
-      onEnd: () => {
-        if (generation !== this.generation) return
-        const next = index + 1
-        if (next >= this.chunks.length) {
-          this.stop()
-          return
-        }
-        this.speakBrowserAt(next, generation, signal)
-      },
-      onError: () => {
-        if (generation !== this.generation) return
-        this.hooks.showToast('Browser speech stopped. Tap a word to start again.')
-        this.stop()
-      },
-    })
-
-    if (!started) {
-      this.hooks.showToast('Browser speech is not supported by this browser.')
-      this.stop()
-    }
   }
 
   private markFirstAudio(chunk: TtsAudioChunk) {

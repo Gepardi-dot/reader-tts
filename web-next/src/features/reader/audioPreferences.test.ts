@@ -28,6 +28,15 @@ afterEach(() => {
 })
 
 describe('audio preferences', () => {
+  it('defaults to kokoro', () => {
+    installStorage()
+    expect(loadAudioPrefs()).toMatchObject({
+      provider: 'kokoro',
+      voice: null,
+      version: 4,
+    })
+  })
+
   it('migrates the old single voice preference into a provider-scoped map', () => {
     const storage = installStorage()
     storage.set('reader-audio-prefs', JSON.stringify({
@@ -40,7 +49,22 @@ describe('audio preferences', () => {
       provider: 'kokoro',
       voice: 'am_adam',
       voicesByProvider: { kokoro: 'am_adam' },
+      version: 4,
+    })
+  })
+
+  it('migrates browser speech prefs to kokoro', () => {
+    const storage = installStorage()
+    storage.set('reader-audio-prefs', JSON.stringify({
+      provider: 'browser',
+      voice: null,
       version: 3,
+    }))
+
+    expect(loadAudioPrefs()).toMatchObject({
+      provider: 'kokoro',
+      voice: null,
+      version: 4,
     })
   })
 
@@ -73,15 +97,14 @@ describe('audio preferences', () => {
     expect(resolvedVoiceForProvider('kokoro', provider, prefs)).toBe('am_adam')
   })
 
-  it('saves browser speech with a null committed voice', () => {
+  it('saves kokoro as the default committed provider', () => {
     const storage = installStorage()
-    saveAudioPrefs(audioPrefsWithSelection(loadAudioPrefs(), { provider: 'browser', voice: 'ignored' }))
+    saveAudioPrefs(audioPrefsWithSelection(loadAudioPrefs(), { provider: 'kokoro', voice: 'af_heart' }))
 
     expect(JSON.parse(storage.get('reader-audio-prefs') ?? '{}')).toMatchObject({
-      provider: 'browser',
-      voice: null,
-      version: 3,
+      provider: 'kokoro',
+      voice: 'af_heart',
+      version: 4,
     })
   })
 })
-

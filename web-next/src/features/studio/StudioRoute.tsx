@@ -2,15 +2,24 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { BookOpen, Check, Circle, Sparkles, X } from 'lucide-react'
 import { api } from '@/shared/api/client'
-import { isVocabWord, isPlaceholderDefinition } from './vocabUtils'
+import { isVocabWord, isUsableDefinition } from './vocabUtils'
 import {
-  buildSessionPlan as buildPlanForStages,
+  aggregateSessionResults,
+  buildDefinitionMcqOptions,
   buildRemedialStep,
+  buildSmartSessionPlan,
   objectiveResultToRating,
   pickDistractors,
+  prioritizeWordsForMode,
+  sessionAccuracy,
+  sessionLimitForMode,
+  worseRating,
   type ExerciseKind,
+  type Rating as PlanRating,
+  type SessionMode,
 } from './sessionPlan'
 import { StudioHeader, useStudioSummary } from './StudioHeader'
+import { speakStudioText } from './studioVoice'
 
 const C = {
   bg: 'transparent',
@@ -268,14 +277,26 @@ interface StepCompletePayload {
 }
 
 interface PracticeSessionResponse {
-  deck: DeckSummary
-  focus: string
-  items: SessionCard[]
+  deck?: DeckSummary
+  focus?: string
+  items?: SessionCard[]
+  /** Older worker shape */
+  cards?: SessionCard[]
 }
 
 interface ReviewResponse {
   summary: DeckSummary
   nextCard: SessionCard | null
+  xpAwarded?: number
+  rating?: Rating
+}
+
+function xpForRatingClient(rating: Rating | null | undefined): number {
+  if (rating === 'easy') return 20
+  if (rating === 'good') return 15
+  if (rating === 'hard') return 10
+  if (rating === 'again') return 5
+  return 0
 }
 
 function progressPercent(progress: number) {
@@ -286,24 +307,8 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function shuffle<T>(arr: T[]): T[] {
-  const a = [...arr]
-  for (let i = a.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1))
-    ;[a[i], a[j]] = [a[j], a[i]]
-  }
-  return a
-}
-
 function speak(text: string) {
-  try {
-    window.speechSynthesis.cancel()
-    const utterance = new SpeechSynthesisUtterance(text)
-    utterance.rate = 0.85
-    window.speechSynthesis.speak(utterance)
-  } catch {
-    // Speech synthesis is optional; unsupported browsers can ignore this.
-  }
+  void speakStudioText(text)
 }
 
 function computeIntervals(card: SessionCard | PracticeWord) {
@@ -337,12 +342,35 @@ function targetWord(card: SessionCard) {
 }
 
 function definitionForCard(card: SessionCard) {
-  const answer = (card.cardType === 'reverse' ? card.cue : card.answer).trim()
-  return answer || card.explanation || card.extra || 'Saved from your reading.'
+  const head = (card.productionTarget || (card.cardType === 'reverse' ? card.answer : card.cue)).trim()
+  const candidates = [
+    card.cardType === 'reverse' ? card.cue : card.answer,
+    card.explanation,
+    card.extra && !card.extra.startsWith('/') ? card.extra : null,
+  ]
+  for (const candidate of candidates) {
+    const value = (candidate ?? '').trim()
+    if (isUsableDefinition(value, head)) return value
+  }
+  // Prefer empty over a headword-as-definition (MCQ would become trivial/wrong).
+  const fallback = (card.cardType === 'reverse' ? card.cue : card.answer).trim()
+  if (fallback && fallback.toLowerCase() !== head.toLowerCase()) return fallback
+  return ''
 }
 
 function sentenceForCard(card: SessionCard, word: string, definition: string) {
-  return card.exampleSentence || card.explanation || card.extra || `${word} means ${definition}.`
+  const example = (card.exampleSentence ?? '').trim()
+  if (example && example.toLowerCase() !== word.toLowerCase()) {
+    // Prefer sentences that actually contain the word for cloze.
+    if (new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(example)) {
+      return example
+    }
+    return example
+  }
+  if (definition && isUsableDefinition(definition, word)) {
+    return `In the story, the idea of “${word}” comes up — ${definition.replace(/\.$/, '')}.`
+  }
+  return `As you read, notice how “${word}” is used in context.`
 }
 
 function cardToPracticeWord(card: SessionCard): PracticeWord {
@@ -378,8 +406,26 @@ function noteToSavedWord(note: VocabNote): SavedWord {
 }
 
 function buildSessionPlan(words: PracticeWord[]): PracticeStep[] {
-  return buildPlanForStages(words, AVAILABLE_EXERCISES) as PracticeStep[]
+  return buildSmartSessionPlan(words, AVAILABLE_EXERCISES) as PracticeStep[]
 }
+
+const EXERCISE_LABEL: Record<ExerciseType, string> = {
+  mcq: 'Definition pick',
+  cloze: 'Fill the blank',
+  mnemonic: 'Memory hook',
+  recall: 'Self-check',
+  'write-sentence': 'Use in a sentence',
+  'write-definition': 'Write the meaning',
+  'reverse-recall': 'Word from meaning',
+  listening: 'Listen & choose',
+}
+
+const SESSION_MODES: Array<{ id: SessionMode; label: string; hint: string }> = [
+  { id: 'quick', label: 'Quick 5', hint: 'Short daily set' },
+  { id: 'due', label: 'Due now', hint: 'Cards ready today' },
+  { id: 'weak', label: 'Weak first', hint: 'Learning & shaky cards' },
+  { id: 'full', label: 'Full set', hint: 'Up to 12 cards' },
+]
 
 function ratingFromResult(exercise: ExerciseType, result: StepCompletePayload): Rating | null {
   if (result.rating) return result.rating
@@ -497,34 +543,62 @@ function Btn({
 
 function AudioBtn({ text, size = 32 }: { text: string; size?: number }) {
   const [speaking, setSpeaking] = useState(false)
-  function go(e: React.MouseEvent) {
+  const [loading, setLoading] = useState(false)
+
+  async function go(e: React.MouseEvent) {
     e.stopPropagation()
-    speak(text)
-    setSpeaking(true)
-    setTimeout(() => setSpeaking(false), 2200)
+    if (loading || speaking) return
+    setLoading(true)
+    try {
+      await speakStudioText(text, {
+        onPlaying: () => {
+          setLoading(false)
+          setSpeaking(true)
+        },
+      })
+    } finally {
+      setLoading(false)
+      setSpeaking(false)
+    }
   }
   return (
     <button
-      onClick={go}
+      onClick={(e) => { void go(e) }}
       aria-label={`Pronounce ${text}`}
+      disabled={loading}
+      title="Play with neural voice (Kokoro)"
       style={{
         width: size, height: size, borderRadius: '50%',
-        background: speaking ? C.blue : `${C.blue}15`,
-        border: `1.5px solid ${speaking ? C.blue : `${C.blue}44`}`,
-        color: speaking ? '#fff' : C.blue,
-        cursor: 'pointer',
+        background: speaking || loading ? C.blue : `${C.blue}15`,
+        border: `1.5px solid ${speaking || loading ? C.blue : `${C.blue}44`}`,
+        color: speaking || loading ? '#fff' : C.blue,
+        cursor: loading ? 'wait' : 'pointer',
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         transition: 'all 0.2s', flex: '0 0 auto',
-        boxShadow: speaking ? `0 0 0 4px ${C.blue}22` : 'none',
+        boxShadow: speaking || loading ? `0 0 0 4px ${C.blue}22` : 'none',
+        opacity: loading ? 0.85 : 1,
       }}
-      onMouseEnter={(e) => { if (!speaking) { e.currentTarget.style.background = `${C.blue}28` } }}
-      onMouseLeave={(e) => { if (!speaking) { e.currentTarget.style.background = `${C.blue}15` } }}
+      onMouseEnter={(e) => { if (!speaking && !loading) { e.currentTarget.style.background = `${C.blue}28` } }}
+      onMouseLeave={(e) => { if (!speaking && !loading) { e.currentTarget.style.background = `${C.blue}15` } }}
     >
+      {loading ? (
+        <div
+          style={{
+            width: Math.round(size * 0.36),
+            height: Math.round(size * 0.36),
+            borderRadius: '50%',
+            border: '2px solid rgba(255,255,255,0.35)',
+            borderTopColor: '#fff',
+            animation: 'studioSpin 0.7s linear infinite',
+          }}
+        />
+      ) : (
       <svg width={Math.round(size * 0.44)} height={Math.round(size * 0.44)} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
         <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
         <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
         <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
       </svg>
+      )}
     </button>
   )
 }
@@ -635,65 +709,129 @@ function ExerciseMCQ({
   onComplete: (result: StepCompletePayload) => void
 }) {
   const [selected, setSelected] = useState<string | null>(null)
+  const usableDef = isUsableDefinition(word.definition, word.word)
   const [options] = useState(() => {
-    const fallback = ['Brief and direct', 'Difficult to understand', 'Full of careful detail', 'Done with strong emotion']
-    const pool = [...distractors, ...fallback].filter(item => item && item !== word.definition)
-    return shuffle([word.definition, ...Array.from(new Set(pool)).slice(0, 3)])
+    if (!usableDef) return []
+    return buildDefinitionMcqOptions(word.definition, distractors, word.word)
   })
+  const bookContext = word.sentence
+    && word.sentence.length > 16
+    && !/^as you read/i.test(word.sentence)
+    ? word.sentence
+    : null
 
   const revealed = selected !== null
   const correct = selected === word.definition
 
-  return (
-    <div>
-      <ExerciseHeader title="Multiple Choice" subtitle={`from ${word.book}`} word={word.word} />
-      <div style={{ fontFamily: FONT.display, fontSize: 24, fontWeight: 700, color: C.cream, marginTop: 10, marginBottom: 4, letterSpacing: '-0.01em', lineHeight: 1.3 }}>
-        {word.word}
+  // Keyboard: 1–4 / A–D to answer, Enter to continue
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (!revealed) {
+        const map: Record<string, number> = { '1': 0, '2': 1, '3': 2, '4': 3, a: 0, b: 1, c: 2, d: 3 }
+        const idx = map[e.key.toLowerCase()]
+        if (idx != null && options[idx]) {
+          e.preventDefault()
+          setSelected(options[idx])
+        }
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        onComplete({ correct })
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [revealed, options, correct, onComplete])
+
+  if (!usableDef || options.length < 2) {
+    return (
+      <div>
+        <ExerciseHeader title="Definition pick" subtitle={`from ${word.book}`} word={word.word} />
+        <div style={{ padding: '14px 16px', borderRadius: 12, background: `${C.amber}14`, border: `1px solid ${C.amber}40`, color: C.amber, fontSize: 13.5, lineHeight: 1.5, marginTop: 12 }}>
+          This card is missing a real definition, so a definition quiz can’t run yet. Save the word again from Define, or skip for now.
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <Btn onClick={() => onComplete({ correct: true, rating: 'hard' })} style={{ width: '100%' }}>
+            Skip card
+          </Btn>
+        </div>
       </div>
-      {word.phonetic && <div style={{ color: C.muted, fontSize: 13, fontFamily: FONT.mono, marginBottom: 16 }}>{word.phonetic}</div>}
-      <div style={{ color: C.mutedHi, fontSize: 13, marginBottom: 10, fontFamily: FONT.ui }}>Which definition is correct?</div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {options.map((opt, i) => {
+    )
+  }
+
+  // After answering, only keep selected + correct options so the result stays on-screen.
+  const visibleOptions = revealed
+    ? options
+        .map((opt, i) => ({ opt, i }))
+        .filter(({ opt }) => opt === selected || opt === word.definition)
+    : options.map((opt, i) => ({ opt, i }))
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0 }}>
+      {/* Compact meta — no second giant header (progress bar already labels the exercise) */}
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>
+        {word.book} · keys 1–4
+      </div>
+
+      {!revealed && bookContext && (
+        <div style={{
+          marginBottom: 10,
+          padding: '8px 10px',
+          background: 'rgba(0,0,0,0.03)',
+          borderLeft: `3px solid ${C.gold}`,
+          borderRadius: '0 10px 10px 0',
+          fontSize: 12.5, lineHeight: 1.4, color: C.mutedHi, fontStyle: 'italic',
+        }}>
+          “{bookContext.length > 120 ? `${bookContext.slice(0, 117)}…` : bookContext}”
+        </div>
+      )}
+
+      <div style={{ color: C.mutedHi, fontSize: 13, marginBottom: 10, fontFamily: FONT.ui }}>
+        What does <strong style={{ color: C.text, fontFamily: FONT.display, fontSize: 15 }}>{word.word}</strong> mean here?
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: '1 1 auto', minHeight: 0 }}>
+        {visibleOptions.map(({ opt, i }) => {
           const isSel = selected === opt
           const isCorrect = opt === word.definition
           let bg = C.cardHi
           let bd = C.border
           let col = C.text
           if (revealed) {
-            if (isCorrect) { bg = `${C.green}20`; bd = `${C.green}66`; col = C.green }
-            else if (isSel) { bg = `${C.red}20`; bd = `${C.red}66`; col = C.red }
+            if (isCorrect) { bg = `${C.green}18`; bd = `${C.green}55`; col = C.green }
+            else if (isSel) { bg = `${C.red}18`; bd = `${C.red}55`; col = C.red }
           }
           return (
             <button
-              key={opt}
+              key={`${i}-${opt.slice(0, 24)}`}
               onClick={() => !revealed && setSelected(opt)}
               style={{
                 background: bg,
                 border: `1px solid ${bd}`,
                 borderRadius: 12,
-                padding: '13px 15px',
+                padding: '10px 12px',
                 color: col,
-                fontSize: 14,
+                fontSize: 13.5,
                 textAlign: 'left',
                 cursor: revealed ? 'default' : 'pointer',
                 fontFamily: FONT.ui,
-                transition: 'all 0.2s',
+                transition: 'all 0.18s',
                 lineHeight: 1.4,
               }}
             >
-              {String.fromCharCode(65 + i)}. {opt}
+              <span style={{ opacity: 0.55, fontWeight: 700, marginRight: 8 }}>{String.fromCharCode(65 + i)}.</span>
+              {opt}
             </button>
           )
         })}
       </div>
 
       {revealed && (
-        <>
+        <div style={{ marginTop: 12, flexShrink: 0 }}>
           <div
             style={{
-              marginTop: 14,
-              padding: '12px 14px',
-              background: `${correct ? C.green : C.red}14`,
+              padding: '10px 12px',
+              background: `${correct ? C.green : C.red}12`,
               border: `1px solid ${correct ? C.green : C.red}33`,
               borderRadius: 10,
               color: correct ? C.green : C.red,
@@ -702,18 +840,25 @@ function ExerciseMCQ({
               fontWeight: 600,
               display: 'flex',
               gap: 8,
-              alignItems: 'center',
+              alignItems: 'flex-start',
+              marginBottom: 10,
             }}
           >
-            {correct ? <Check size={14} /> : <X size={14} />}
-            {correct ? 'Correct' : 'Not quite'}
+            {correct ? <Check size={14} style={{ marginTop: 2, flexShrink: 0 }} /> : <X size={14} style={{ marginTop: 2, flexShrink: 0 }} />}
+            <div style={{ minWidth: 0 }}>
+              <div>{correct ? 'Correct' : 'Not quite'}</div>
+              <div style={{ marginTop: 3, fontWeight: 500, color: C.mutedHi, lineHeight: 1.4 }}>
+                <strong style={{ color: C.text }}>{word.word}</strong>
+                {': '}
+                <em style={{ color: C.text }}>{word.definition}</em>
+              </div>
+            </div>
           </div>
-          <div style={{ marginTop: 14 }}>
-            <Btn onClick={() => onComplete({ correct })} style={{ width: '100%' }}>Continue</Btn>
-          </div>
-        </>
+          <Btn onClick={() => onComplete({ correct })} style={{ width: '100%', padding: '12px 16px' }}>
+            Continue · Enter
+          </Btn>
+        </div>
       )}
-
     </div>
   )
 }
@@ -729,10 +874,10 @@ function ExerciseListening({
 }) {
   const [selected, setSelected] = useState<string | null>(null)
   const [hasPlayed, setHasPlayed] = useState(false)
+  const usableDef = isUsableDefinition(word.definition, word.word)
   const [options] = useState(() => {
-    const fallback = ['Brief and direct', 'Difficult to understand', 'Full of careful detail', 'Done with strong emotion']
-    const pool = [...distractors, ...fallback].filter(item => item && item !== word.definition)
-    return shuffle([word.definition, ...Array.from(new Set(pool)).slice(0, 3)])
+    if (!usableDef) return []
+    return buildDefinitionMcqOptions(word.definition, distractors, word.word)
   })
 
   function play() {
@@ -740,108 +885,166 @@ function ExerciseListening({
     setHasPlayed(true)
   }
 
+  // Auto-play once so the card is ready without a tall empty state.
+  useEffect(() => {
+    const t = window.setTimeout(() => play(), 280)
+    return () => window.clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [word.id])
+
   const revealed = selected !== null
   const correct = selected === word.definition
 
-  return (
-    <div>
-      <ExerciseHeader title="Listening Recognition" subtitle="Tap play and pick the meaning" />
-      {!hasPlayed ? (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '28px 0 18px' }}>
-          <button
-            onClick={play}
-            aria-label="Play the word"
-            style={{
-              width: 80, height: 80, borderRadius: '50%',
-              background: C.blue,
-              border: 'none',
-              color: '#fff',
-              cursor: 'pointer',
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: `0 8px 24px ${C.blue}40`,
-              transition: 'transform 0.15s, box-shadow 0.15s',
-            }}
-            onMouseDown={(e) => { e.currentTarget.style.transform = 'scale(0.95)' }}
-            onMouseUp={(e) => { e.currentTarget.style.transform = 'scale(1)' }}
-            onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)' }}
-          >
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
-          </button>
-          <div style={{ color: C.mutedHi, fontSize: 13, fontFamily: FONT.ui }}>Tap to hear the word</div>
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (!revealed) {
+        if (e.key === ' ' || e.key.toLowerCase() === 'r') {
+          e.preventDefault()
+          play()
+          return
+        }
+        const map: Record<string, number> = { '1': 0, '2': 1, '3': 2, '4': 3, a: 0, b: 1, c: 2, d: 3 }
+        const idx = map[e.key.toLowerCase()]
+        if (idx != null && options[idx] && hasPlayed) {
+          e.preventDefault()
+          setSelected(options[idx])
+        }
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        onComplete({ correct, hintsUsed: 0, attempts: 1 })
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [revealed, options, correct, onComplete, hasPlayed])
+
+  if (!usableDef || options.length < 2) {
+    return (
+      <div>
+        <div style={{ padding: '14px 16px', borderRadius: 12, background: `${C.amber}14`, border: `1px solid ${C.amber}40`, color: C.amber, fontSize: 13.5, lineHeight: 1.5 }}>
+          No solid definition is available for listening practice yet.
         </div>
-      ) : (
-        <>
-          <div style={{ display: 'flex', justifyContent: 'center', padding: '14px 0 4px' }}>
+        <div style={{ marginTop: 14 }}>
+          <Btn onClick={() => onComplete({ correct: true, rating: 'hard' })} style={{ width: '100%' }}>Skip card</Btn>
+        </div>
+      </div>
+    )
+  }
+
+  // Collapse distractors after answering so Continue stays on-screen.
+  const visibleOptions = revealed
+    ? options
+        .map((opt, i) => ({ opt, i }))
+        .filter(({ opt }) => opt === selected || opt === word.definition)
+    : options.map((opt, i) => ({ opt, i }))
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexShrink: 0 }}>
+        <div style={{ fontSize: 12.5, color: C.mutedHi }}>
+          {hasPlayed ? 'What does this word mean?' : 'Playing the word…'}
+          <span style={{ color: C.muted }}> · keys 1–4</span>
+        </div>
+        <button
+          type="button"
+          onClick={play}
+          aria-label="Replay the word"
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '7px 12px',
+            borderRadius: 99,
+            border: `1.5px solid ${C.blue}55`,
+            background: `${C.blue}12`,
+            color: C.blue,
+            cursor: 'pointer',
+            fontSize: 12.5, fontWeight: 600, fontFamily: FONT.ui,
+            flexShrink: 0,
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+          {hasPlayed ? 'Replay' : 'Play'}
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: '1 1 auto', minHeight: 0 }}>
+        {visibleOptions.map(({ opt, i }) => {
+          const isSel = selected === opt
+          const isCorrectOpt = opt === word.definition
+          let bg = C.cardHi
+          let bd = C.border
+          let col = C.text
+          if (revealed) {
+            if (isCorrectOpt) { bg = `${C.green}18`; bd = `${C.green}55`; col = C.green }
+            else if (isSel) { bg = `${C.red}18`; bd = `${C.red}55`; col = C.red }
+          }
+          return (
             <button
-              onClick={play}
-              aria-label="Replay the word"
+              key={`${i}-${opt.slice(0, 24)}`}
+              type="button"
+              onClick={() => {
+                if (revealed) return
+                if (!hasPlayed) play()
+                setSelected(opt)
+              }}
               style={{
-                display: 'inline-flex', alignItems: 'center', gap: 8,
-                padding: '10px 16px',
-                borderRadius: 99,
-                border: `1.5px solid ${C.blue}55`,
-                background: `${C.blue}12`,
-                color: C.blue,
-                cursor: 'pointer',
-                fontSize: 13, fontWeight: 600, fontFamily: FONT.ui,
+                background: bg,
+                border: `1px solid ${bd}`,
+                borderRadius: 12,
+                padding: '10px 12px',
+                color: col,
+                fontSize: 13.5,
+                textAlign: 'left',
+                cursor: revealed ? 'default' : 'pointer',
+                fontFamily: FONT.ui,
+                transition: 'all 0.18s',
+                lineHeight: 1.4,
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
-              Replay
+              <span style={{ opacity: 0.55, fontWeight: 700, marginRight: 8 }}>{String.fromCharCode(65 + i)}.</span>
+              {opt}
             </button>
-          </div>
-          <div style={{ color: C.mutedHi, fontSize: 13, marginTop: 14, marginBottom: 10, fontFamily: FONT.ui, textAlign: 'center' }}>What does this word mean?</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {options.map((opt, i) => {
-              const isSel = selected === opt
-              const isCorrect = opt === word.definition
-              let bg = C.cardHi
-              let bd = C.border
-              let col = C.text
-              if (revealed) {
-                if (isCorrect) { bg = `${C.green}20`; bd = `${C.green}66`; col = C.green }
-                else if (isSel) { bg = `${C.red}20`; bd = `${C.red}66`; col = C.red }
-              }
-              return (
-                <button
-                  key={opt}
-                  onClick={() => !revealed && setSelected(opt)}
-                  style={{
-                    background: bg,
-                    border: `1px solid ${bd}`,
-                    borderRadius: 12,
-                    padding: '13px 15px',
-                    color: col,
-                    fontSize: 14,
-                    textAlign: 'left',
-                    cursor: revealed ? 'default' : 'pointer',
-                    fontFamily: FONT.ui,
-                    transition: 'all 0.2s',
-                    lineHeight: 1.4,
-                  }}
-                >
-                  {String.fromCharCode(65 + i)}. {opt}
-                </button>
-              )
-            })}
-          </div>
-          {revealed && (
-            <>
-              <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 14, border: `1px solid ${C.border}`, background: C.card }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-                  <div style={{ fontFamily: FONT.display, fontSize: 20, fontWeight: 700, color: C.cream }}>{word.word}</div>
-                  {word.phonetic && <div style={{ color: C.muted, fontSize: 12, fontFamily: FONT.mono }}>{word.phonetic}</div>}
+          )
+        })}
+      </div>
+
+      {revealed && (
+        <div style={{ marginTop: 12, flexShrink: 0 }}>
+          <div
+            style={{
+              padding: '10px 12px',
+              background: `${correct ? C.green : C.red}12`,
+              border: `1px solid ${correct ? C.green : C.red}33`,
+              borderRadius: 10,
+              color: correct ? C.green : C.red,
+              fontSize: 13,
+              fontFamily: FONT.ui,
+              fontWeight: 600,
+              display: 'flex',
+              gap: 8,
+              alignItems: 'flex-start',
+              marginBottom: 10,
+            }}
+          >
+            {correct ? <Check size={14} style={{ marginTop: 2, flexShrink: 0 }} /> : <X size={14} style={{ marginTop: 2, flexShrink: 0 }} />}
+            <div style={{ minWidth: 0 }}>
+              <div>{correct ? 'Correct' : 'Not quite'}</div>
+              <div style={{ marginTop: 3, fontWeight: 500, color: C.mutedHi, lineHeight: 1.4 }}>
+                <strong style={{ color: C.text }}>{word.word}</strong>
+                {word.phonetic ? <span style={{ fontFamily: FONT.mono, fontSize: 12, marginLeft: 6 }}>{word.phonetic}</span> : null}
+                <div style={{ marginTop: 2 }}>
+                  <em style={{ color: C.text }}>{word.definition}</em>
                 </div>
-                {word.sentence && (
-                  <div style={{ color: C.text, fontSize: 13.5, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.5 }}>"{word.sentence}"</div>
-                )}
               </div>
-              <div style={{ marginTop: 14 }}>
-                <Btn onClick={() => onComplete({ correct, hintsUsed: 0, attempts: 1 })} style={{ width: '100%' }}>Continue</Btn>
-              </div>
-            </>
-          )}
-        </>
+            </div>
+          </div>
+          <Btn
+            onClick={() => onComplete({ correct, hintsUsed: 0, attempts: 1 })}
+            style={{ width: '100%', padding: '12px 16px' }}
+          >
+            Continue · Enter
+          </Btn>
+        </div>
       )}
     </div>
   )
@@ -1591,44 +1794,54 @@ function Dashboard({
   deck,
   words,
   analytics,
+  sessionMode,
+  onModeChange,
   onStart,
   startDisabled,
   starting,
   enrichProgress,
   error,
+  missedCount,
+  onPracticeMissed,
 }: {
   deck: DeckSummary
   words: SavedWord[]
   analytics?: DeckDashboard['analytics']
+  sessionMode: SessionMode
+  onModeChange: (mode: SessionMode) => void
   onStart: () => void
   startDisabled: boolean
   starting: boolean
   enrichProgress: { done: number; total: number } | null
   error: string | null
+  missedCount: number
+  onPracticeMissed: () => void
 }) {
   const stageColor: Record<CardState, string> = { new: C.blue, learning: C.amber, review: C.green, relearning: C.violet }
-  const dailyGoal = Math.max(20, deck.dueToday || deck.reviewsCompletedToday || 20)
-  const progress = Math.min(1, deck.reviewsCompletedToday / dailyGoal)
+  const dailyGoal = Math.max(10, Math.min(30, deck.dueToday || deck.dueNow || 10))
+  const progress = Math.min(1, (deck.reviewsCompletedToday || 0) / dailyGoal)
+  const ready = deck.dueNow + deck.newAvailable
   const stats = [
-    { label: 'Due Today', value: deck.dueToday || deck.dueNow, color: C.gold },
-    { label: 'Learned', value: `${analytics?.cardsLearned ?? deck.newIntroducedToday}`, color: C.orange },
-    { label: 'Total', value: deck.cardCount, color: C.blue },
-    { label: 'Mastered', value: deck.cardsByState.review ?? 0, color: C.green },
+    { label: 'Due', value: deck.dueToday || deck.dueNow, color: C.gold },
+    { label: 'New', value: deck.newAvailable ?? deck.cardsByState.new ?? 0, color: C.blue },
+    { label: 'Total', value: deck.cardCount, color: C.orange },
+    { label: 'Review', value: deck.cardsByState.review ?? 0, color: C.green },
   ]
+  void analytics
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* Hero heading */}
       <div style={{ marginBottom: 2 }}>
         <div style={{ fontSize: 26, fontWeight: 900, color: C.cream, lineHeight: 1.15, letterSpacing: '-0.02em' }}>
-          {startDisabled ? 'All caught up!' : 'Ready to practice?'}
+          {startDisabled ? 'All caught up!' : 'Practice vocabulary'}
         </div>
         <div style={{ color: C.mutedHi, fontSize: 13, marginTop: 4 }}>
-          {deck.dueNow + deck.newAvailable} cards ready · mixed exercises
+          {ready > 0
+            ? `${ready} card${ready === 1 ? '' : 's'} ready · definitions, cloze, and recall from your books`
+            : 'Nothing due right now — come back after saving more words or when cards mature.'}
         </div>
       </div>
 
-      {/* Stats grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
         {stats.map((s) => (
           <div key={s.label} className="studio-card" style={{ padding: '10px 12px' }}>
@@ -1638,41 +1851,85 @@ function Dashboard({
         ))}
       </div>
 
-      {/* Start session card */}
       <div className="studio-card" style={{ padding: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-          <span style={{ color: C.text, fontSize: 13.5, fontWeight: 600 }}>Daily Goal</span>
-          <span style={{ color: C.gold, fontSize: 12.5, fontWeight: 700 }}>{deck.reviewsCompletedToday} / {dailyGoal} cards</span>
+        <div style={{ color: C.text, fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Session type</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
+          {SESSION_MODES.map((m) => {
+            const active = sessionMode === m.id
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => onModeChange(m.id)}
+                style={{
+                  textAlign: 'left',
+                  padding: '10px 12px',
+                  borderRadius: 12,
+                  border: `1.5px solid ${active ? C.blue : C.border}`,
+                  background: active ? `${C.blue}10` : C.cardHi,
+                  cursor: 'pointer',
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 700, color: active ? C.blue : C.text }}>{m.label}</div>
+                <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{m.hint}</div>
+              </button>
+            )
+          })}
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+          <span style={{ color: C.text, fontSize: 12.5, fontWeight: 600 }}>Today</span>
+          <span style={{ color: C.gold, fontSize: 12, fontWeight: 700 }}>
+            {deck.reviewsCompletedToday} / {dailyGoal} reviews
+          </span>
         </div>
         <ProgressBar progress={progress} color={C.gold} height={5} />
-        <Btn onClick={onStart} disabled={startDisabled || starting} style={{ width: '100%', marginTop: 12, borderRadius: 12, fontSize: 14.5, padding: '13px 20px' }}>
+
+        <Btn
+          onClick={onStart}
+          disabled={startDisabled || starting}
+          style={{ width: '100%', marginTop: 14, borderRadius: 12, fontSize: 14.5, padding: '13px 20px' }}
+        >
           {enrichProgress
             ? `Preparing words…  ${enrichProgress.done}/${enrichProgress.total}`
             : starting
               ? 'Starting…'
               : startDisabled
                 ? 'All caught up ✓'
-                : 'Start Session →'}
+                : `Start ${SESSION_MODES.find((m) => m.id === sessionMode)?.label ?? 'session'} →`}
         </Btn>
+
+        {missedCount > 0 && (
+          <Btn
+            variant="ghost"
+            onClick={onPracticeMissed}
+            disabled={starting}
+            style={{ width: '100%', marginTop: 8, borderRadius: 12, fontSize: 13.5 }}
+          >
+            Retry {missedCount} missed word{missedCount === 1 ? '' : 's'}
+          </Btn>
+        )}
+
         {error && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{error}</div>}
       </div>
 
-      {/* Saved words */}
       <div>
         <div style={{ color: C.mutedHi, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>
-          Saved Words
+          Your words
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {words.slice(0, 18).map((w) => (
             <div key={w.id} className="studio-card" style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ color: C.cream, fontWeight: 700, fontSize: 15, fontFamily: FONT.display, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.word}</div>
-                <div style={{ color: C.muted, fontSize: 11.5, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.book}</div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ color: C.cream, fontWeight: 700, fontSize: 15, fontFamily: FONT.display, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.word}</div>
+                  <Pill color={stageColor[w.stage]}>{w.stage}</Pill>
+                </div>
+                <div style={{ color: C.mutedHi, fontSize: 12, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {isUsableDefinition(w.definition, w.word) ? w.definition : w.book}
+                </div>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '0 0 auto' }}>
-                <AudioBtn text={w.word} size={26} />
-                <Pill color={stageColor[w.stage]}>{w.stage}</Pill>
-              </div>
+              <AudioBtn text={w.word} size={26} />
             </div>
           ))}
         </div>
@@ -1688,6 +1945,7 @@ function PracticeScreen({
   distractors,
   onComplete,
   busy,
+  sessionLabel,
 }: {
   step: PracticeStep
   stepIndex: number
@@ -1695,8 +1953,10 @@ function PracticeScreen({
   distractors: string[]
   onComplete: (result: StepCompletePayload) => void
   busy: boolean
+  sessionLabel?: string
 }) {
   const [xpAnim, setXpAnim] = useState<string | null>(null)
+  const progress = (stepIndex + 0.15) / Math.max(1, totalSteps)
 
   function handleComplete(payload: StepCompletePayload) {
     if (payload.correct) {
@@ -1707,65 +1967,104 @@ function PracticeScreen({
     onComplete(payload)
   }
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', opacity: busy ? 0.72 : 1, pointerEvents: busy ? 'none' : 'auto' }}>
+  // Listening must NOT show the headword (that spoils the exercise).
+  // MCQ is compact so answer feedback stays on-screen.
+  const isListening = step.exercise === 'listening'
+  const compactHero = step.exercise === 'mcq'
 
-      {/* Progress dots + counter */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 22 }}>
-        <div style={{ display: 'flex', gap: 7, alignItems: 'center' }}>
-          {Array.from({ length: totalSteps }).map((_, i) => (
-            <div key={i} style={{
-              height: 6, borderRadius: 99,
-              width: i === stepIndex ? 22 : 6,
-              background: i < stepIndex ? `${C.blue}88` : i === stepIndex ? C.blue : 'rgba(0,0,0,0.12)',
-              transition: 'all 0.35s cubic-bezier(0.22,1,0.36,1)',
-            }} />
-          ))}
-        </div>
-        <span style={{ flex: 1 }} />
-        {xpAnim && (
-          <span style={{ fontSize: 13, fontWeight: 800, color: C.green, letterSpacing: '-0.01em', animation: 'xpPop 1.4s ease forwards' }}>
-            {xpAnim}
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        // Fit practice into the viewport; avoid page-level scroll for results.
+        minHeight: 'calc(100svh - 48px)',
+        maxHeight: 'calc(100svh - 24px)',
+        opacity: busy ? 0.72 : 1,
+        pointerEvents: busy ? 'none' : 'auto',
+      }}
+    >
+      {/* Session progress — sticky top */}
+      <div style={{ marginBottom: 12, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <span style={{
+            fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+            color: C.blue, background: `${C.blue}12`, border: `1px solid ${C.blue}28`,
+            padding: '4px 9px', borderRadius: 99,
+          }}>
+            {EXERCISE_LABEL[step.exercise] ?? step.exercise}
           </span>
-        )}
-        <span style={{ color: C.muted, fontSize: 12, fontFamily: FONT.mono }}>{stepIndex + 1}/{totalSteps}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {xpAnim && (
+              <span style={{ fontSize: 13, fontWeight: 800, color: C.green, animation: 'xpPop 1.4s ease forwards' }}>
+                {xpAnim}
+              </span>
+            )}
+            <span style={{ color: C.muted, fontSize: 12, fontFamily: FONT.mono }}>
+              {stepIndex + 1}/{totalSteps}
+              {sessionLabel ? ` · ${sessionLabel}` : ''}
+            </span>
+          </div>
+        </div>
+        <ProgressBar progress={progress} color={C.blue} height={5} />
       </div>
 
       {/* Word hero */}
       {step.exercise === 'cloze' ? (
-        <div style={{ textAlign: 'center', paddingBottom: 22 }}>
-          <div style={{
-            width: 64, height: 64, borderRadius: '50%',
-            background: 'rgba(0,0,0,0.07)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            margin: '0 auto 14px',
-          }}>
-            <svg width={28} height={28} viewBox="0 0 24 24" fill="none" stroke="rgba(0,0,0,0.28)" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
-            </svg>
-          </div>
+        <div style={{ textAlign: 'center', paddingBottom: 12, flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-            <span style={{ fontSize: 14, color: C.mutedHi, fontStyle: 'italic' }}>Listen and identify the word</span>
-            <AudioBtn text={step.word.word} size={32} />
+            <span style={{ fontSize: 13, color: C.mutedHi, fontStyle: 'italic' }}>Fill the blank from the passage</span>
           </div>
         </div>
-      ) : (
-        <div style={{ textAlign: 'center', paddingBottom: 22 }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
-            <h2 style={{ fontSize: 38, fontWeight: 700, fontFamily: FONT.display, color: C.text, letterSpacing: '-0.02em', lineHeight: 1, margin: 0 }}>
+      ) : isListening ? (
+        <div style={{ textAlign: 'center', paddingBottom: 10, flexShrink: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: C.mutedHi }}>Listen carefully</div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Pick the meaning — the word is hidden</div>
+        </div>
+      ) : compactHero ? (
+        <div style={{ textAlign: 'center', paddingBottom: 10, flexShrink: 0 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+            <h2 style={{
+              fontSize: 28, fontWeight: 700, fontFamily: FONT.display, color: C.text,
+              letterSpacing: '-0.02em', lineHeight: 1.1, margin: 0,
+            }}>
               {step.word.word}
             </h2>
-            <AudioBtn text={step.word.word} size={38} />
+            <AudioBtn text={step.word.word} size={32} />
           </div>
           {step.word.phonetic && (
-            <div style={{ fontSize: 13, color: C.muted, fontFamily: FONT.mono, marginBottom: 2 }}>{step.word.phonetic}</div>
+            <div style={{ fontSize: 12, color: C.muted, fontFamily: FONT.mono, marginTop: 4 }}>{step.word.phonetic}</div>
+          )}
+        </div>
+      ) : (
+        <div style={{ textAlign: 'center', paddingBottom: 14, flexShrink: 0 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 12, marginBottom: 4 }}>
+            <h2 style={{ fontSize: 32, fontWeight: 700, fontFamily: FONT.display, color: C.text, letterSpacing: '-0.02em', lineHeight: 1, margin: 0 }}>
+              {step.word.word}
+            </h2>
+            <AudioBtn text={step.word.word} size={34} />
+          </div>
+          {step.word.phonetic && (
+            <div style={{ fontSize: 12, color: C.muted, fontFamily: FONT.mono, marginBottom: 2 }}>{step.word.phonetic}</div>
           )}
           <div style={{ fontSize: 12, color: C.muted, fontStyle: 'italic' }}>from <em>{step.word.book}</em></div>
         </div>
       )}
 
-      {/* Exercise card */}
-      <div key={step.id} className="studio-card" style={{ padding: '22px 22px 20px', animation: 'studioSlideIn 0.28s cubic-bezier(0.22,1,0.36,1)' }}>
+      {/* Exercise card — fills remaining viewport height */}
+      <div
+        key={step.id}
+        className="studio-card"
+        style={{
+          padding: '16px 16px 14px',
+          animation: 'studioSlideIn 0.28s cubic-bezier(0.22,1,0.36,1)',
+          flex: '1 1 auto',
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
         {step.exercise === 'mcq' && <ExerciseMCQ word={step.word} distractors={distractors} onComplete={handleComplete} />}
         {step.exercise === 'cloze' && <ExerciseCloze word={step.word} onComplete={handleComplete} />}
         {step.exercise === 'recall' && <ExerciseRecall word={step.word} onComplete={handleComplete} />}
@@ -1776,48 +2075,93 @@ function PracticeScreen({
         {step.exercise === 'mnemonic' && <ExerciseMnemonic word={step.word} onComplete={handleComplete} />}
       </div>
 
-      {busy && <div style={{ color: C.muted, fontSize: 12, textAlign: 'center', marginTop: 10 }}>Saving progress…</div>}
+      {busy && <div style={{ color: C.muted, fontSize: 12, textAlign: 'center', marginTop: 8, flexShrink: 0 }}>Saving progress…</div>}
     </div>
   )
 }
 
+function outcomeStyle(outcome: 'correct' | 'retry' | 'again') {
+  if (outcome === 'correct') {
+    return { label: 'Correct', color: C.green }
+  }
+  if (outcome === 'retry') {
+    return { label: 'Missed · recovered', color: C.amber }
+  }
+  return { label: 'Again', color: C.red }
+}
+
 function ResultsScreen({
   results,
+  wordDetails,
+  sessionXp,
   onDone,
   onPracticeAgain,
+  onPracticeMissed,
 }: {
   results: PracticeResult[]
+  wordDetails: Map<string, { definition: string; book: string }>
+  sessionXp: number
   onDone: () => void
   onPracticeAgain: () => void
+  onPracticeMissed: () => void
 }) {
-  // Deduplicate: last result per word
-  const wordResultMap = new Map<string, PracticeResult>()
-  results.forEach((r) => wordResultMap.set(r.word, r))
-  const uniqueResults = Array.from(wordResultMap.values())
+  // Any miss on a word counts — do not let a later remedial hide an intentional mistake.
+  const aggregated = aggregateSessionResults(results)
+  const stats = sessionAccuracy(results)
+  const missed = aggregated.filter((w) => w.needsRepeat)
+  const celebration = stats.totalSteps > 0 && stats.stepAccuracy >= 80 && stats.wordsToRepeat === 0
+  const earnedXp = sessionXp > 0
+    ? sessionXp
+    : results.reduce((sum, r) => sum + xpForRatingClient(r.rating), 0)
 
-  const correctCount = uniqueResults.filter((r) => r.correct).length
-  const toRepeat = uniqueResults.filter((r) => !r.correct).length
-  const accuracy = Math.round((correctCount / Math.max(1, uniqueResults.length)) * 100)
+  if (stats.totalSteps === 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16, textAlign: 'center', paddingTop: 24 }}>
+        <div style={{ fontSize: 22, fontWeight: 800, color: C.cream }}>No session data</div>
+        <div style={{ color: C.mutedHi, fontSize: 14, lineHeight: 1.5 }}>
+          This run didn’t record any exercises. Start a new session to earn XP and build your streak.
+        </div>
+        <Btn onClick={onPracticeAgain} style={{ width: '100%', background: C.blue, borderRadius: 14, fontSize: 14.5, padding: '14px 20px' }}>
+          Start a session
+        </Btn>
+        <Btn variant="ghost" onClick={onDone} style={{ width: '100%', borderRadius: 14, fontSize: 14.5, padding: '14px 20px' }}>
+          Back to words
+        </Btn>
+      </div>
+    )
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-      {/* Header */}
       <div style={{ textAlign: 'center', paddingTop: 12 }}>
-        <div style={{ fontSize: 44, lineHeight: 1, marginBottom: 14 }}>🎉</div>
+        <div style={{ fontSize: 44, lineHeight: 1, marginBottom: 14 }}>{celebration ? '🎉' : stats.wordsToRepeat > 0 ? '📚' : '✓'}</div>
         <div style={{ fontSize: 24, fontWeight: 800, color: C.cream, letterSpacing: '-0.02em', marginBottom: 6 }}>
           Session complete
         </div>
         <div style={{ color: C.mutedHi, fontSize: 14 }}>
-          You reviewed {uniqueResults.length} word{uniqueResults.length !== 1 ? 's' : ''}
+          {stats.correctSteps}/{stats.totalSteps} exercises right · {stats.wordCount} word{stats.wordCount !== 1 ? 's' : ''}
         </div>
+        {earnedXp > 0 && (
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 10,
+            background: `${C.gold}14`, color: C.gold, border: `1px solid ${C.gold}33`,
+            borderRadius: 99, padding: '6px 12px', fontSize: 13, fontWeight: 800,
+          }}>
+            +{earnedXp} XP this session
+          </div>
+        )}
+        {stats.wordsToRepeat > 0 && (
+          <div style={{ color: C.amber, fontSize: 13, marginTop: 6, fontWeight: 600 }}>
+            {stats.wordsToRepeat} word{stats.wordsToRepeat === 1 ? '' : 's'} worth another pass
+          </div>
+        )}
       </div>
 
-      {/* Stats */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
         {[
-          { label: 'Accuracy', value: `${accuracy}%`, color: C.blue },
-          { label: 'Correct', value: correctCount, color: C.green },
-          { label: 'To repeat', value: toRepeat, color: toRepeat > 0 ? C.amber : C.muted },
+          { label: 'Accuracy', value: `${stats.stepAccuracy}%`, color: C.blue },
+          { label: 'Solid', value: stats.wordsCorrect, color: C.green },
+          { label: 'To repeat', value: stats.wordsToRepeat, color: stats.wordsToRepeat > 0 ? C.amber : C.muted },
         ].map((s) => (
           <div key={s.label} className="studio-card" style={{ padding: '14px 12px', textAlign: 'center' }}>
             <div style={{ fontSize: 22, fontWeight: 800, color: s.color, letterSpacing: '-0.02em' }}>{s.value}</div>
@@ -1826,38 +2170,69 @@ function ResultsScreen({
         ))}
       </div>
 
-      {/* Word list */}
       <div className="studio-card" style={{ padding: '4px 0' }}>
-        {uniqueResults.map((r, i) => (
-          <div
-            key={r.word}
-            style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              padding: '12px 18px',
-              borderBottom: i < uniqueResults.length - 1 ? '1px solid rgba(0,0,0,0.05)' : 'none',
-            }}
-          >
-            <span style={{ fontSize: 15, fontWeight: 600, color: C.cream, fontFamily: FONT.display }}>{r.word}</span>
-            <span style={{
-              fontSize: 11.5, fontWeight: 700,
-              color: r.correct ? C.green : C.red,
-              background: r.correct ? `${C.green}15` : `${C.red}15`,
-              padding: '4px 10px', borderRadius: 99,
-              border: `1px solid ${r.correct ? `${C.green}33` : `${C.red}33`}`,
-            }}>
-              {r.correct ? 'Correct' : 'Again'}
-            </span>
-          </div>
-        ))}
+        {aggregated.map((r, i) => {
+          const style = outcomeStyle(r.outcome)
+          const detail = wordDetails.get(r.wordId ?? '') ?? wordDetails.get(r.word)
+          return (
+            <div
+              key={r.wordId ?? r.word}
+              style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12,
+                padding: '12px 18px',
+                borderBottom: i < aggregated.length - 1 ? '1px solid rgba(0,0,0,0.05)' : 'none',
+              }}
+            >
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, color: C.cream, fontFamily: FONT.display }}>{r.word}</div>
+                {detail?.definition && (
+                  <div style={{ fontSize: 12.5, color: C.mutedHi, marginTop: 3, lineHeight: 1.45 }} className="line-clamp-2">
+                    {detail.definition}
+                  </div>
+                )}
+                {r.attempts > 1 && (
+                  <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>
+                    {r.misses} miss{r.misses === 1 ? '' : 'es'} · {r.attempts} attempt{r.attempts === 1 ? '' : 's'}
+                  </div>
+                )}
+              </div>
+              <span style={{
+                fontSize: 11.5, fontWeight: 700, flexShrink: 0, marginTop: 2,
+                color: style.color,
+                background: `${style.color}15`,
+                padding: '4px 10px', borderRadius: 99,
+                border: `1px solid ${style.color}33`,
+              }}>
+                {style.label}
+              </span>
+            </div>
+          )
+        })}
       </div>
 
-      {/* Buttons */}
+      {missed.length > 0 && (
+        <div className="studio-card" style={{ padding: '12px 14px', background: `${C.amber}08`, border: `1px solid ${C.amber}33` }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: C.amber, marginBottom: 4 }}>Practical tip</div>
+          <div style={{ fontSize: 12.5, color: C.mutedHi, lineHeight: 1.5 }}>
+            Re-run only the missed words while they’re fresh — short spaced loops beat long perfect sessions.
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {missed.length > 0 && (
+          <Btn
+            onClick={onPracticeMissed}
+            style={{ width: '100%', background: C.amber, borderRadius: 14, fontSize: 14.5, padding: '14px 20px' }}
+          >
+            Practice {missed.length} missed word{missed.length === 1 ? '' : 's'}
+          </Btn>
+        )}
         <Btn
           onClick={onPracticeAgain}
           style={{ width: '100%', background: C.blue, borderRadius: 14, fontSize: 14.5, padding: '14px 20px' }}
         >
-          Practice again
+          New full session
         </Btn>
         <Btn
           variant="ghost"
@@ -1886,8 +2261,11 @@ export function StudioRoute() {
   const [enrichProgress, setEnrichProgress] = useState<{ done: number; total: number } | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
+  const [sessionMode, setSessionMode] = useState<SessionMode>('quick')
+  const [missedWordIds, setMissedWordIds] = useState<string[]>([])
+  const [sessionXp, setSessionXp] = useState(0)
   const stepStartedAt = useRef(Date.now())
-  const didAutoStart = useRef(false)
+  const sessionResultsRef = useRef<PracticeResult[]>([])
 
   const { data: decks = [], isLoading: decksLoading } = useQuery({
     queryKey: ['decks'],
@@ -1917,83 +2295,117 @@ export function StudioRoute() {
     const fromSaved = savedWords.map((w) => ({ word: w.word, definition: w.definition }))
     const fromSession = practiceWords.map((w) => ({ word: w.word, definition: w.definition }))
     return [...fromSaved, ...fromSession]
-      .filter((c) => c.word && c.definition && !isPlaceholderDefinition(c.definition))
+      .filter((c) => c.word && isUsableDefinition(c.definition, c.word))
   }, [practiceWords, savedWords])
   const currentStep = sessionPlan[stepIndex]
   const isLoading = decksLoading || (Boolean(deck?.id) && dashboardLoading)
 
-  const startSession = useCallback(async () => {
-    if (!deck || starting) return
+  const startSession = useCallback(async (opts?: {
+    mode?: SessionMode
+    onlyWordIds?: string[]
+  }) => {
+    if (!deck) {
+      setStartError('No vocabulary deck found. Save a word from the reader first.')
+      return
+    }
+    if (starting) return
+    const mode = opts?.mode ?? sessionMode
+    const onlyIds = opts?.onlyWordIds
     setStarting(true)
     setStartError(null)
     setEnrichProgress(null)
     try {
+      const limit = onlyIds?.length
+        ? Math.max(onlyIds.length, 1)
+        : sessionLimitForMode(mode)
+      const focus = mode === 'weak' ? 'weak' : mode === 'due' ? 'mixed' : 'mixed'
       const res = await api.post<PracticeSessionResponse>(`/api/vocabulary/decks/${deck.id}/practice-sessions`, {
-        focus: 'mixed',
-        limit: 8,
+        focus,
+        // Request a generous pool; worker now fills non-due cards after a session.
+        limit: Math.max(limit, 24),
       })
-      const allWords = res.items.map(cardToPracticeWord)
+      const sessionItems = res.items ?? res.cards ?? []
+      if (!Array.isArray(sessionItems)) {
+        throw new Error('Practice session response was missing items.')
+      }
+      const allWords = sessionItems.map(cardToPracticeWord)
       let words = allWords.filter((w) => isVocabWord(w.word))
 
+      if (onlyIds && onlyIds.length > 0) {
+        const want = new Set(onlyIds)
+        words = words.filter((w) => want.has(w.id) || want.has(w.noteId) || want.has(w.word))
+        // If API queue didn't include all missed ids, keep what we can from last session cache.
+        if (words.length === 0 && practiceWords.length > 0) {
+          words = practiceWords.filter((w) => want.has(w.id) || want.has(w.noteId) || want.has(w.word))
+        }
+      } else {
+        words = prioritizeWordsForMode(words, mode).slice(0, limit)
+      }
+
+      // Prefer study-ready defs, but never hard-fail a restart if cards exist.
+      const withDefs = words.filter((w) => isUsableDefinition(w.definition, w.word))
+      if (withDefs.length > 0) words = withDefs
+
       if (words.length === 0) {
+        setScreen('dashboard')
         setStartError(
-          allWords.length > 0
-            ? 'Your due cards are multi-word highlights — save some single vocabulary words from the reader to practice.'
-            : 'No practice items are ready yet.',
+          onlyIds?.length
+            ? 'Could not reload those missed words. Try a full session.'
+            : allWords.length > 0
+              ? 'Your cards need definitions before practice. Open Words to backfill, then try again.'
+              : 'No practice items are ready yet. Save a word from the reader first.',
         )
         return
       }
 
-      // Pre-fetch grounded context for every card. Server caches in card_context_cache
-      // so warm-cache sessions are instant; cold sessions still need the AI round-trip
-      // but pay the cost once per card (not per session).
-      setEnrichProgress({ done: 0, total: words.length })
-      const contextById = new Map<string, CardContext>()
-      let done = 0
-      await Promise.all(
-        words.map(async (w) => {
-          try {
-            const ctx = await fetchCardContext(w.id)
-            if (ctx.definition && !isPlaceholderDefinition(ctx.definition)) {
-              contextById.set(w.id, ctx)
+      // Enrich weak definitions (headword-as-answer, single tokens, placeholders).
+      const needsEnrichment = words.some((w) => !isUsableDefinition(w.definition, w.word))
+      if (needsEnrichment) {
+        setEnrichProgress({ done: 0, total: words.length })
+        const contextById = new Map<string, CardContext>()
+        let done = 0
+        await Promise.all(
+          words.map(async (w) => {
+            if (isUsableDefinition(w.definition, w.word)) {
+              done += 1
+              setEnrichProgress({ done, total: words.length })
+              return
             }
-          } catch (err) {
-            console.warn('Context fetch failed for', w.word, err)
-          } finally {
-            done += 1
-            setEnrichProgress({ done, total: words.length })
-          }
-        }),
-      )
-      if (contextById.size > 0) {
-        words = words.map((w) => {
-          const ctx = contextById.get(w.id)
-          if (!ctx) return w
-          const hadRealSentence = w.sentence && !isPlaceholderDefinition(w.sentence) && w.sentence !== w.definition
-          const newSentence = hadRealSentence ? w.sentence : (ctx.contextParagraph || `${w.word} — ${ctx.definition}`)
-          return {
-            ...w,
-            definition: ctx.definition,
-            sentence: newSentence,
-            phonetic: ctx.pronunciation ?? w.phonetic,
-            card: { ...w.card, productionTarget: w.word },
-          }
-        })
-      }
-      setEnrichProgress(null)
-
-      // Safety net: drop any word that still has a placeholder definition.
-      // Better to skip it than show "Saved from reading" as the correct MCQ answer.
-      const beforeFilter = words.length
-      words = words.filter((w) => !isPlaceholderDefinition(w.definition))
-      if (words.length < beforeFilter) {
-        console.warn(`Skipped ${beforeFilter - words.length} card(s) without real definitions.`)
-      }
-      if (words.length === 0) {
-        setStartError(
-          "Couldn't generate definitions for your saved words. Check your connection and try again.",
+            try {
+              const ctx = await fetchCardContext(w.id)
+              if (ctx.definition && isUsableDefinition(ctx.definition, w.word)) {
+                contextById.set(w.id, ctx)
+              }
+            } catch (err) {
+              console.warn('Context fetch failed for', w.word, err)
+            } finally {
+              done += 1
+              setEnrichProgress({ done, total: words.length })
+            }
+          }),
         )
-        return
+        if (contextById.size > 0) {
+          words = words.map((w) => {
+            const ctx = contextById.get(w.id)
+            if (!ctx) return w
+            const hadRealSentence = Boolean(
+              w.sentence
+              && w.sentence.toLowerCase() !== w.word.toLowerCase()
+              && !w.sentence.toLowerCase().startsWith('as you read'),
+            )
+            const newSentence = hadRealSentence
+              ? w.sentence
+              : (ctx.contextParagraph || w.sentence)
+            return {
+              ...w,
+              definition: isUsableDefinition(w.definition, w.word) ? w.definition : ctx.definition,
+              sentence: newSentence,
+              phonetic: ctx.pronunciation ?? w.phonetic,
+              card: { ...w.card, productionTarget: w.word },
+            }
+          })
+        }
+        setEnrichProgress(null)
       }
 
       const plan = buildSessionPlan(words)
@@ -2002,23 +2414,30 @@ export function StudioRoute() {
         return
       }
 
-      setDeckSummary(res.deck)
+      setDeckSummary(res.deck ?? activeDeck)
       setPracticeWords(words)
       setSessionPlan(plan)
-      setStepIndex(0)
+      sessionResultsRef.current = []
       setResults([])
+      setSessionXp(0)
       setRatedCardIds(new Set())
       setAppendedRemedials(0)
+      setStepIndex(0)
       stepStartedAt.current = Date.now()
       setScreen('practice')
     } catch (error) {
       console.error('Failed to start studio session', error)
-      setStartError('Could not start a practice session.')
+      const message = error instanceof Error ? error.message : String(error)
+      setStartError(
+        /401|Unauthorized|sign in/i.test(message)
+          ? 'Sign in again to practice.'
+          : 'Could not start a practice session. Try again.',
+      )
     } finally {
       setStarting(false)
       setEnrichProgress(null)
     }
-  }, [deck, starting])
+  }, [activeDeck, deck, practiceWords, sessionMode, starting])
 
   const persistMnemonic = useCallback(async (step: PracticeStep, mnemonic: string) => {
     const trimmed = mnemonic.trim()
@@ -2045,38 +2464,105 @@ export function StudioRoute() {
       }
 
       const rating = ratingFromResult(step.exercise, payload)
-      if (rating && !ratedCardIds.has(step.word.card.id)) {
-        const responseMs = Math.max(0, Date.now() - stepStartedAt.current)
-        const review = await api.post<ReviewResponse>(`/api/vocabulary/cards/${step.word.card.id}/reviews`, {
-          rating,
-          responseMs,
-          answerMode: answerModeForExercise(step.exercise),
-          typedResponse: payload.typedResponse ?? null,
-        })
-        setDeckSummary(review.summary)
-        setRatedCardIds((prev) => new Set(prev).add(step.word.card.id))
+      // A miss is any incorrect answer or an explicit "again" self-rate.
+      const missed = !payload.correct || rating === 'again' || payload.rating === 'again'
+      const effectiveRating: Rating | null = rating
+        ?? (missed ? 'again' : payload.correct ? 'good' : 'again')
+
+      // Persist the *worst* rating seen for this card in the session so a later
+      // remedial success cannot erase an earlier "again" from spaced repetition.
+      let awarded = 0
+      if (effectiveRating) {
+        const previous = ratedCardIds.has(step.word.card.id)
+        const priorResults = sessionResultsRef.current.filter((r) => r.wordId === step.word.id)
+        const priorWorst = priorResults.reduce<Rating | null>((acc, r) => (
+          worseRating(acc, (r.rating as PlanRating | undefined) ?? (r.correct ? 'good' : 'again'))
+        ), null)
+        const shouldSubmit = !previous || (
+          effectiveRating === 'again'
+          && priorWorst !== 'again'
+        )
+        if (shouldSubmit) {
+          const responseMs = Math.max(0, Date.now() - stepStartedAt.current)
+          try {
+            const review = await api.post<ReviewResponse>(`/api/vocabulary/cards/${step.word.card.id}/reviews`, {
+              rating: effectiveRating,
+              responseMs,
+              answerMode: answerModeForExercise(step.exercise),
+              typedResponse: payload.typedResponse ?? null,
+            })
+            setDeckSummary(review.summary)
+            setRatedCardIds((prev) => new Set(prev).add(step.word.card.id))
+            awarded = review.xpAwarded ?? xpForRatingClient(effectiveRating)
+            setSessionXp((x) => x + awarded)
+            // Keep streak / XP chips live without waiting for a full refetch.
+            queryClient.setQueryData(['learning-summary'], (prev: {
+              streakDays: number
+              xpToday: number
+              xpThisWeek: number
+              dailyGoal: number
+              dailyGoalProgress: number
+              reviewsToday?: number
+            } | undefined) => {
+              if (!prev) {
+                return {
+                  streakDays: 1,
+                  xpToday: awarded,
+                  xpThisWeek: awarded,
+                  dailyGoal: 20,
+                  dailyGoalProgress: Math.min(1, 1 / 20),
+                  reviewsToday: 1,
+                }
+              }
+              const reviewsToday = (prev.reviewsToday ?? 0) + 1
+              return {
+                ...prev,
+                streakDays: Math.max(prev.streakDays, 1),
+                xpToday: prev.xpToday + awarded,
+                xpThisWeek: prev.xpThisWeek + awarded,
+                dailyGoalProgress: Math.min(1, reviewsToday / (prev.dailyGoal || 20)),
+                reviewsToday,
+              }
+            })
+          } catch (reviewErr) {
+            console.error('Review save failed; keeping session progress locally', reviewErr)
+            // Don't block the session UI if the review API hiccups.
+            awarded = xpForRatingClient(effectiveRating)
+            setSessionXp((x) => x + awarded)
+            setRatedCardIds((prev) => new Set(prev).add(step.word.card.id))
+          }
+        } else {
+          // Still count local session XP for non-submitted remedials.
+          awarded = xpForRatingClient(effectiveRating)
+          setSessionXp((x) => x + Math.max(0, Math.floor(awarded / 2)))
+        }
       }
 
-      setResults((prev) => [
-        ...prev,
-        {
-          stepId: step.id,
-          wordId: step.word.id,
-          word: step.word.word,
-          exercise: step.exercise,
-          correct: payload.correct,
-          rating: payload.rating,
-        },
-      ])
+      const entry: PracticeResult = {
+        stepId: step.id,
+        wordId: step.word.id,
+        word: step.word.word,
+        exercise: step.exercise,
+        // Normalize: again-rating always counts as not correct in the session log.
+        correct: !missed,
+        rating: effectiveRating ?? undefined,
+      }
+      const nextResults = [...sessionResultsRef.current, entry]
+      sessionResultsRef.current = nextResults
+      setResults(nextResults)
 
       const nextIndex = stepIndex + 1
       const isLastStep = nextIndex >= sessionPlan.length
-      const failed = !payload.correct
-      // Adaptive re-queueing: append remedial step on the same word.
-      // Triggers: failed reverse-recall / write-definition (per spec) OR last-step failure (don't-end-on-failure).
+      const failed = missed
+      // Adaptive re-queueing: append remedial on any failed objective item, or
+      // when the last step would otherwise end the session on a failure.
       const shouldAppendRemedial = failed && (
-        step.exercise === 'reverse-recall'
+        step.exercise === 'mcq'
+        || step.exercise === 'cloze'
+        || step.exercise === 'listening'
+        || step.exercise === 'reverse-recall'
         || step.exercise === 'write-definition'
+        || step.exercise === 'recall'
         || isLastStep
       )
       if (shouldAppendRemedial) {
@@ -2104,59 +2590,112 @@ export function StudioRoute() {
     } finally {
       setSubmitting(false)
     }
-  }, [appendedRemedials, persistMnemonic, queryClient, ratedCardIds, sessionPlan, stepIndex, submitting])
+  }, [appendedRemedials, persistMnemonic, queryClient, ratedCardIds, results, sessionPlan, stepIndex, submitting])
+
+  // Keep missed-word list in sync with the finished session log.
+  useEffect(() => {
+    if (screen !== 'results' || results.length === 0) return
+    const missed = aggregateSessionResults(results)
+      .filter((w) => w.needsRepeat)
+      .map((w) => w.wordId || w.word)
+    setMissedWordIds(missed)
+  }, [screen, results])
+
+  function resetSessionLocalState() {
+    sessionResultsRef.current = []
+    setResults([])
+    setSessionXp(0)
+    setRatedCardIds(new Set())
+    setAppendedRemedials(0)
+    setStepIndex(0)
+  }
 
   function backToDashboard() {
     queryClient.invalidateQueries({ queryKey: ['decks'] })
     queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
+    queryClient.invalidateQueries({ queryKey: ['learning-summary'] })
     setScreen('dashboard')
     setDeckSummary(null)
     setSessionPlan([])
     setPracticeWords([])
-    setStepIndex(0)
-    setRatedCardIds(new Set())
-    setAppendedRemedials(0)
+    resetSessionLocalState()
   }
 
   function practiceAgain() {
-    setResults([])
-    setRatedCardIds(new Set())
+    // Always force a full restart from results — don't depend on current due queue.
+    setSessionMode('full')
     setDeckSummary(null)
-    void startSession()
+    setSessionPlan([])
+    setPracticeWords([])
+    resetSessionLocalState()
+    setStartError(null)
+    setScreen('dashboard')
+    // Kick off immediately; dashboard shows the starting skeleton while starting=true.
+    void startSession({ mode: 'full' })
   }
 
-  const startDisabled = !activeDeck || (activeDeck.dueNow + activeDeck.newAvailable + activeDeck.cardsByState.learning + activeDeck.cardsByState.relearning) === 0
-
-  // Fire as soon as deck data is available from cache — don't wait for dashboard query.
-  // startSession() only needs `deck` (from the decks query).
-  useEffect(() => {
-    if (!didAutoStart.current && !decksLoading && deck && !startDisabled && screen === 'dashboard') {
-      didAutoStart.current = true
-      void startSession()
+  function practiceMissed() {
+    const ids = missedWordIds.length > 0
+      ? missedWordIds
+      : aggregateSessionResults(sessionResultsRef.current).filter((w) => w.needsRepeat).map((w) => w.wordId || w.word)
+    setDeckSummary(null)
+    setSessionPlan([])
+    resetSessionLocalState()
+    setStartError(null)
+    setScreen('dashboard')
+    if (ids.length === 0) {
+      void startSession({ mode: 'full' })
+      return
     }
-  }, [decksLoading, deck, startDisabled, screen, startSession])
+    void startSession({ onlyWordIds: ids, mode: 'full' })
+  }
+
+  // Allow practice whenever the deck has cards — "due" modes still prefer ready ones.
+  const startDisabled = !activeDeck || (activeDeck.cardCount ?? 0) === 0
+
+  const wordDetails = useMemo(() => {
+    const map = new Map<string, { definition: string; book: string }>()
+    for (const w of practiceWords) {
+      map.set(w.id, { definition: w.definition, book: w.book })
+      map.set(w.word, { definition: w.definition, book: w.book })
+    }
+    return map
+  }, [practiceWords])
 
   return (
     <div
       style={{
         background: GRAD,
         minHeight: '100svh',
+        // During practice, lock page scroll so answer feedback stays in focus.
+        height: screen === 'practice' ? '100svh' : undefined,
+        overflow: screen === 'practice' ? 'hidden' : undefined,
         color: C.text,
         fontFamily: FONT.ui,
         display: 'flex',
         justifyContent: 'center',
-        padding: '0 0 40px',
+        padding: screen === 'practice' ? 0 : '0 0 40px',
       }}
     >
       <style>{`
         @keyframes studioFadeIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes studioSlideIn { from { opacity: 0; transform: translateX(18px) scale(0.97); } to { opacity: 1; transform: translateX(0) scale(1); } }
+        @keyframes studioSpin { to { transform: rotate(360deg); } }
         @keyframes xpPop { 0% { opacity:0; transform:translateY(4px) scale(0.9); } 15% { opacity:1; transform:translateY(0) scale(1.1); } 80% { opacity:1; transform:translateY(-2px) scale(1); } 100% { opacity:0; transform:translateY(-12px); } }
         .studio-scope input::placeholder, .studio-scope textarea::placeholder { color: ${C.muted}; opacity: 1; }
         .studio-scope input:focus, .studio-scope textarea:focus { border-color: ${C.gold} !important; outline: none; box-shadow: 0 0 0 3px ${C.gold}28; }
         .studio-card { background: #fff; border-radius: 20px; box-shadow: ${CARD_SHADOW}; }
       `}</style>
-      <div className="studio-scope" style={{ width: '100%', maxWidth: 560, padding: '20px 16px 80px' }}>
+      <div
+        className="studio-scope"
+        style={{
+          width: '100%',
+          maxWidth: 560,
+          // Practice mode: less bottom padding so the card can use the full viewport.
+          padding: screen === 'practice' ? '12px 16px 16px' : '20px 16px 80px',
+          boxSizing: 'border-box',
+        }}
+      >
         {(screen === 'dashboard' || screen === 'results') && activeDeck && (
           <StudioHeader summary={summaryQuery.data} isLoading={summaryQuery.isLoading} />
         )}
@@ -2180,23 +2719,59 @@ export function StudioRoute() {
             deck={activeDeck}
             words={savedWords}
             analytics={dashboard?.analytics}
-            onStart={startSession}
+            sessionMode={sessionMode}
+            onModeChange={setSessionMode}
+            onStart={() => void startSession({ mode: sessionMode })}
             startDisabled={startDisabled}
             starting={starting}
             enrichProgress={enrichProgress}
             error={startError}
+            missedCount={missedWordIds.length}
+            onPracticeMissed={practiceMissed}
           />
         ) : screen === 'practice' && currentStep ? (
           <PracticeScreen
             step={currentStep}
             stepIndex={stepIndex}
             totalSteps={sessionPlan.length}
-            distractors={pickDistractors(currentStep.word.word, distractorCandidates, 3)}
+            sessionLabel={SESSION_MODES.find((m) => m.id === sessionMode)?.label}
+            distractors={pickDistractors(
+              currentStep.word.word,
+              distractorCandidates,
+              3,
+              currentStep.word.definition,
+            )}
             onComplete={completeStep}
             busy={submitting}
           />
+        ) : screen === 'practice' ? (
+          <div style={{ color: C.mutedHi, textAlign: 'center', padding: '48px 16px' }}>
+            Preparing next card…
+          </div>
+        ) : screen === 'results' ? (
+          <ResultsScreen
+            results={results.length > 0 ? results : sessionResultsRef.current}
+            wordDetails={wordDetails}
+            sessionXp={sessionXp}
+            onDone={backToDashboard}
+            onPracticeAgain={practiceAgain}
+            onPracticeMissed={practiceMissed}
+          />
         ) : (
-          <ResultsScreen results={results} onDone={backToDashboard} onPracticeAgain={practiceAgain} />
+          <Dashboard
+            deck={activeDeck}
+            words={savedWords}
+            analytics={dashboard?.analytics}
+            sessionMode={sessionMode}
+            onModeChange={setSessionMode}
+            onStart={() => void startSession({ mode: sessionMode })}
+            startDisabled={startDisabled}
+            starting={starting}
+            enrichProgress={enrichProgress}
+            error={startError}
+            missedCount={missedWordIds.length}
+            onPracticeMissed={practiceMissed}
+          />
         )}
       </div>
     </div>

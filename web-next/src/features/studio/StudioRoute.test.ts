@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isVocabWord, isPlaceholderDefinition } from './vocabUtils'
+import { isVocabWord, isPlaceholderDefinition, isUsableDefinition } from './vocabUtils'
 
 describe('isVocabWord', () => {
   it('accepts a single lowercase word', () => {
@@ -64,6 +64,7 @@ describe('isPlaceholderDefinition', () => {
     expect(isPlaceholderDefinition('')).toBe(true)
     expect(isPlaceholderDefinition('   ')).toBe(true)
     expect(isPlaceholderDefinition('a')).toBe(true)  // too short
+    expect(isPlaceholderDefinition('behind')).toBe(true)
   })
 
   it('flags the canonical fallback strings (the actual bug)', () => {
@@ -72,6 +73,7 @@ describe('isPlaceholderDefinition', () => {
     expect(isPlaceholderDefinition('Saved from reading')).toBe(true)
     expect(isPlaceholderDefinition('Definition unavailable')).toBe(true)
     expect(isPlaceholderDefinition('A word from your reading')).toBe(true)
+    expect(isPlaceholderDefinition('A word you saved while reading: verbal')).toBe(true)
   })
 
   it('flags "see X" cross-references that lexicographers omit', () => {
@@ -88,5 +90,18 @@ describe('isPlaceholderDefinition', () => {
   it('handles whitespace defensively', () => {
     expect(isPlaceholderDefinition('  Saved from your reading.  ')).toBe(true)
     expect(isPlaceholderDefinition('  the inner core of a bone  ')).toBe(false)
+  })
+})
+
+describe('isUsableDefinition', () => {
+  it('rejects headword-as-definition (the broken MCQ case)', () => {
+    expect(isUsableDefinition('verbal', 'verbal')).toBe(false)
+    expect(isUsableDefinition('behind', 'behind')).toBe(false)
+    expect(isUsableDefinition('incredible', 'verbal')).toBe(false)
+  })
+
+  it('accepts real multi-word glosses', () => {
+    expect(isUsableDefinition('relating to or consisting of words', 'verbal')).toBe(true)
+    expect(isUsableDefinition('the inner core of a bone', 'marrow')).toBe(true)
   })
 })

@@ -44,22 +44,22 @@ describe('TtsSessionState', () => {
 
   it('builds reader snapshots from the current session fields', () => {
     const state = new TtsSessionState()
-    state.begin({ word: 'hello', selectionKey: 'browser:' })
-    state.setPlaying('fallback')
+    state.begin({ word: 'hello', selectionKey: 'kokoro:af_heart' })
+    state.setPlaying('native')
     state.setCurrentIndex(2)
 
     expect(state.snapshot({
-      provider: 'browser',
+      provider: 'kokoro',
       totalChunks: 5,
       nativeReadyChunks: 1,
       bufferedSeconds: 2.5,
     })).toMatchObject({
       phase: 'playing',
-      lane: 'fallback',
+      lane: 'native',
       currentIndex: 2,
       totalChunks: 5,
       word: 'hello',
-      provider: 'browser',
+      provider: 'kokoro',
       nativeReadyChunks: 1,
       bufferedSeconds: 2.5,
       error: null,

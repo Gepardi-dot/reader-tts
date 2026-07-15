@@ -7,7 +7,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/shared/api/client'
-import { BROWSER_TTS_PROVIDER_ID } from './audioPlayback'
+import {
+  defaultVoiceForProvider,
+  normalizeTtsProviders,
+  type TtsProviderInfo,
+} from './audioProviderCatalog'
 import {
   audioPrefsWithSelection,
   loadAudioPrefs,
@@ -15,56 +19,11 @@ import {
   saveAudioPrefs,
 } from './audioPreferences'
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-interface VoiceOption {
-  id: string
-  label: string
-  gender?: string | null
-  style?: string | null
-  tags?: string[]
-  ready?: boolean
-}
-
-interface ProviderInfo {
-  id: string
-  name: string
-  available: boolean
-  recommended?: boolean
-  voices: VoiceOption[]
-  defaultVoice?: string | null
-  models?: Array<{ id: string; label: string }>
-  defaultModel?: string | null
-  description?: string
-}
-
 interface ProvidersResponse {
-  providers: ProviderInfo[]
+  providers: TtsProviderInfo[]
   defaultNarrationStyle: string
+  defaultProvider?: string
 }
-
-const BROWSER_PROVIDER: ProviderInfo = {
-  id: BROWSER_TTS_PROVIDER_ID,
-  name: 'Browser speech',
-  available: true,
-  recommended: true,
-  voices: [],
-  defaultVoice: null,
-  description: 'Instant local playback using your browser voice. No server or model download required.',
-}
-
-function withBrowserProvider(providers?: ProviderInfo[]) {
-  const catalog = providers ?? []
-  return catalog.some((provider) => provider.id === BROWSER_TTS_PROVIDER_ID)
-    ? catalog
-    : [BROWSER_PROVIDER, ...catalog]
-}
-
-function defaultVoiceForProvider(provider: ProviderInfo | undefined) {
-  return provider?.defaultVoice ?? provider?.voices[0]?.id ?? null
-}
-
-// ── Main settings page ────────────────────────────────────────────────────────
 
 export function AudioSettingsRoute() {
   const qc = useQueryClient()
@@ -74,27 +33,24 @@ export function AudioSettingsRoute() {
     queryFn: () => api.get<ProvidersResponse>('/api/providers'),
   })
 
-  const providers = withBrowserProvider(res?.providers)
+  const providers = normalizeTtsProviders(res?.providers)
   const initialPrefs = loadAudioPrefs()
 
-  // Simple per-provider local preference (mirrors what the reader uses)
   const [selectedProvider, setSelectedProvider] = useState(
-    () => initialPrefs.provider
+    () => initialPrefs.provider,
   )
   const [selectedVoice, setSelectedVoice] = useState<string | null>(
-    () => initialPrefs.voice
+    () => initialPrefs.voice,
   )
   const [speed, setSpeed] = useState('1.0')
   const [saved, setSaved] = useState(false)
 
-  const currentProvider = providers.find(p => p.id === selectedProvider)
+  const currentProvider = providers.find((p) => p.id === selectedProvider)
   const availableVoices = currentProvider?.voices ?? []
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const voiceToSave = selectedProvider === BROWSER_TTS_PROVIDER_ID
-        ? null
-        : (selectedVoice ?? defaultVoiceForProvider(currentProvider))
+      const voiceToSave = selectedVoice ?? defaultVoiceForProvider(currentProvider)
       saveAudioPrefs(audioPrefsWithSelection(loadAudioPrefs(), {
         provider: selectedProvider,
         voice: voiceToSave,
@@ -129,12 +85,11 @@ export function AudioSettingsRoute() {
       ) : (
         <div className="space-y-6">
 
-          {/* Provider */}
           <div className="space-y-2">
             <Label>TTS Provider</Label>
             <Select value={selectedProvider} onValueChange={(v) => {
               if (v == null) return
-              const nextProvider = providers.find(p => p.id === v)
+              const nextProvider = providers.find((p) => p.id === v)
               setSelectedProvider(v)
               setSelectedVoice(resolvedVoiceForProvider(v, nextProvider, loadAudioPrefs()))
             }}>
@@ -148,7 +103,7 @@ export function AudioSettingsRoute() {
                       <span className={`w-1.5 h-1.5 rounded-full shrink-0 inline-block ${p.available ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
                       {p.name}
                       {p.recommended && (
-                        <Badge variant="secondary" className="text-[9px] h-3.5 px-1">Best</Badge>
+                        <Badge variant="secondary" className="text-[9px] h-3.5 px-1">Default</Badge>
                       )}
                     </span>
                   </SelectItem>
@@ -158,9 +113,11 @@ export function AudioSettingsRoute() {
             {currentProvider?.description && (
               <p className="text-xs text-muted-foreground">{currentProvider.description}</p>
             )}
+            <p className="text-xs text-muted-foreground">
+              Kokoro is the default. Gemini is available when configured on the server.
+            </p>
           </div>
 
-          {/* Voice */}
           {availableVoices.length > 0 && (
             <div className="space-y-2">
               <Label>Voice</Label>
@@ -172,11 +129,7 @@ export function AudioSettingsRoute() {
                 <SelectContent>
                   {availableVoices.map((v) => (
                     <SelectItem key={v.id} value={v.id}>
-                      <span className="flex items-center gap-2">
-                        {v.label}
-                        {v.gender && <span className="text-[10px] text-muted-foreground">{v.gender}</span>}
-                        {v.style  && <span className="text-[10px] text-muted-foreground/60">{v.style}</span>}
-                      </span>
+                      {v.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -186,7 +139,6 @@ export function AudioSettingsRoute() {
 
           <Separator />
 
-          {/* Speed */}
           <div className="space-y-2">
             <Label>Playback Speed</Label>
             <Select value={speed} onValueChange={(v) => v != null && setSpeed(v)}>

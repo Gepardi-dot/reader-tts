@@ -17,6 +17,8 @@ interface DeckSummary {
   id: string
   title: string
   dueNow: number
+  noteCount?: number
+  cardCount?: number
 }
 
 const COVER_COLORS = ['#fef6ee', '#eef4fb', '#f0efe9', '#f8eef0']
@@ -87,6 +89,16 @@ export function AppShell() {
   })
 
   const dueCount = decks.reduce((sum, d) => sum + (d.dueNow ?? 0), 0)
+  // Total saved vocabulary notes (words), not "due" — matches the Words page.
+  const wordCount = decks.reduce((sum, d) => sum + (d.noteCount ?? d.cardCount ?? 0), 0)
+  // Total highlights/notes across books — matches the Notes page.
+  const notesCount = books.reduce((sum, b) => sum + (b.highlightCount ?? 0), 0)
+
+  function navBadge(label: string): number | null {
+    if (label === 'Words' && wordCount > 0) return wordCount
+    if (label === 'Notes' && notesCount > 0) return notesCount
+    return null
+  }
 
   async function handleSignOut() {
     await signOut()
@@ -127,9 +139,9 @@ export function AppShell() {
             >
               <Icon size={15} className="shrink-0" />
               <span className="flex-1">{label}</span>
-              {label === 'Words' && dueCount > 0 && (
-                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-primary text-primary-foreground leading-none">
-                  {dueCount}
+              {navBadge(label) != null && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-primary text-primary-foreground leading-none tabular-nums">
+                  {navBadge(label)}
                 </span>
               )}
             </NavLink>
@@ -216,9 +228,9 @@ export function AppShell() {
                 <>
                   <div className="relative">
                     <Icon size={22} strokeWidth={1.75} />
-                    {label === 'Words' && dueCount > 0 && (
-                      <span className="absolute -top-1 -right-1.5 w-3.5 h-3.5 rounded-full bg-primary text-primary-foreground text-[8px] font-bold flex items-center justify-center leading-none">
-                        {dueCount > 9 ? '9+' : dueCount}
+                    {navBadge(label) != null && (
+                      <span className="absolute -top-1 -right-1.5 min-w-3.5 h-3.5 px-0.5 rounded-full bg-primary text-primary-foreground text-[8px] font-bold flex items-center justify-center leading-none tabular-nums">
+                        {(navBadge(label) ?? 0) > 9 ? '9+' : navBadge(label)}
                       </span>
                     )}
                   </div>
