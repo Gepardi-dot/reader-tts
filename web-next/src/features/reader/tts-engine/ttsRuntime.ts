@@ -14,7 +14,7 @@ import { AudioClock } from './audioClock'
 import { BufferPool } from './bufferPool'
 import { BrowserSpeechLane } from './browserSpeechLane'
 import { createChunkLoader } from './chunkLoader'
-import { KokoroPipeline } from './kokoroPipeline'
+import { KokoroEngine, PREHEAT_SEGMENTS } from './kokoroEngine'
 import { audioErrorMessage } from './liveAudio'
 import { buildTtsChunks } from './segmenter'
 import { FirstAudioGate } from './sessionTelemetry'
@@ -47,7 +47,7 @@ export interface TtsRuntimeHooks {
 /**
  * Imperative TTS runtime. React only observes snapshots and forwards commands.
  *
- * Kokoro: stable segments + SegmentCache + continuous KokoroPipeline.
+ * Kokoro: stable segments + SegmentCache + continuous KokoroEngine.
  * Gemini: BufferPool + live-audio chunks.
  * Browser speech: selected-provider path only (never masks native).
  */
@@ -66,7 +66,7 @@ export class TtsRuntime {
   private pool: BufferPool | null = null
   private bookId: string | undefined
   private readonly clock = new AudioClock()
-  private readonly kokoro = new KokoroPipeline()
+  private readonly kokoro = new KokoroEngine()
   private readonly browser = new BrowserSpeechLane()
   private readonly firstAudio = new FirstAudioGate()
   private readonly objectUrls = new Set<string>()
@@ -76,7 +76,7 @@ export class TtsRuntime {
   private sessionId = 0
   private reason: 'voice-switch' | 'tap' = 'tap'
   private loadingChunkIndexes = new Set<number>()
-  private usingKokoroPipeline = false
+  private usingKokoroEngine = false
   private kokoroSegmentStarts: number[] = []
   private hooks: TtsRuntimeHooks = {
     syncAudioFollowCue: () => undefined,
@@ -96,7 +96,7 @@ export class TtsRuntime {
   }
 
   getSnapshot(): TtsSnapshot {
-    if (this.usingKokoroPipeline) {
+    if (this.usingKokoroEngine) {
       const k = this.kokoro.getSnapshot()
       return {
         phase: k.phase,
@@ -108,6 +108,7 @@ export class TtsRuntime {
         nativeReadyChunks: k.totalSegments > 0 ? 1 : 0,
         bufferedSeconds: k.bufferedSeconds,
         error: k.error,
+        statusText: k.statusText,
       }
     }
     const ready = this.pool?.readyRunFrom(this.currentIndex) ?? { count: 0, seconds: 0 }
@@ -121,17 +122,18 @@ export class TtsRuntime {
       nativeReadyChunks: ready.count,
       bufferedSeconds: ready.seconds + this.clock.bufferedAheadSeconds(),
       error: this.error,
+      statusText: null,
     }
   }
 
   isAudibleOrLoading() {
-    if (this.usingKokoroPipeline) return this.kokoro.isActive()
+    if (this.usingKokoroEngine) return this.kokoro.isActive()
     return this.phase === 'playing' || this.phase === 'buffering' || this.clock.isActive || this.browser.isActive
   }
 
   /** Absolute book offset for a chunk index — used for voice-switch restart. */
   chunkStart(index: number): number | null {
-    if (this.usingKokoroPipeline) {
+    if (this.usingKokoroEngine) {
       return this.kokoroSegmentStarts[index]
         ?? this.kokoroSegmentStarts[0]
         ?? null
@@ -146,7 +148,7 @@ export class TtsRuntime {
     this.kokoro.setRate(rate)
   }
 
-  /** Idle prep for Kokoro segment cache around the reading position. */
+  /** Preheat SegmentCache around the reading position (makes taps instant). */
   prepareKokoroWindow(input: {
     bookText: string
     offset: number
@@ -154,7 +156,12 @@ export class TtsRuntime {
     maxSegments?: number
     signal?: AbortSignal
   }) {
-    return this.kokoro.prepareWindow(input)
+    return this.kokoro.preheat({
+      bookText: input.bookText,
+      offset: input.offset,
+      voice: input.voice,
+      maxSegments: input.maxSegments ?? PREHEAT_SEGMENTS,
+    })
   }
 
   stop() {
@@ -164,7 +171,7 @@ export class TtsRuntime {
     this.browser.stop()
     this.clock.stop()
     this.kokoro.stop()
-    this.usingKokoroPipeline = false
+    this.usingKokoroEngine = false
     this.kokoroSegmentStarts = []
     this.pool?.reset()
     this.pool = null
@@ -188,7 +195,7 @@ export class TtsRuntime {
   }
 
   pause() {
-    if (this.usingKokoroPipeline) {
+    if (this.usingKokoroEngine) {
       this.kokoro.pause()
       this.emit()
       return
@@ -205,7 +212,7 @@ export class TtsRuntime {
   }
 
   resume() {
-    if (this.usingKokoroPipeline) {
+    if (this.usingKokoroEngine) {
       this.kokoro.resume()
       this.emit()
       return
@@ -218,7 +225,7 @@ export class TtsRuntime {
   }
 
   toggle() {
-    if (this.usingKokoroPipeline) {
+    if (this.usingKokoroEngine) {
       this.kokoro.toggle()
       this.emit()
       return
@@ -258,7 +265,7 @@ export class TtsRuntime {
         this.stop()
         return
       }
-      this.usingKokoroPipeline = true
+      this.usingKokoroEngine = true
       this.wireKokoroHooks(generation)
       queuePerformanceTelemetry({
         eventName: 'tts.play_start_v2',
@@ -269,7 +276,7 @@ export class TtsRuntime {
           startOffset: params.startOffset,
           selectedChars: params.word.length,
           kokoroModelReady: isModelReady(),
-          engine: 'kokoro-pipeline',
+          engine: 'kokoro-engine',
         },
       })
       this.emit()
@@ -536,7 +543,7 @@ export class TtsRuntime {
       },
       onEnded: () => {
         if (generation !== this.generation) return
-        this.usingKokoroPipeline = false
+        this.usingKokoroEngine = false
         this.phase = 'idle'
         this.lane = 'none'
         this.hooks.clearAudioFollow()
@@ -556,7 +563,7 @@ export class TtsRuntime {
             lane: 'native',
             reason: this.reason,
             chunkChars: meta.segmentChars,
-            engine: 'kokoro-pipeline',
+            engine: 'kokoro-engine',
           },
         })
       },
@@ -674,3 +681,4 @@ export class TtsRuntime {
     }
   }
 }
+

@@ -2126,7 +2126,7 @@ interface AudioHandle {
   stop: () => void
 }
 
-function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, colors, handle, onOpenSheet }: {
+function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, colors, handle, onOpenSheet, statusText }: {
   phase:        AudioPhase
   curIdx:       number
   totalChunks:  number
@@ -2136,6 +2136,7 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
   colors:       typeof THEMES['paper']
   handle:       AudioHandle | null
   onOpenSheet:  () => void
+  statusText?:  string | null
 }) {
   const isBuffering = phase === 'buffering'
   const isPlaying   = phase === 'playing'
@@ -2144,6 +2145,7 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
     : isPlaying
       ? 'Pause audio'
       : 'Resume audio'
+  const headline = isBuffering && statusText ? statusText : 'Now playing'
 
   const progressPct = totalChunks > 1
     ? Math.round(((curIdx + (isPlaying ? 1 : 0)) / totalChunks) * 100)
@@ -2179,7 +2181,7 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
       {/* Left: info — clicking voice opens audio sheet */}
       <div className="flex flex-col shrink-0" style={{ minWidth: 100 }}>
         <span className="text-[10px] font-semibold leading-none" style={{ color: colors.text }}>
-          Now playing
+          {headline}
         </span>
         <div className="flex items-center gap-1 mt-0.5">
           {/* Voice name — opens audio sheet */}
@@ -2360,6 +2362,7 @@ export function ReaderRoute() {
     wordAudioPhase,
     wordAudioCurIdx,
     wordAudioTotal,
+    wordAudioStatusText,
     playWord,
     toggleWordAudio,
     stopWordAudio,
@@ -2598,19 +2601,19 @@ export function ReaderRoute() {
     presynthGridRef.current = grid
   }, [payload?.text, effectiveTtsProvider])
 
-  // Idle Kokoro prep: fill SegmentCache around the viewport so taps hit cache.
-  // Gemini is not prefetched here (quota). Playback always preempts prep.
+  // Kokoro preheat: fill SegmentCache around the viewport so taps are cache hits.
+  // This is the main "instant" mechanism — not synth-on-tap.
   const prefetchRef   = useRef<AbortController | null>(null)
   const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (effectiveTtsProvider !== 'kokoro' || !payload?.text) return
-    if (!isModelReady() || !effectiveTtsVoice) return
-    // Never compete with active playback for the ONNX worker.
+    if (effectiveTtsProvider !== 'kokoro' || !payload?.text || !effectiveTtsVoice) return
     if (wordAudioPhase !== 'idle') {
       prefetchRef.current?.abort()
       return
     }
 
+    // First paint: preheat immediately. Later scroll: light debounce.
+    const delay = prefetchRef.current ? 280 : 0
     if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
     prefetchTimer.current = setTimeout(() => {
       prefetchRef.current?.abort()
@@ -2621,14 +2624,13 @@ export function ReaderRoute() {
         bookText: payload.text,
         offset: start,
         voice: effectiveTtsVoice,
-        maxSegments: 8,
+        maxSegments: 12,
         signal: ctrl.signal,
       }).catch(() => undefined)
-    }, 450)
+    }, delay)
 
     return () => {
       if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
-      prefetchRef.current?.abort()
     }
   }, [
     effectiveTtsProvider,
@@ -3379,6 +3381,7 @@ export function ReaderRoute() {
             phase={activePlayBarPhase}
             curIdx={activePlayBarCurIdx}
             totalChunks={activePlayBarTotal}
+            statusText={wordAudioStatusText}
             voiceLabel={playBarVoiceLabel}
             rate={audioRate}
             onRateChange={setAudioRate}

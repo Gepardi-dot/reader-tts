@@ -45,6 +45,8 @@ export interface TtsSnapshot {
   nativeReadyChunks: number
   bufferedSeconds: number
   error: string | null
+  /** Human-readable load state for the play bar (e.g. model download). */
+  statusText?: string | null
 }
 
 export interface NativeAudioResult {

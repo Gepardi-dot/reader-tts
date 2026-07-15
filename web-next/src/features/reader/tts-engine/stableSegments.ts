@@ -15,9 +15,10 @@ export interface StableSegment {
   text: string
 }
 
-export const STABLE_SEGMENT_TARGET_CHARS = 140
-export const STABLE_SEGMENT_MAX_CHARS = 220
-export const STABLE_SEGMENT_MIN_CHARS = 24
+// Shorter segments = faster first cold synth + denser preheat hits.
+export const STABLE_SEGMENT_TARGET_CHARS = 100
+export const STABLE_SEGMENT_MAX_CHARS = 160
+export const STABLE_SEGMENT_MIN_CHARS = 20
 
 const SENTENCE_END = /[.!?]["')\]]*\s+/g
 

@@ -21,11 +21,12 @@ export interface TtsSessionController {
   wordAudioPhase: TtsPhase
   wordAudioCurIdx: number
   wordAudioTotal: number
+  wordAudioStatusText: string | null
   playWord: (word: string, startOffset: number, reason?: 'voice-switch') => Promise<void>
   toggleWordAudio: () => void
   stopWordAudio: () => void
   isAudioActive: () => boolean
-  /** Idle-prep Kokoro segment cache around a reading offset. */
+  /** Preheat Kokoro SegmentCache around a reading offset (instant taps). */
   prepareKokoroWindow: (input: {
     bookText: string
     offset: number
@@ -152,6 +153,7 @@ export function useTtsSessionController({
     wordAudioPhase: snapshot.phase,
     wordAudioCurIdx: snapshot.currentIndex,
     wordAudioTotal: snapshot.totalChunks,
+    wordAudioStatusText: snapshot.statusText ?? null,
     playWord,
     toggleWordAudio,
     stopWordAudio,

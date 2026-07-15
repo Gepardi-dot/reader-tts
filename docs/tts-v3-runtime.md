@@ -2,45 +2,36 @@
 
 ## Goal
 
-Instant, continuous Kokoro/Gemini playback. React never schedules audio.
+Instant taps + continuous playback. React never schedules audio.
 
-## Architecture
+## Kokoro (cache-first engine)
 
 ```
-TtsRuntime (commands + snapshot)
-  ├── KokoroPipeline (kokoro only)
-  │     ├── stableSegments   sentence/clause map (cache-stable)
-  │     ├── SegmentCache     memory + IndexedDB
-  │     ├── producer pump    keep ~2s WebAudio watermark
-  │     └── AudioClock       append-only consumer
-  ├── BufferPool + chunkLoader (Gemini / cloud)
-  └── BrowserSpeechLane (selected browser provider only)
+Book open / scroll
+  └── KokoroEngine.preheat()  → fills SegmentCache (12 segments)
+
+Tap to play
+  └── KokoroEngine.start()
+        ├── model not ready → status "Downloading…" → auto-start when ready
+        ├── cache hit → schedule AudioBuffer immediately
+        ├── cache miss → stream PCM frames (first frame starts audio)
+        └── fill loop keeps ~2.2s on the WebAudio timeline
 ```
 
-Browser speech is a **selected provider only**. It does not mask Kokoro/Gemini.
+**Product rule:** Instant is a **cache property**, not a synth-latency hope.
+Preheat is first-class. Play is mostly “play what is already ready.”
 
-## Instant play path (Kokoro)
+| Piece | File |
+|-------|------|
+| Stable segments | `stableSegments.ts` |
+| Memory + IDB cache | `segmentCache.ts` |
+| Engine | `kokoroEngine.ts` |
+| Clock | `audioClock.ts` |
 
-1. Warm model on app/book open (`startWarmup`).
-2. Map tap → stable segment id.
-3. **Cache hit** (memory/IDB) → schedule whole segment immediately.
-4. **Cache miss** → stream sentence PCM into the clock; write full segment to cache.
-5. Producer keeps ~2s scheduled ahead (serialized ONNX).
-6. Idle scroll prep fills SegmentCache around the viewport.
+## Gemini
 
-## Gemini path
+Unchanged BufferPool + live-audio path (cloud chunk + edge/R2 cache).
 
-1. Short first chunk, sequential prefetch (quota-safe).
-2. Edge/R2 cache hits decode and append as one unit.
-3. Cold miss → buffering until first frame; no silent browser voice.
+## Browser speech
 
-## React surface
-
-`useTtsSessionController` is a thin adapter: subscribe to snapshots, forward
-`start` / `pause` / `resume` / `stop` / `prepareKokoroWindow`.
-
-## Telemetry
-
-- `tts.play_start_v2` (`engine: 'kokoro-pipeline' | 'v3'`)
-- `tts.first_audio_v2`
-- Existing live-audio fetch/error/backoff events
+Selected provider only — never silently masks Kokoro/Gemini.
