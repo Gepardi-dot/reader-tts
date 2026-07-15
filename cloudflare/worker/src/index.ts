@@ -354,19 +354,37 @@ async function handleAuth(request: Request, env: Env, path: string) {
     const email = normalizeEmail(body.email)
     const password = requirePassword(body.password)
 
+    // Never create a second account for the same email — that would orphan library data.
     const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first()
-    if (existing) throw new ApiError(409, 'An account already exists for this email.')
+    if (existing) {
+      throw new ApiError(
+        409,
+        'This email is already registered. Sign in with your password to keep your books and vocabulary.',
+      )
+    }
 
     const now = new Date().toISOString()
     const user = { id: crypto.randomUUID(), email }
     const deckId = crypto.randomUUID()
-    await env.DB.batch([
-      env.DB.prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)')
-        .bind(user.id, user.email, await hashPassword(password), now),
-      env.DB.prepare(
-        'INSERT INTO vocabulary_decks (id, user_id, title, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
-      ).bind(deckId, user.id, 'My Vocabulary', 'Words saved while reading', now, now),
-    ])
+    try {
+      await env.DB.batch([
+        env.DB.prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)')
+          .bind(user.id, user.email, await hashPassword(password), now),
+        env.DB.prepare(
+          'INSERT INTO vocabulary_decks (id, user_id, title, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        ).bind(deckId, user.id, 'My Vocabulary', 'Words saved while reading', now, now),
+      ])
+    } catch (error) {
+      // Race / unique constraint: treat as existing account, never overwrite.
+      const msg = error instanceof Error ? error.message : String(error)
+      if (/unique|constraint|already exists/i.test(msg)) {
+        throw new ApiError(
+          409,
+          'This email is already registered. Sign in with your password to keep your books and vocabulary.',
+        )
+      }
+      throw error
+    }
     return json(await issueSession(env, user), 201)
   }
 

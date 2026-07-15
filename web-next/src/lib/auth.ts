@@ -76,13 +76,53 @@ export function hasAuthToken() {
   return Boolean(getStoredAuthToken())
 }
 
+export class AuthApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: 'email_taken' | 'invalid_credentials' | 'auth_required',
+  ) {
+    super(message)
+    this.name = 'AuthApiError'
+  }
+}
+
+function classifyAuthError(status: number, message: string): AuthApiError {
+  const lower = message.toLowerCase()
+  if (
+    status === 409
+    || /already (exists|registered)|email is already|account already/i.test(lower)
+  ) {
+    return new AuthApiError(
+      'This email is already registered. Sign in with your password to keep your books and vocabulary.',
+      status === 409 ? 409 : status,
+      'email_taken',
+    )
+  }
+  if (status === 401 || /invalid email or password/i.test(lower)) {
+    return new AuthApiError(
+      'Invalid email or password. If you already have an account, use Sign in — do not create a new one.',
+      status || 401,
+      'invalid_credentials',
+    )
+  }
+  if (/authentication required/i.test(lower)) {
+    return new AuthApiError(
+      'Could not reach the auth service. Hard-refresh the page and try again. Use Sign in if you already have an account.',
+      status || 401,
+      'auth_required',
+    )
+  }
+  return new AuthApiError(message || 'Something went wrong.', status || 500)
+}
+
 export async function signIn(email: string, password: string) {
   const res = await fetch(resolveUrl('/api/auth/login'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
   })
-  if (!res.ok) throw new Error(await errorMessage(res))
+  if (!res.ok) throw classifyAuthError(res.status, await errorMessage(res))
   return persistAuth(await res.json() as AuthPayload)
 }
 
@@ -92,7 +132,7 @@ export async function signUp(email: string, password: string) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
   })
-  if (!res.ok) throw new Error(await errorMessage(res))
+  if (!res.ok) throw classifyAuthError(res.status, await errorMessage(res))
   return persistAuth(await res.json() as AuthPayload)
 }
 

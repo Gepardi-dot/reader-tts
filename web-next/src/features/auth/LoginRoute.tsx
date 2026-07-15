@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { signIn, signUp } from '@/lib/auth'
+import { AuthApiError, signIn, signUp } from '@/lib/auth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -13,11 +13,13 @@ export function LoginRoute() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [emailTaken, setEmailTaken] = useState(false)
   const [loading, setLoading] = useState(false)
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+    setEmailTaken(false)
     setLoading(true)
     try {
       if (mode === 'signin') {
@@ -28,10 +30,21 @@ export function LoginRoute() {
         navigate('/library', { replace: true })
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Something went wrong.')
+      if (err instanceof AuthApiError && err.code === 'email_taken') {
+        setEmailTaken(true)
+        setError(err.message)
+      } else {
+        setError(err instanceof Error ? err.message : 'Something went wrong.')
+      }
     } finally {
       setLoading(false)
     }
+  }
+
+  function switchMode(next: Mode) {
+    setMode(next)
+    setError(null)
+    setEmailTaken(false)
   }
 
   return (
@@ -54,7 +67,7 @@ export function LoginRoute() {
               autoComplete="email"
               required
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => { setEmail(e.target.value); setEmailTaken(false); setError(null) }}
               placeholder="you@example.com"
             />
           </div>
@@ -74,7 +87,19 @@ export function LoginRoute() {
           </div>
 
           {error && (
-            <p className="text-sm text-destructive">{error}</p>
+            <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
+              <p className="text-sm text-destructive">{error}</p>
+              {emailTaken && mode === 'signup' && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full"
+                  onClick={() => switchMode('signin')}
+                >
+                  Go to Sign in
+                </Button>
+              )}
+            </div>
           )}
 
           <Button type="submit" className="w-full" disabled={loading}>
@@ -85,17 +110,18 @@ export function LoginRoute() {
         <p className="text-center text-sm text-muted-foreground">
           {mode === 'signin' ? (
             <>No account?{' '}
-              <button type="button" onClick={() => { setMode('signup'); setError(null) }}
+              <button type="button" onClick={() => switchMode('signup')}
                 className="underline hover:text-foreground">
                 Sign up
               </button>
             </>
           ) : (
             <>Already have an account?{' '}
-              <button type="button" onClick={() => { setMode('signin'); setError(null) }}
+              <button type="button" onClick={() => switchMode('signin')}
                 className="underline hover:text-foreground">
                 Sign in
               </button>
+              {' '}— your books stay with that login.
             </>
           )}
         </p>
