@@ -20,7 +20,7 @@ export interface WarmLiveAudioParams {
   startOffset: number
   provider: string
   voice: string | null
-  /** How many leading chunks to warm (1–2 is enough for instant Play). */
+  /** How many leading chunks to warm (1–3). More = better ahead coverage after refresh. */
   chunkCount?: number
   signal?: AbortSignal
 }

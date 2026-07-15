@@ -185,7 +185,8 @@ export class TtsRuntime {
       startOffset: input.startOffset,
       provider: input.provider,
       voice: input.voice,
-      chunkCount: input.provider === 'kokoro' ? 2 : 1,
+      // Kokoro: warm a few chunks ahead so refresh + scroll still hit IDB/edge.
+      chunkCount: input.provider === 'kokoro' ? 3 : 1,
       signal: input.signal,
     })
   }

@@ -30,6 +30,7 @@ import {
 import { cn } from '@/lib/utils'
 import {
   CHUNK_CHARS,
+  audioSliceStart,
   pacingFor,
 } from './audioPlayback'
 import {
@@ -2599,7 +2600,32 @@ export function ReaderRoute() {
     presynthGridRef.current = grid
   }, [payload?.text, effectiveTtsProvider])
 
-  // Hosted Kokoro uses Worker live-audio + edge/R2 cache (no client ONNX preheat).
+  // Hosted Kokoro/Gemini: idle warm around the viewport so ahead chunks land in
+  // IndexedDB (survives refresh) + Worker edge/R2. Debounced on scroll.
+  const aheadWarmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (effectiveTtsProvider !== 'kokoro' && effectiveTtsProvider !== 'google') return
+    if (!payload?.text || !bookId || !effectiveTtsVoice) return
+    if (wordAudioPhase !== 'idle') return
+
+    if (aheadWarmTimer.current) clearTimeout(aheadWarmTimer.current)
+    aheadWarmTimer.current = setTimeout(() => {
+      const start = audioSliceStart(payload.text.length, scrollPct)
+      warmCloudAtOffset(start)
+    }, 600)
+
+    return () => {
+      if (aheadWarmTimer.current) clearTimeout(aheadWarmTimer.current)
+    }
+  }, [
+    effectiveTtsProvider,
+    effectiveTtsVoice,
+    payload?.text,
+    bookId,
+    scrollPct,
+    wordAudioPhase,
+    warmCloudAtOffset,
+  ])
 
   function patchAppearance(patch: Partial<Appearance>) {
     setAppearance(a => ({ ...a, ...patch }))

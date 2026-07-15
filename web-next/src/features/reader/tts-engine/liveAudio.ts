@@ -31,8 +31,11 @@ export interface LiveAudioResult {
   contentType?: string
   byteLength?: number | null
   cacheHit?: boolean
-  cacheStorage?: 'edge' | 'r2' | 'generated' | string
+  cacheStorage?: 'edge' | 'r2' | 'generated' | 'indexeddb' | 'memory' | string
 }
+
+/** Survives browser refresh (IndexedDB). Bump if payload fields change. */
+export const LIVE_CLIENT_CACHE_VERSION = 2
 
 const LIVE_AUDIO_MEMORY_TTL_MS = 10 * 60_000
 const LIVE_AUDIO_RATE_LIMIT_FALLBACK_MS = 60_000
@@ -53,6 +56,11 @@ function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
     payload.end,
     payload.text,
   ])
+}
+
+/** Stable client IDB key for a live-audio payload (same text range → same key after refresh). */
+export function clientLiveCacheKey(bookId: string, payload: LiveAudioPayload) {
+  return `live-client:v${LIVE_CLIENT_CACHE_VERSION}:${liveAudioCacheKey(bookId, payload)}`
 }
 
 function liveAudioRetryDelayMs(error: unknown) {
@@ -77,6 +85,7 @@ export function liveAudioCooldownRemainingMs(provider: string) {
 
 export function resetLiveAudioCooldownForTests() {
   liveAudioCooldownUntil = 0
+  liveAudioMemoryCache.clear()
 }
 
 function noteLiveAudioFailure(error: unknown) {
@@ -86,22 +95,113 @@ function noteLiveAudioFailure(error: unknown) {
   }
 }
 
-export function requestLiveAudio(bookId: string, payload: LiveAudioPayload) {
+async function blobFromResultUrl(url: string, signal?: AbortSignal): Promise<Blob> {
+  if (url.startsWith('data:') || url.startsWith('blob:')) {
+    const response = await fetch(url, { signal })
+    if (!response.ok) throw new Error(`Audio fetch failed (${response.status})`)
+    return response.blob()
+  }
+  if (needsAuthenticatedAudioFetch(url)) {
+    return requestBlob(url, { signal })
+  }
+  const response = await fetch(url, { signal })
+  if (!response.ok) throw new Error(`Audio fetch failed (${response.status})`)
+  return response.blob()
+}
+
+async function persistClientLiveAudio(
+  clientKey: string,
+  result: LiveAudioResult,
+  signal?: AbortSignal,
+) {
+  try {
+    let blob: Blob
+    if (result.url) {
+      blob = await blobFromResultUrl(result.url, signal)
+    } else if (isCacheableLiveAudio(result)) {
+      const existing = await getCachedAudio(result.cacheKey, result.cacheVersion).catch(() => null)
+      if (!existing?.blob) return
+      blob = existing.blob
+    } else {
+      return
+    }
+
+    await putCachedAudio({
+      cacheKey: clientKey,
+      cacheVersion: LIVE_CLIENT_CACHE_VERSION,
+      blob,
+      cues: result.cues ?? [],
+      duration: result.duration ?? null,
+      contentType: result.contentType ?? (blob.type || 'audio/wav'),
+      byteLength: result.byteLength ?? blob.size,
+    })
+
+    // Also store under server key when present (legacy loadLiveAudioBlob path).
+    if (isCacheableLiveAudio(result) && result.cacheKey !== clientKey) {
+      await putCachedAudio({
+        cacheKey: result.cacheKey,
+        cacheVersion: result.cacheVersion,
+        blob,
+        cues: result.cues ?? [],
+        duration: result.duration ?? null,
+        contentType: result.contentType ?? (blob.type || 'audio/wav'),
+        byteLength: result.byteLength ?? blob.size,
+      }).catch(() => undefined)
+    }
+  } catch {
+    // Cache write failures are non-fatal.
+  }
+}
+
+/**
+ * Fetch live audio for a book range.
+ * Lookup order: in-memory → IndexedDB (survives refresh) → network (Worker edge/R2/synth).
+ */
+export async function requestLiveAudio(bookId: string, payload: LiveAudioPayload) {
   const cooldownMs = liveAudioCooldownRemainingMs(payload.provider)
   if (cooldownMs > 0) {
     return Promise.reject(new Error(`Gemini TTS is cooling down after a rate limit. Retry in ${Math.ceil(cooldownMs / 1000)}s.`))
   }
 
   const key = liveAudioCacheKey(bookId, payload)
+  const clientKey = clientLiveCacheKey(bookId, payload)
   const now = Date.now()
   const cached = liveAudioMemoryCache.get(key)
   if (cached && cached.expiresAt > now) return cached.promise
   if (cached) liveAudioMemoryCache.delete(key)
 
-  const promise = request<LiveAudioResult>(`/api/books/${bookId}/live-audio`, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  }).catch((error) => {
+  const promise = (async (): Promise<LiveAudioResult> => {
+    // Durable client cache — works after browser refresh.
+    const idb = await getCachedAudio(clientKey, LIVE_CLIENT_CACHE_VERSION).catch(() => null)
+    if (idb?.blob) {
+      return {
+        url: '',
+        duration: idb.duration,
+        cues: (idb.cues ?? []) as LiveAudioCue[],
+        cacheKey: clientKey,
+        cacheVersion: LIVE_CLIENT_CACHE_VERSION,
+        contentType: idb.contentType,
+        byteLength: idb.byteLength,
+        cacheHit: true,
+        cacheStorage: 'indexeddb',
+      }
+    }
+
+    const result = await request<LiveAudioResult>(`/api/books/${bookId}/live-audio`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+
+    // Fire-and-forget durable write so the next session/refresh is instant.
+    void persistClientLiveAudio(clientKey, result)
+
+    return {
+      ...result,
+      // Prefer client key so loadLiveAudioBlob reads IDB without re-fetching the data URL.
+      cacheKey: clientKey,
+      cacheVersion: LIVE_CLIENT_CACHE_VERSION,
+    }
+  })().catch((error) => {
     noteLiveAudioFailure(error)
     liveAudioMemoryCache.delete(key)
     throw error
@@ -127,12 +227,10 @@ function needsAuthenticatedAudioFetch(url: string) {
 }
 
 async function fetchAndCacheLiveAudioBlob(result: LiveAudioResult, signal?: AbortSignal) {
-  const blob = needsAuthenticatedAudioFetch(result.url)
-    ? await requestBlob(result.url, { signal })
-    : await fetch(result.url, { signal }).then((response) => {
-      if (!response.ok) throw new Error(`Audio fetch failed (${response.status})`)
-      return response.blob()
-    })
+  if (!result.url) {
+    throw new Error('Audio provider returned no playable URL.')
+  }
+  const blob = await blobFromResultUrl(result.url, signal)
 
   if (isCacheableLiveAudio(result)) {
     await putCachedAudio({
@@ -154,9 +252,16 @@ export async function loadLiveAudioBlob(result: LiveAudioResult, signal?: AbortS
     ? await getCachedAudio(result.cacheKey, result.cacheVersion).catch(() => null)
     : null
 
+  if (cachedAudio?.blob) {
+    return {
+      blob: cachedAudio.blob,
+      cues: (cachedAudio.cues ?? result.cues ?? []) as LiveAudioCue[],
+    }
+  }
+
   return {
-    blob: cachedAudio?.blob ?? await fetchAndCacheLiveAudioBlob(result, signal),
-    cues: (cachedAudio?.cues ?? result.cues ?? []) as LiveAudioCue[],
+    blob: await fetchAndCacheLiveAudioBlob(result, signal),
+    cues: (result.cues ?? []) as LiveAudioCue[],
   }
 }
 
