@@ -258,36 +258,10 @@ export class TtsRuntime {
     this.controller = controller
     const selectionKey = audioSelectionKey(params.provider, params.voice)
 
-    // ── Kokoro: dedicated segment pipeline ─────────────────────────────
-    if (params.provider === 'kokoro') {
-      if (!params.voice) {
-        this.hooks.showToast('Select a Kokoro voice before playing.')
-        this.stop()
-        return
-      }
-      this.usingKokoroEngine = true
-      this.wireKokoroHooks(generation)
-      queuePerformanceTelemetry({
-        eventName: 'tts.play_start_v2',
-        bookId: params.bookId,
-        provider: 'kokoro',
-        metadata: {
-          reason: this.reason,
-          startOffset: params.startOffset,
-          selectedChars: params.word.length,
-          kokoroModelReady: isModelReady(),
-          engine: 'kokoro-engine',
-        },
-      })
-      this.emit()
-      await this.kokoro.start({
-        bookText: params.bookText,
-        startOffset: params.startOffset,
-        voice: params.voice,
-        rate: params.rate,
-        word: params.word,
-        startedAt: this.startedAt,
-      })
+    // Hosted Kokoro + Gemini use the same BufferPool → live-audio path.
+    if (params.provider === 'kokoro' && !params.voice) {
+      this.hooks.showToast('Select a Kokoro voice before playing.')
+      this.stop()
       return
     }
 
@@ -296,7 +270,7 @@ export class TtsRuntime {
       startOffset: params.startOffset,
       provider: params.provider,
       presynthGrid: params.presynthGrid,
-      kokoroModelReady: isModelReady(),
+      kokoroModelReady: true,
     })
 
     if (generation !== this.generation) return
@@ -320,7 +294,7 @@ export class TtsRuntime {
         chunkCount: chunks.length,
         browserFallback: params.provider === BROWSER_TTS_PROVIDER_ID && this.browser.canSpeak(),
         kokoroModelReady: isModelReady(),
-        engine: 'v3',
+        engine: params.provider === 'kokoro' ? 'kokoro-hosted' : 'v3',
       },
     })
 
@@ -488,86 +462,6 @@ export class TtsRuntime {
       this.hooks.showToast(audioErrorMessage(error))
       this.stop()
     }
-  }
-
-  private wireKokoroHooks(generation: number) {
-    this.kokoroSegmentStarts = []
-    this.kokoro.setHooks({
-      onSnapshot: () => {
-        if (generation !== this.generation) return
-        const snap = this.kokoro.getSnapshot()
-        this.phase = snap.phase
-        this.lane = snap.phase === 'idle' ? 'none' : 'native'
-        this.currentIndex = snap.currentIndex
-        this.word = snap.word
-        this.error = snap.error
-        this.emit()
-      },
-      onSegmentStart: (segment) => {
-        if (generation !== this.generation) return
-        this.kokoroSegmentStarts[segment.index] = segment.start
-        // Synthetic chunk for follow-highlight consumers.
-        const fake: TtsAudioChunk = {
-          id: segment.id,
-          index: segment.index,
-          start: segment.start,
-          end: segment.end,
-          text: segment.text,
-          status: 'ready',
-          url: null,
-          buffer: null,
-          cues: [],
-          durationSec: null,
-        }
-        this.hooks.syncAudioFollowCue(fake, 0, true)
-      },
-      onProgress: (segment, bufferTime) => {
-        if (generation !== this.generation) return
-        const fake: TtsAudioChunk = {
-          id: segment.id,
-          index: segment.index,
-          start: segment.start,
-          end: segment.end,
-          text: segment.text,
-          status: 'ready',
-          url: null,
-          buffer: null,
-          cues: [],
-          durationSec: null,
-        }
-        this.hooks.syncAudioFollowCue(fake, bufferTime, false)
-      },
-      onError: (message) => {
-        if (generation !== this.generation) return
-        this.hooks.showToast(message)
-      },
-      onEnded: () => {
-        if (generation !== this.generation) return
-        this.usingKokoroEngine = false
-        this.phase = 'idle'
-        this.lane = 'none'
-        this.hooks.clearAudioFollow()
-        this.emit()
-      },
-      onFirstAudio: (meta) => {
-        if (generation !== this.generation) return
-        if (!this.firstAudio.shouldReport(this.sessionId, this.generation)) return
-        queuePerformanceTelemetry({
-          eventName: 'tts.first_audio_v2',
-          bookId: this.bookId,
-          provider: 'kokoro',
-          durationMs: meta.durationMs,
-          cacheHit: meta.cacheHit,
-          cacheStorage: meta.cacheStorage,
-          metadata: {
-            lane: 'native',
-            reason: this.reason,
-            chunkChars: meta.segmentChars,
-            engine: 'kokoro-engine',
-          },
-        })
-      },
-    })
   }
 
   private scheduleReadyFrom(startIndex: number): number {

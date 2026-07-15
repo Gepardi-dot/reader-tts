@@ -31,7 +31,6 @@ import { cn } from '@/lib/utils'
 import {
   BROWSER_TTS_PROVIDER_ID,
   CHUNK_CHARS,
-  audioSliceStart,
   pacingFor,
 } from './audioPlayback'
 import {
@@ -2367,7 +2366,6 @@ export function ReaderRoute() {
     toggleWordAudio,
     stopWordAudio,
     isAudioActive,
-    prepareKokoroWindow,
   } = useTtsSessionController({
     bookId,
     bookText: payload?.text ?? '',
@@ -2601,45 +2599,7 @@ export function ReaderRoute() {
     presynthGridRef.current = grid
   }, [payload?.text, effectiveTtsProvider])
 
-  // Kokoro preheat: fill SegmentCache around the viewport so taps are cache hits.
-  // This is the main "instant" mechanism — not synth-on-tap.
-  const prefetchRef   = useRef<AbortController | null>(null)
-  const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => {
-    if (effectiveTtsProvider !== 'kokoro' || !payload?.text || !effectiveTtsVoice) return
-    if (wordAudioPhase !== 'idle') {
-      prefetchRef.current?.abort()
-      return
-    }
-
-    // First paint: preheat immediately. Later scroll: light debounce.
-    const delay = prefetchRef.current ? 280 : 0
-    if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
-    prefetchTimer.current = setTimeout(() => {
-      prefetchRef.current?.abort()
-      const ctrl = new AbortController()
-      prefetchRef.current = ctrl
-      const start = audioSliceStart(payload.text.length, scrollPct)
-      void prepareKokoroWindow({
-        bookText: payload.text,
-        offset: start,
-        voice: effectiveTtsVoice,
-        maxSegments: 12,
-        signal: ctrl.signal,
-      }).catch(() => undefined)
-    }, delay)
-
-    return () => {
-      if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
-    }
-  }, [
-    effectiveTtsProvider,
-    effectiveTtsVoice,
-    payload?.text,
-    scrollPct,
-    prepareKokoroWindow,
-    wordAudioPhase,
-  ])
+  // Hosted Kokoro uses Worker live-audio + edge/R2 cache (no client ONNX preheat).
 
   function patchAppearance(patch: Partial<Appearance>) {
     setAppearance(a => ({ ...a, ...patch }))

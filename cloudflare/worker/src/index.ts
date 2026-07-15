@@ -46,6 +46,10 @@ interface Env {
   SESSION_DAYS?: string
   GEMINI_API_KEY?: string
   GEMINI_TTS_MODEL?: string
+  /** Base URL of the hosted Kokoro FastAPI server (e.g. https://kokoro-reader.fly.dev). */
+  KOKORO_REMOTE_URL?: string
+  /** Shared secret matching KOKORO_API_KEY on the Kokoro server. */
+  KOKORO_REMOTE_API_KEY?: string
 }
 
 interface ExecutionContext {
@@ -71,7 +75,9 @@ const PASSWORD_ITERATIONS = 100_000
 const DEFAULT_SESSION_DAYS = 30
 const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-preview-tts'
 const GEMINI_SAMPLE_RATE = 24_000
-const LIVE_AUDIO_CACHE_VERSION = 1
+const KOKORO_SAMPLE_RATE = 24_000
+const KOKORO_DEFAULT_VOICE = 'af_heart'
+const LIVE_AUDIO_CACHE_VERSION = 2
 const EDGE_AUDIO_CACHE_SECONDS = 7 * 24 * 60 * 60
 const R2_AUDIO_CACHE_PREFIX = `live-audio/v${LIVE_AUDIO_CACHE_VERSION}`
 const TELEMETRY_MAX_EVENTS = 20
@@ -113,6 +119,29 @@ const GEMINI_VOICES = [
   { id: 'Algieba', label: 'Algieba', gender: 'neutral', style: 'Smooth' },
   { id: 'Erinome', label: 'Erinome', gender: 'female', style: 'Clear' },
 ]
+
+const KOKORO_VOICES = [
+  { id: 'af_heart', label: 'Heart', gender: 'female', style: 'Warm & Natural', tags: ['Story'] },
+  { id: 'af_sarah', label: 'Sarah', gender: 'female', style: 'Clear & Conversational' },
+  { id: 'af_sky', label: 'Sky', gender: 'female', style: 'Bright & Expressive' },
+  { id: 'af_bella', label: 'Bella', gender: 'female', style: 'Soft' },
+  { id: 'am_adam', label: 'Adam', gender: 'male', style: 'Natural & Steady', tags: ['Story'] },
+  { id: 'am_michael', label: 'Michael', gender: 'male', style: 'Authoritative' },
+  { id: 'bf_emma', label: 'Emma', gender: 'female', style: 'British & Warm' },
+  { id: 'bm_george', label: 'George', gender: 'male', style: 'British & Deep', tags: ['Story'] },
+  { id: 'bm_lewis', label: 'Lewis', gender: 'male', style: 'British & Calm' },
+]
+
+function kokoroRemoteConfigured(env: Env) {
+  return Boolean(env.KOKORO_REMOTE_URL?.trim())
+}
+
+function configuredKokoroVoice(requestedVoice: string | null) {
+  if (requestedVoice && KOKORO_VOICES.some((voice) => voice.id === requestedVoice)) {
+    return requestedVoice
+  }
+  return KOKORO_DEFAULT_VOICE
+}
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -897,12 +926,84 @@ async function synthesizeGeminiAudio(env: Env, options: {
   }
 }
 
+async function synthesizeKokoroRemote(
+  env: Env,
+  input: {
+    text: string
+    voice: string | null
+    lengthScale: number
+  },
+): Promise<{ model: string; voice: string; wav: Uint8Array; duration: number }> {
+  const base = env.KOKORO_REMOTE_URL?.trim().replace(/\/+$/, '')
+  if (!base) {
+    throw new ApiError(
+      400,
+      'Hosted Kokoro is not configured. Set KOKORO_REMOTE_URL (and optional KOKORO_REMOTE_API_KEY) on the Worker.',
+    )
+  }
+
+  const voice = configuredKokoroVoice(input.voice)
+  const speed = input.lengthScale > 0 ? Math.max(0.5, Math.min(2, 1 / input.lengthScale)) : 1
+  const apiKey = env.KOKORO_REMOTE_API_KEY?.trim()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'audio/wav,application/octet-stream',
+  }
+  if (apiKey) {
+    headers['X-Api-Key'] = apiKey
+    headers.Authorization = `Bearer ${apiKey}`
+  }
+
+  let response: Response
+  try {
+    response = await fetch(`${base}/v1/synthesize`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        text: input.text,
+        voice,
+        speed,
+      }),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new ApiError(502, `Hosted Kokoro unreachable: ${message.slice(0, 300)}`)
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    const status = response.status === 401 || response.status === 403
+      ? 502
+      : response.status === 429
+        ? 429
+        : (response.status >= 500 ? 502 : 400)
+    throw new ApiError(status, `Hosted Kokoro failed (${response.status}): ${detail.slice(0, 500)}`)
+  }
+
+  const wav = new Uint8Array(await response.arrayBuffer())
+  if (wav.byteLength < 44) throw new ApiError(502, 'Hosted Kokoro returned empty audio.')
+  // WAV: estimate duration from PCM payload when header is standard 16-bit mono.
+  const duration = Math.max(0.05, (wav.byteLength - 44) / 2 / KOKORO_SAMPLE_RATE)
+  return {
+    model: 'kokoro-remote',
+    voice,
+    wav,
+    duration,
+  }
+}
+
 async function liveAudio(request: Request, env: Env, user: User, bookId: string, ctx: ExecutionContext) {
   const book = await bookRow(env, user, bookId)
   const body = await readJson<Record<string, unknown>>(request)
   const provider = stringField(body.provider)
-  if (provider !== 'google') {
-    throw new ApiError(400, 'Only Gemini TTS is supported by the Cloudflare cloud audio endpoint.')
+  if (provider !== 'google' && provider !== 'kokoro') {
+    throw new ApiError(400, 'Supported cloud audio providers: google (Gemini), kokoro (hosted).')
+  }
+  if (provider === 'kokoro' && !kokoroRemoteConfigured(env)) {
+    throw new ApiError(400, 'Hosted Kokoro is not configured on this API.')
+  }
+  if (provider === 'google' && !env.GEMINI_API_KEY?.trim()) {
+    throw new ApiError(400, 'Gemini TTS is not configured on this API.')
   }
 
   const fullText = String(book.text ?? '')
@@ -925,8 +1026,12 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
   const sentenceSilence = Number(body.sentence_silence ?? body.sentenceSilence ?? 0.2)
   const safeLengthScale = Number.isFinite(lengthScale) ? lengthScale : 1
   const safeSentenceSilence = Number.isFinite(sentenceSilence) ? sentenceSilence : 0.2
-  const model = configuredGeminiModel(env, stringField(body.model) || null)
-  const voice = configuredGeminiVoice(stringField(body.voice) || null)
+  const model = provider === 'google'
+    ? configuredGeminiModel(env, stringField(body.model) || null)
+    : 'kokoro-remote'
+  const voice = provider === 'google'
+    ? configuredGeminiVoice(stringField(body.voice) || null)
+    : configuredKokoroVoice(stringField(body.voice) || null)
   const narrationStyle = stringField(body.narration_style ?? body.narrationStyle)
   const normalizedText = normalizeSelectionText(synthesisText)
   const cacheDigest = await geminiLiveAudioCacheDigest({
@@ -953,14 +1058,21 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
     return json({ ...durableCached, cacheHit: true, cacheStorage: 'r2' })
   }
 
-  const result = await synthesizeGeminiAudio(env, {
-    text: synthesisText,
-    voice,
-    model,
-    narrationStyle,
-    lengthScale: safeLengthScale,
-    sentenceSilence: safeSentenceSilence,
-  })
+  const result = provider === 'google'
+    ? await synthesizeGeminiAudio(env, {
+      text: synthesisText,
+      voice,
+      model,
+      narrationStyle,
+      lengthScale: safeLengthScale,
+      sentenceSilence: safeSentenceSilence,
+    })
+    : await synthesizeKokoroRemote(env, {
+      text: synthesisText,
+      voice,
+      lengthScale: safeLengthScale,
+    })
+
   const payload = {
     ...liveAudioPayloadFromWav(cacheDigest, result.wav, {
       duration: result.duration,
@@ -976,20 +1088,29 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
 async function testProvider(request: Request, env: Env) {
   const body = await readJson<Record<string, unknown>>(request)
   const provider = stringField(body.provider)
-  if (provider !== 'google') {
-    throw new ApiError(400, 'Only Gemini TTS preview is available from this endpoint.')
+  if (provider !== 'google' && provider !== 'kokoro') {
+    throw new ApiError(400, 'Supported previews: google, kokoro.')
   }
 
   const lengthScale = Number(body.length_scale ?? body.lengthScale ?? 1)
   const sentenceSilence = Number(body.sentence_silence ?? body.sentenceSilence ?? 0.2)
-  const result = await synthesizeGeminiAudio(env, {
-    text: PROVIDER_PREVIEW_TEXT,
-    voice: stringField(body.voice) || null,
-    model: stringField(body.model) || null,
-    narrationStyle: stringField(body.narration_style ?? body.narrationStyle),
-    lengthScale: Number.isFinite(lengthScale) ? lengthScale : 1,
-    sentenceSilence: Number.isFinite(sentenceSilence) ? sentenceSilence : 0.2,
-  })
+  const safeLengthScale = Number.isFinite(lengthScale) ? lengthScale : 1
+  const safeSentenceSilence = Number.isFinite(sentenceSilence) ? sentenceSilence : 0.2
+
+  const result = provider === 'google'
+    ? await synthesizeGeminiAudio(env, {
+      text: PROVIDER_PREVIEW_TEXT,
+      voice: stringField(body.voice) || null,
+      model: stringField(body.model) || null,
+      narrationStyle: stringField(body.narration_style ?? body.narrationStyle),
+      lengthScale: safeLengthScale,
+      sentenceSilence: safeSentenceSilence,
+    })
+    : await synthesizeKokoroRemote(env, {
+      text: PROVIDER_PREVIEW_TEXT,
+      voice: stringField(body.voice) || null,
+      lengthScale: safeLengthScale,
+    })
 
   return json({
     provider,
@@ -997,7 +1118,7 @@ async function testProvider(request: Request, env: Env) {
     model: result.model,
     sampleText: PROVIDER_PREVIEW_TEXT,
     audioUrl: `data:audio/wav;base64,${bytesToBase64(result.wav)}`,
-    message: 'Gemini preview ready.',
+    message: provider === 'google' ? 'Gemini preview ready.' : 'Hosted Kokoro preview ready.',
   })
 }
 
@@ -1876,6 +1997,7 @@ async function reviewCard(request: Request, env: Env, user: User, cardId: string
 
 async function providers(env: Env) {
   const geminiConfigured = Boolean(env.GEMINI_API_KEY?.trim())
+  const kokoroConfigured = kokoroRemoteConfigured(env)
   return json({
     defaultNarrationStyle: 'warm',
     providers: [
@@ -1890,15 +2012,14 @@ async function providers(env: Env) {
       },
       {
         id: 'kokoro',
-        name: 'Kokoro on-device',
-        available: true,
-        recommended: false,
-        voices: [
-          { id: 'af_heart', label: 'Heart' },
-          { id: 'af_bella', label: 'Bella' },
-          { id: 'am_adam', label: 'Adam' },
-        ],
-        defaultVoice: 'af_heart',
+        name: 'Kokoro (hosted)',
+        available: kokoroConfigured,
+        recommended: kokoroConfigured,
+        voices: KOKORO_VOICES,
+        defaultVoice: KOKORO_DEFAULT_VOICE,
+        description: kokoroConfigured
+          ? 'Hosted Kokoro neural TTS with edge/R2 audio cache (Gemini-style live path).'
+          : 'Set KOKORO_REMOTE_URL on the Worker to enable hosted Kokoro (see docs/hosted-kokoro.md).',
       },
       {
         id: 'google',

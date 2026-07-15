@@ -12,14 +12,15 @@ export interface AudioTextChunk {
 // follow-ups while the first unit plays. Kokoro worker synth is serialized, so
 // follow-ups must be long enough to cover the next job without multi-second
 // prebuffer (prebuffer felt like a hang).
+// Cloud path (hosted Kokoro + Gemini): short first chunk, larger follow-ups.
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
   google: 120,
-  kokoro: 55,
+  kokoro: 120,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {
   google: 280,
-  kokoro: 160,
+  kokoro: 260,
 }
 
 export const DEFAULT_FIRST_AUDIO_CHARS = 180
@@ -46,8 +47,8 @@ export const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
 export const PREFETCH_AHEAD_TARGET: Record<string, number> = {
   google: 1,
-  // Queued jobs; modelCache serializes the actual ONNX work.
-  kokoro: 3,
+  // Hosted Kokoro is server-side; mild read-ahead like Gemini (cache-friendly).
+  kokoro: 2,
 }
 
 export const DEFAULT_PREFETCH_AHEAD = 2

@@ -4,7 +4,6 @@ import { Pause, Play, SkipBack, SkipForward } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { api, request } from '@/shared/api/client'
-import { waitForModelReady } from '@/shared/storage/modelCache'
 import type { RollingCacheState } from '@/shared/storage/rollingVoiceCache'
 import { queuePerformanceTelemetry } from '@/shared/telemetry/performanceTelemetry'
 import {
@@ -35,10 +34,6 @@ import {
   type AudioPhase,
   type PreviewAudioChunk as AudioChunk,
 } from './tts-engine/types'
-import { synthesizeKokoroLocal } from './tts-engine/kokoroAudio'
-
-const KOKORO_PREVIEW_TEXT = 'The story found its rhythm, warm and clear.'
-
 export interface AudioPreviewColors {
   bg: string
   text: string
@@ -67,9 +62,11 @@ export function AudioPreviewPanel({
   rate: rateProp,
   onRateChange,
   onCommitVoice,
-  rollingCacheState,
-  currentBookId,
+  rollingCacheState: _rollingCacheState,
+  currentBookId: _currentBookId,
 }: AudioPreviewPanelProps) {
+  void _rollingCacheState
+  void _currentBookId
   const [phase, setPhase] = useState<AudioPhase>('idle')
   const [chunks, setChunks] = useState<AudioChunk[]>([])
   const [curIdx, setCurIdx] = useState(0)
@@ -175,27 +172,6 @@ export function AudioPreviewPanel({
     updateChunk(idx, { status: 'fetching' })
     const fetchPromise = (async () => {
       try {
-        if (draftProvider === 'kokoro') {
-          const voiceId = selectedVoiceId
-          if (!voiceId) throw new Error('Choose a voice to preview.')
-
-          const ready = await waitForModelReady(signal)
-          if (signal.aborted) return null
-          if (!ready) throw new Error('The on-device voice is still preparing. Try again in a moment.')
-
-          const { lengthScale } = pacingFor('kokoro')
-          const speed = lengthScale > 0 ? 1 / lengthScale : 1
-          const preview = await synthesizeKokoroLocal(KOKORO_PREVIEW_TEXT, voiceId, speed, signal)
-          if (signal.aborted) return null
-          if (!preview) throw new Error('Kokoro could not generate this voice sample. Try another voice or retry after preparation finishes.')
-
-          const url = URL.createObjectURL(preview.blob)
-          rememberAudioObjectUrl(url)
-          setSampleText(KOKORO_PREVIEW_TEXT)
-          updateChunk(idx, { status: 'ready', url })
-          return url
-        }
-
         const { lengthScale, sentenceSilence } = pacingFor(draftProvider)
         const previewLengthScale = Math.max(0.6, Math.min(lengthScale * rateRef.current, 1.5))
         const preview = await request<ProviderTestResult>('/api/providers/test', {
@@ -554,60 +530,6 @@ export function AudioPreviewPanel({
             </SelectContent>
           </Select>
 
-          {provider === 'kokoro' && onCommitVoice && currentBookId && !hasDraftChanges && (() => {
-            const rcs = rollingCacheState
-            const isThisBookVoice = rcs?.bookId === currentBookId && rcs?.voice === voice
-            const isActive = Boolean(isThisBookVoice && rcs?.active)
-            const completed = isThisBookVoice ? (rcs?.completed ?? 0) : 0
-            const total = isThisBookVoice ? (rcs?.total ?? 0) : 0
-            const pct = total > 0 ? Math.round((completed / total) * 100) : 0
-            const isDone = isThisBookVoice && !rcs?.active && total > 0 && completed >= total
-            const preparationError = isThisBookVoice && !isActive ? rcs?.error : null
-            return (
-              <div className="mt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setErrorMsg(null)
-                    const started = onCommitVoice({ provider, voice })
-                    if (!started) {
-                      const message = 'Kokoro is still preparing. Try playback now, or retry voice preparation shortly.'
-                      setErrorMsg(message)
-                      onError?.(message)
-                    }
-                  }}
-                  disabled={isActive}
-                  className="w-full h-9 rounded-md text-[12px] font-medium transition-all active:scale-[0.99] disabled:cursor-not-allowed"
-                  style={{
-                    border: `1px solid ${colors.text}18`,
-                    background: isActive ? `${colors.text}06` : `${colors.text}0a`,
-                    color: isActive ? `${colors.text}90` : colors.text,
-                  }}
-                >
-                  {isActive
-                    ? `Preparing voice… ${pct}%`
-                    : preparationError
-                      ? 'Retry voice preparation'
-                      : isDone
-                      ? 'Voice ready · re-cache'
-                      : 'Use this voice for this book'}
-                </button>
-                {isActive && (
-                  <div className="mt-1.5 h-1 rounded-full overflow-hidden" style={{ background: `${colors.text}12` }}>
-                    <div
-                      className="h-full rounded-full transition-all duration-300"
-                      style={{ width: `${pct}%`, background: colors.text, opacity: 0.4 }}
-                    />
-                  </div>
-                )}
-                {preparationError && (
-                  <p className="mt-1.5 text-[11px] leading-4 opacity-55">
-                    {preparationError}
-                  </p>
-                )}
-              </div>
-            )
-          })()}
         </div>
       )}
 

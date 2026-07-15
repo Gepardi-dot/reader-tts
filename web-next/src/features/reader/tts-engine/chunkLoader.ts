@@ -56,28 +56,33 @@ export function createChunkLoader(config: ChunkLoaderConfig): ChunkLoader {
 
     if (provider === BROWSER_TTS_PROVIDER_ID) return
 
-    if (provider === 'kokoro') {
+    // Hosted Kokoro + Gemini share the Worker live-audio path (edge/R2 cache).
+    if (provider === 'kokoro' || provider === 'google') {
+      if (!config.bookId) {
+        throw new Error('Open a book before playing cloud TTS.')
+      }
+      await loadLiveProviderChunk(chunk, signal, {
+        bookId: config.bookId,
+        provider,
+        voice,
+        background,
+        stale,
+        ensureAudioContext: config.ensureAudioContext,
+        trackObjectUrl: config.trackObjectUrl,
+        onFrame,
+      })
+      return
+    }
+
+    // Legacy on-device Kokoro (only if some other code path still requests it).
+    if (provider === 'kokoro-local') {
       await loadKokoroStreaming(chunk, signal, {
         voice,
         stale,
         ensureAudioContext: config.ensureAudioContext,
         onFrame,
       })
-      return
     }
-
-    if (!config.bookId) return
-
-    await loadGeminiChunk(chunk, signal, {
-      bookId: config.bookId,
-      provider,
-      voice,
-      background,
-      stale,
-      ensureAudioContext: config.ensureAudioContext,
-      trackObjectUrl: config.trackObjectUrl,
-      onFrame,
-    })
   }
 }
 
@@ -237,7 +242,7 @@ async function loadKokoroStreaming(
   })
 }
 
-async function loadGeminiChunk(
+async function loadLiveProviderChunk(
   chunk: TtsAudioChunk,
   signal: AbortSignal,
   opts: {
@@ -265,7 +270,8 @@ async function loadGeminiChunk(
       },
     })
     if (!opts.background) {
-      throw new Error(`Gemini TTS is cooling down. Retry in ${Math.ceil(cooldownMs / 1000)}s.`)
+      const label = opts.provider === 'kokoro' ? 'Kokoro' : 'Gemini'
+      throw new Error(`${label} TTS is cooling down. Retry in ${Math.ceil(cooldownMs / 1000)}s.`)
     }
     return
   }

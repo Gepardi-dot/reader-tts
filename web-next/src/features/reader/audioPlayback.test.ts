@@ -106,10 +106,10 @@ describe('audio playback chunking', () => {
     expect(Math.max(...chunks.slice(1).map((chunk) => chunk.text.length))).toBeLessThanOrEqual(420)
   })
 
-  it('sizes Kokoro chunks for fast first-audio and continuous follow-ups', () => {
-    expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThanOrEqual(70)
-    expect(CHUNK_CHARS.kokoro).toBeGreaterThanOrEqual(140)
-    expect(CHUNK_CHARS.kokoro).toBeLessThanOrEqual(200)
+  it('sizes hosted Kokoro chunks like other cloud providers', () => {
+    expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThanOrEqual(160)
+    expect(CHUNK_CHARS.kokoro).toBeGreaterThanOrEqual(200)
+    expect(CHUNK_CHARS.kokoro).toBeLessThanOrEqual(320)
     expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThan(CHUNK_CHARS.kokoro)
   })
 })
