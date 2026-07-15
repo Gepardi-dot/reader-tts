@@ -25,6 +25,14 @@ export interface TtsSessionController {
   toggleWordAudio: () => void
   stopWordAudio: () => void
   isAudioActive: () => boolean
+  /** Idle-prep Kokoro segment cache around a reading offset. */
+  prepareKokoroWindow: (input: {
+    bookText: string
+    offset: number
+    voice: string
+    maxSegments?: number
+    signal?: AbortSignal
+  }) => Promise<void>
 }
 
 /**
@@ -128,6 +136,16 @@ export function useTtsSessionController({
     runtimeRef.current?.isAudibleOrLoading() ?? false
   ), [])
 
+  const prepareKokoroWindow = useCallback(async (input: {
+    bookText: string
+    offset: number
+    voice: string
+    maxSegments?: number
+    signal?: AbortSignal
+  }) => {
+    await ensureRuntime().prepareKokoroWindow(input)
+  }, [])
+
   const snapshot = ensureRuntime().getSnapshot()
 
   return {
@@ -138,5 +156,6 @@ export function useTtsSessionController({
     toggleWordAudio,
     stopWordAudio,
     isAudioActive,
+    prepareKokoroWindow,
   }
 }

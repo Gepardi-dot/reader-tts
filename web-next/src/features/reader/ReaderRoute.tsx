@@ -29,15 +29,9 @@ import {
 } from '@/shared/storage/rollingVoiceCache'
 import { cn } from '@/lib/utils'
 import {
-  AUDIO_SLICE_CHARS,
   BROWSER_TTS_PROVIDER_ID,
   CHUNK_CHARS,
-  DEFAULT_AUDIO_CHARS,
-  DEFAULT_FIRST_AUDIO_CHARS,
-  FIRST_AUDIO_CHARS,
-  PREFETCH_CHUNK_LIMIT,
   audioSliceStart,
-  buildAudioChunks,
   pacingFor,
 } from './audioPlayback'
 import {
@@ -58,7 +52,6 @@ import {
   saveAudioPrefs,
   type AudioSelection,
 } from './audioPreferences'
-import { synthesizeKokoroLocal } from './tts-engine/kokoroAudio'
 import {
   type AudioPhase,
 } from './tts-engine/types'
@@ -2371,6 +2364,7 @@ export function ReaderRoute() {
     toggleWordAudio,
     stopWordAudio,
     isAudioActive,
+    prepareKokoroWindow,
   } = useTtsSessionController({
     bookId,
     bookText: payload?.text ?? '',
@@ -2604,46 +2598,46 @@ export function ReaderRoute() {
     presynthGridRef.current = grid
   }, [payload?.text, effectiveTtsProvider])
 
-  // Read-ahead prefetch stays local-only. Gemini synthesis is generated during
-  // active playback so the free-tier quota is spent on audio the user asked for.
+  // Idle Kokoro prep: fill SegmentCache around the viewport so taps hit cache.
+  // Gemini is not prefetched here (quota). Playback always preempts prep.
   const prefetchRef   = useRef<AbortController | null>(null)
   const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (effectiveTtsProvider !== 'kokoro' || !payload?.text) return
     if (!isModelReady() || !effectiveTtsVoice) return
+    // Never compete with active playback for the ONNX worker.
+    if (wordAudioPhase !== 'idle') {
+      prefetchRef.current?.abort()
+      return
+    }
 
-    // Debounce: cancel previous timer on every scroll update
     if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
     prefetchTimer.current = setTimeout(() => {
       prefetchRef.current?.abort()
       const ctrl = new AbortController()
       prefetchRef.current = ctrl
-
-      const { lengthScale } = pacingFor(effectiveTtsProvider)
       const start = audioSliceStart(payload.text.length, scrollPct)
-      const fullSlice = payload.text.slice(start, start + AUDIO_SLICE_CHARS)
-      if (!fullSlice.trim()) return
-
-      const chunkDefs = buildAudioChunks(
-        fullSlice,
-        start,
-        CHUNK_CHARS[effectiveTtsProvider] ?? DEFAULT_AUDIO_CHARS,
-        FIRST_AUDIO_CHARS[effectiveTtsProvider] ?? DEFAULT_FIRST_AUDIO_CHARS,
-      ).slice(0, PREFETCH_CHUNK_LIMIT)
-      if (chunkDefs.length === 0) return
-
-      const localSpeed = lengthScale > 0 ? 1 / lengthScale : 1
-      void Promise.all(chunkDefs.map((chunk) =>
-        synthesizeKokoroLocal(chunk.text, effectiveTtsVoice, localSpeed, ctrl.signal)
-          .then(() => null)
-          .catch(() => null)
-      ))
-    }, 1200)  // 1.2 s after last scroll event — quicker warm-up
+      void prepareKokoroWindow({
+        bookText: payload.text,
+        offset: start,
+        voice: effectiveTtsVoice,
+        maxSegments: 8,
+        signal: ctrl.signal,
+      }).catch(() => undefined)
+    }, 450)
 
     return () => {
       if (prefetchTimer.current) clearTimeout(prefetchTimer.current)
+      prefetchRef.current?.abort()
     }
-  }, [effectiveTtsProvider, effectiveTtsVoice, payload?.text, scrollPct])
+  }, [
+    effectiveTtsProvider,
+    effectiveTtsVoice,
+    payload?.text,
+    scrollPct,
+    prepareKokoroWindow,
+    wordAudioPhase,
+  ])
 
   function patchAppearance(patch: Partial<Appearance>) {
     setAppearance(a => ({ ...a, ...patch }))
