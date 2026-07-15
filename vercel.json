@@ -1,7 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "python vercel_install.py",
-  "buildCommand": "python vercel_build.py",
+  "framework": null,
+  "installCommand": "npm --prefix web-next ci --legacy-peer-deps",
+  "buildCommand": "VITE_API_ORIGIN=https://reader-tts-api.reader-tts-ari.workers.dev npm --prefix web-next run build",
   "outputDirectory": "web-next/dist",
   "rewrites": [
     {

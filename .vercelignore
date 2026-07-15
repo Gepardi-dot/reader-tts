@@ -37,10 +37,33 @@ __pycache__/
 .stitch/designs/*
 .claude/worktrees/
 
-# Misc
+# Secrets — but keep production Vite API origin for the SPA build
 .env
-.env.*
+.env.local
+.env.*.local
 !.env.example
+!web-next/.env.production
+
+# Legacy Python FastAPI — API is Cloudflare Worker now (do not ship as Vercel function)
+app.py
+server/
+requirements.txt
+vercel_install.py
+vercel_build.py
+pdf_to_audio.py
+scripts/
+supabase/
+cloudflare/
+Dockerfile*
+fly.*.toml
+railway.*.toml
+convert-book.ps1
+start-*.cmd
+start-*.ps1
+web-rewrite/
+web/
+dictionary/
+docs/
 tmp-*.txt
 tmp-*.json
 tmp-*.js
