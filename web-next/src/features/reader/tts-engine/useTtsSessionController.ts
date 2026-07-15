@@ -160,6 +160,7 @@ export function useTtsSessionController({
       startOffset,
       provider: providerRef.current,
       voice: voiceRef.current,
+      rate: rateRef.current,
       signal: ctrl.signal,
     })
   }, [])

@@ -155,6 +155,32 @@ export function pacingFor(provider: string): { lengthScale: number; sentenceSile
   return { lengthScale: 1.0, sentenceSilence: 0.20 }
 }
 
+/**
+ * Hosted Kokoro: bake UI speed into server length_scale so the remote model
+ * synthesizes at the listening rate (natural pitch). Worker uses speed = 1/length_scale.
+ * Gemini keeps base pacing; client HTMLAudio preservesPitch handles UI rate.
+ */
+export function pacingForPlaybackRate(
+  provider: string,
+  playbackRate: number,
+): { lengthScale: number; sentenceSilence: number } {
+  const base = pacingFor(provider)
+  if (provider !== 'kokoro') return base
+  const rate = playbackRate > 0 && Number.isFinite(playbackRate) ? playbackRate : 1
+  // Clamp so free-tier / server stays in a sane band (matches kokoro_server 0.5–2.0 speed).
+  const safeRate = Math.max(0.5, Math.min(2, rate))
+  return {
+    lengthScale: base.lengthScale / safeRate,
+    sentenceSilence: base.sentenceSilence,
+  }
+}
+
+/** Client clock rate: Kokoro speed is server-side; Gemini uses pitch-preserving HTML. */
+export function clientClockRateForProvider(provider: string, playbackRate: number): number {
+  if (provider === 'kokoro') return 1
+  return playbackRate > 0 && Number.isFinite(playbackRate) ? playbackRate : 1
+}
+
 export function audioSliceStart(textLength: number, scrollPct: number) {
   if (textLength <= 0) return 0
   const rawStart = Math.round(scrollPct * textLength) - 200

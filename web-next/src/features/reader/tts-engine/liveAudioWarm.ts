@@ -6,7 +6,7 @@
  * starts from a memory/edge hit instead of a cold synth.
  */
 
-import { pacingFor } from '../audioPlayback'
+import { pacingFor, pacingForPlaybackRate } from '../audioPlayback'
 import { buildTtsChunks } from './segmenter'
 import {
   liveAudioCooldownRemainingMs,
@@ -20,6 +20,8 @@ export interface WarmLiveAudioParams {
   startOffset: number
   provider: string
   voice: string | null
+  /** UI playback rate — baked into Kokoro server length_scale for cache key match. */
+  rate?: number
   /** How many leading chunks to warm (1–3). More = better ahead coverage after refresh. */
   chunkCount?: number
   signal?: AbortSignal
@@ -36,6 +38,7 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
     startOffset,
     provider,
     voice,
+    rate = 1,
     chunkCount = 2,
     signal,
   } = params
@@ -54,7 +57,9 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
 
   if (!chunks.length) return
 
-  const { lengthScale, sentenceSilence } = pacingFor(provider)
+  const { lengthScale, sentenceSilence } = provider === 'kokoro'
+    ? pacingForPlaybackRate('kokoro', rate)
+    : pacingFor(provider)
 
   // Sequential warm: first chunk is the Play critical path; second fills ahead.
   for (const chunk of chunks) {

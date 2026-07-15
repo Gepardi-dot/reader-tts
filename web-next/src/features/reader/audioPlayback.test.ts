@@ -3,6 +3,8 @@ import {
   BROWSER_TTS_PROVIDER_ID,
   CHUNK_CHARS,
   FIRST_AUDIO_CHARS,
+  clientClockRateForProvider,
+  pacingForPlaybackRate,
   PREFETCH_AHEAD_TARGET,
   audioPreferenceDraftChanged,
   audioSelectionKey,
@@ -111,6 +113,18 @@ describe('audio playback chunking', () => {
     expect(CHUNK_CHARS.kokoro).toBeGreaterThanOrEqual(200)
     expect(CHUNK_CHARS.kokoro).toBeLessThanOrEqual(320)
     expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThan(CHUNK_CHARS.kokoro)
+  })
+
+  it('bakes Kokoro UI rate into server length_scale (pitch-safe)', () => {
+    const base = pacingFor('kokoro')
+    const fast = pacingForPlaybackRate('kokoro', 1.5)
+    expect(fast.lengthScale).toBeCloseTo(base.lengthScale / 1.5)
+    expect(pacingForPlaybackRate('google', 1.5).lengthScale).toBe(pacingFor('google').lengthScale)
+  })
+
+  it('keeps client clock at 1.0 for Kokoro and passes rate through for Gemini', () => {
+    expect(clientClockRateForProvider('kokoro', 1.5)).toBe(1)
+    expect(clientClockRateForProvider('google', 1.5)).toBe(1.5)
   })
 })
 

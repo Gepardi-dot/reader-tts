@@ -9,6 +9,7 @@ import {
   DEFAULT_PREFETCH_AHEAD,
   PREFETCH_AHEAD_TARGET,
   audioSelectionKey,
+  clientClockRateForProvider,
 } from '../audioPlayback'
 import { AudioClock } from './audioClock'
 import { BufferPool } from './bufferPool'
@@ -143,10 +144,37 @@ export class TtsRuntime {
     return chunk ? chunk.start : null
   }
 
+  private bookText = ''
+
   setRate(rate: number) {
+    const previous = this.rate
     this.rate = rate
-    this.clock.setRate(rate)
+    // Kokoro: speed is synthesized server-side — keep client clock at 1.0 (natural pitch).
+    // Gemini: pitch-preserving HTMLAudio lane in AudioClock for rate ≠ 1.
+    this.clock.setRate(clientClockRateForProvider(this.provider, rate))
     this.kokoro.setRate(rate)
+    // Hosted Kokoro bakes rate into cache keys via length_scale — restart so
+    // the new speed is synthesized with natural pitch (not client stretch).
+    if (
+      this.provider === 'kokoro' &&
+      this.phase !== 'idle' &&
+      this.word &&
+      this.bookText &&
+      Math.abs(previous - rate) > 0.02
+    ) {
+      const offset = this.chunks[this.currentIndex]?.start ?? this.chunks[0]?.start ?? 0
+      void this.start({
+        word: this.word,
+        startOffset: offset,
+        bookText: this.bookText,
+        bookId: this.bookId,
+        provider: this.provider,
+        voice: this.voice,
+        rate,
+        presynthGrid: null,
+        reason: 'voice-switch',
+      })
+    }
   }
 
   /** Preheat SegmentCache around the reading position (legacy on-device path). */
@@ -175,6 +203,7 @@ export class TtsRuntime {
     startOffset: number
     provider: string
     voice: string | null
+    rate?: number
     signal?: AbortSignal
   }) {
     if (!input.bookId) return Promise.resolve()
@@ -185,6 +214,7 @@ export class TtsRuntime {
       startOffset: input.startOffset,
       provider: input.provider,
       voice: input.voice,
+      rate: input.rate ?? this.rate,
       // Kokoro: warm a few chunks ahead so refresh + scroll still hit IDB/edge.
       chunkCount: input.provider === 'kokoro' ? 3 : 1,
       signal: input.signal,
@@ -273,13 +303,14 @@ export class TtsRuntime {
     this.voice = params.voice
     this.rate = params.rate
     this.bookId = params.bookId
+    this.bookText = params.bookText
     this.word = params.word
     this.phase = 'buffering'
     this.lane = 'none'
     this.currentIndex = 0
     this.error = null
     this.firstAudio.reset()
-    this.clock.setRate(params.rate)
+    this.clock.setRate(clientClockRateForProvider(params.provider, params.rate))
 
     const controller = new AbortController()
     this.controller = controller
@@ -341,6 +372,7 @@ export class TtsRuntime {
       getProvider: () => this.provider,
       getVoice: () => this.voice,
       getSelectionKey: () => selectionKey,
+      getRate: () => this.rate,
       ensureAudioContext: () => this.clock.ensureContext(),
       trackObjectUrl: (url) => this.objectUrls.add(url),
     })

@@ -18,6 +18,7 @@ import {
 import {
   BROWSER_TTS_PROVIDER_ID,
   pacingFor,
+  pacingForPlaybackRate,
 } from '../audioPlayback'
 import {
   liveAudioCooldownRemainingMs,
@@ -36,6 +37,7 @@ export interface ChunkLoaderConfig {
   getProvider: () => string
   getVoice: () => string | null
   getSelectionKey: () => string
+  getRate?: () => number
   ensureAudioContext: () => AudioContext
   trackObjectUrl: (url: string) => void
 }
@@ -65,6 +67,7 @@ export function createChunkLoader(config: ChunkLoaderConfig): ChunkLoader {
         bookId: config.bookId,
         provider,
         voice,
+        rate: config.getRate?.() ?? 1,
         background,
         stale,
         ensureAudioContext: config.ensureAudioContext,
@@ -249,6 +252,7 @@ async function loadLiveProviderChunk(
     bookId: string
     provider: string
     voice: string | null
+    rate: number
     background: boolean
     stale: () => boolean
     ensureAudioContext: () => AudioContext
@@ -276,7 +280,11 @@ async function loadLiveProviderChunk(
     return
   }
 
-  const { lengthScale, sentenceSilence } = pacingFor(opts.provider)
+  // Kokoro: bake UI rate into server length_scale (pitch-safe native speed).
+  // Gemini: base pacing only; AudioClock HTML preservesPitch handles UI rate.
+  const { lengthScale, sentenceSilence } = opts.provider === 'kokoro'
+    ? pacingForPlaybackRate('kokoro', opts.rate)
+    : pacingFor(opts.provider)
   const payload: LiveAudioPayload = {
     provider: opts.provider,
     voice: opts.voice,
