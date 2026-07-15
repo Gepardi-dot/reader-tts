@@ -24,6 +24,8 @@ web/output/
 __pycache__/
 server/__pycache__/
 .env
+.dev.vars
+cloudflare/worker/.dev.vars
 *.log
 *.err.log
 
@@ -64,3 +66,7 @@ test-results/
 web-rewrite/test-results/
 
 .vercel
+
+# Local Cloudflare Worker secrets
+.dev.vars
+cloudflare/worker/.dev.vars
