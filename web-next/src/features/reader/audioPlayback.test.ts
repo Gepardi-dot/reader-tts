@@ -106,11 +106,10 @@ describe('audio playback chunking', () => {
     expect(Math.max(...chunks.slice(1).map((chunk) => chunk.text.length))).toBeLessThanOrEqual(420)
   })
 
-  it('sizes Kokoro chunks for on-device continuity (enough audio to cover next synth)', () => {
-    expect(FIRST_AUDIO_CHARS.kokoro).toBeGreaterThanOrEqual(60)
-    expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThanOrEqual(120)
-    expect(CHUNK_CHARS.kokoro).toBeGreaterThanOrEqual(160)
-    expect(CHUNK_CHARS.kokoro).toBeLessThanOrEqual(280)
+  it('sizes Kokoro chunks for fast first-audio and continuous follow-ups', () => {
+    expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThanOrEqual(70)
+    expect(CHUNK_CHARS.kokoro).toBeGreaterThanOrEqual(140)
+    expect(CHUNK_CHARS.kokoro).toBeLessThanOrEqual(200)
     expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThan(CHUNK_CHARS.kokoro)
   })
 })
@@ -273,7 +272,7 @@ describe('audio chunk patching', () => {
 
 describe('audio buffer scheduling', () => {
   it('schedules slightly ahead of the current audio context time when idle', () => {
-    expect(audioBufferSourceStartTime(10, 0)).toBeCloseTo(10.012)
+    expect(audioBufferSourceStartTime(10, 0)).toBeCloseTo(10.008)
   })
 
   it('does not schedule before the previous buffer end', () => {

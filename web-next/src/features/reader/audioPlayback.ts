@@ -8,34 +8,26 @@ export interface AudioTextChunk {
   text: string
 }
 
-// Streaming-style playback: keep the first request small so audio can start quickly,
-// then synthesize larger follow-up chunks while the first chunk is playing.
-// Gemini: short first chunk for cold network latency.
-// Kokoro: slightly longer first unit so on-device synth produces enough audio to
-// cover the next job (worker is single-threaded / serialized).
+// Streaming-style playback: tiny first request for fast first-audio, larger
+// follow-ups while the first unit plays. Kokoro worker synth is serialized, so
+// follow-ups must be long enough to cover the next job without multi-second
+// prebuffer (prebuffer felt like a hang).
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
-  google: 140,
-  kokoro: 90,
+  google: 120,
+  kokoro: 55,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {
   google: 280,
-  // Larger follow-ups = fewer worker round-trips and fewer boundary underruns.
-  kokoro: 220,
+  kokoro: 160,
 }
-
-/** Seconds of Kokoro audio to hold before starting the clock (smoothness). */
-export const KOKORO_MIN_START_BUFFER_SEC = 1.6
-/** Or start once this many stream frames are held (whichever first with min floor). */
-export const KOKORO_MIN_START_FRAMES = 2
-export const KOKORO_MIN_START_FLOOR_SEC = 0.85
 
 export const DEFAULT_FIRST_AUDIO_CHARS = 180
 export const DEFAULT_AUDIO_CHARS = 800
 export const PREFETCH_CHUNK_LIMIT = 3
 export const AUDIO_SLICE_CHARS = 2200
 // Slight lead hides scheduling jitter between concatenated PCM frames.
-export const AUDIO_CONTEXT_START_LEAD_SEC = 0.012
+export const AUDIO_CONTEXT_START_LEAD_SEC = 0.008
 
 // How many chunks to bootstrap when playback begins. Cloud chunks are fetched
 // sequentially by the native queue so Gemini quota is not burned in bursts.
@@ -54,8 +46,8 @@ export const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
 export const PREFETCH_AHEAD_TARGET: Record<string, number> = {
   google: 1,
-  // Keep several jobs queued; modelCache serializes actual worker synth.
-  kokoro: 5,
+  // Queued jobs; modelCache serializes the actual ONNX work.
+  kokoro: 3,
 }
 
 export const DEFAULT_PREFETCH_AHEAD = 2

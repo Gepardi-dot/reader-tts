@@ -92,14 +92,22 @@ async function loadKokoroStreaming(
   },
 ) {
   if (!opts.voice) throw new Error('Select a Kokoro voice before playing.')
-  if (!isModelReady()) {
-    const ready = await waitForModelReady(signal)
-    if (!ready || opts.stale()) return
-  }
 
   const { lengthScale } = pacingFor('kokoro')
   const speed = lengthScale > 0 ? 1 / lengthScale : 1
-  const cacheKey = await localKokoroCacheKey(opts.voice, speed, chunk.text)
+
+  // Cache lookup can run while the model warms — hits skip synth entirely.
+  const cacheKeyPromise = localKokoroCacheKey(opts.voice, speed, chunk.text)
+  if (!isModelReady()) {
+    // Don't block forever on a cold download; surface failure quickly if aborted.
+    const ready = await waitForModelReady(signal)
+    if (!ready || opts.stale()) {
+      if (!signal.aborted) throw new Error('Kokoro is still downloading. Wait for the voice to finish preparing, then tap again.')
+      return
+    }
+  }
+
+  const cacheKey = await cacheKeyPromise
   if (opts.stale()) return
 
   const hit = await getCachedAudio(cacheKey, LOCAL_KOKORO_CACHE_VERSION).catch(() => null)
