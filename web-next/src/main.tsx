@@ -71,6 +71,11 @@ if (typeof navigator !== 'undefined' && 'storage' in navigator && 'persist' in n
   navigator.storage.persist().catch(() => undefined)
 }
 
+// Warm offline dictionary seed into memory so Define is instant for common words.
+void import('@/shared/storage/dictionaryCache').then((dictionaryCache) => {
+  void dictionaryCache.ensureDictionarySeed()
+})
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>

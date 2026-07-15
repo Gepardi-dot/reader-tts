@@ -11,7 +11,13 @@ import {
 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { api, AuthError } from '@/shared/api/client'
-import { getCachedDictionary, lookupStaticDictionary, putCachedDictionary } from '@/shared/storage/dictionaryCache'
+import {
+  ensureDictionarySeed,
+  hasDictionaryDefinitions,
+  putCachedDictionary,
+  resolveLocalDictionary,
+  type DictionaryResponse,
+} from '@/shared/storage/dictionaryCache'
 import {
   flushPerformanceTelemetry,
 } from '@/shared/telemetry/performanceTelemetry'
@@ -599,9 +605,10 @@ function SelectionMenu({
   useEffect(() => {
     const normalized = normalizeLookupWord(sel.text)
     if (sel.mode !== 'word' || !normalized || normalized.includes(' ')) return
+    // Prefetch full client path (seed/IDB first) so Define opens with data ready.
     void queryClient.prefetchQuery({
       queryKey: dictionaryQueryKey(normalized),
-      queryFn: () => fetchOfflineDictionary(normalized),
+      queryFn: () => fetchClientDictionary(normalized),
       staleTime: DICTIONARY_STALE_TIME_MS,
     })
   }, [queryClient, sel.mode, sel.text])
@@ -685,7 +692,7 @@ function SelectionMenu({
       case 'dictionary':
         void queryClient.prefetchQuery({
           queryKey: dictionaryQueryKey(sel.text),
-          queryFn: () => fetchOfflineDictionary(sel.text),
+          queryFn: () => fetchClientDictionary(sel.text),
           staleTime: DICTIONARY_STALE_TIME_MS,
         })
         onOpenPanel({ kind: 'dictionary', word: sel.text })
@@ -852,23 +859,77 @@ function fetchOfflineDictionary(word: string) {
   return api.get<DictResponse>(`/api/dictionary/lookup?term=${encodeURIComponent(normalizeLookupWord(word))}`)
 }
 
-function dictionaryHasDefinitions(payload: DictResponse | null) {
-  return Boolean(payload?.entries?.some((entry) => (entry.definitions?.length ?? 0) > 0))
+function dictionaryHasDefinitions(payload: DictResponse | null | undefined) {
+  return hasDictionaryDefinitions(payload as DictionaryResponse | null)
 }
 
-async function fetchClientDictionary(word: string) {
+/**
+ * Instant-first dictionary resolve:
+ * 1) memory/seed/IDB (no network)
+ * 2) free dictionary API + backend API in parallel — first with defs wins
+ */
+async function fetchClientDictionary(word: string): Promise<DictResponse> {
   const normalized = normalizeLookupWord(word)
-  const seeded = await lookupStaticDictionary(normalized)
-  if (dictionaryHasDefinitions(seeded)) return seeded as DictResponse
+  await ensureDictionarySeed()
 
-  const learned = await getCachedDictionary(normalized).catch(() => null)
-  if (dictionaryHasDefinitions(learned)) return learned as DictResponse
-
-  const backend = await fetchOfflineDictionary(normalized)
-  if (dictionaryHasDefinitions(backend)) {
-    await putCachedDictionary(normalized, backend).catch(() => {})
+  const local = await resolveLocalDictionary(normalized)
+  if (dictionaryHasDefinitions(local)) {
+    return local as DictResponse
   }
-  return backend
+
+  // Race network sources so a slow backend doesn't block Free Dictionary.
+  const freePromise = (async (): Promise<DictResponse | null> => {
+    try {
+      const r = await fetch(
+        `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(normalized)}`,
+        { signal: AbortSignal.timeout(5000) },
+      )
+      if (!r.ok) return null
+      const j = await r.json()
+      if (!Array.isArray(j) || !j[0]) return null
+      const fe = j[0] as FreeEntry
+      const payload: DictResponse = {
+        term: fe.word || normalized,
+        available: true,
+        message: null,
+        pronunciation: fe.phonetic ?? null,
+        entries: fe.meanings.slice(0, 4).map((m) => ({
+          partOfSpeech: m.partOfSpeech,
+          definitions: m.definitions.slice(0, 4).map((d) => ({
+            definition: d.definition,
+            examples: d.example ? [d.example] : [],
+            synonyms: [...(d.synonyms ?? []), ...(m.synonyms ?? [])].slice(0, 6),
+          })),
+        })),
+        relatedTerms: [],
+      }
+      return dictionaryHasDefinitions(payload) ? payload : null
+    } catch {
+      return null
+    }
+  })()
+
+  const backendPromise = fetchOfflineDictionary(normalized).catch(() => null)
+
+  const [free, backend] = await Promise.all([freePromise, backendPromise])
+  const winner = (dictionaryHasDefinitions(backend) ? backend : null)
+    ?? (dictionaryHasDefinitions(free) ? free : null)
+    ?? backend
+    ?? free
+    ?? local
+    ?? {
+      term: normalized,
+      available: false,
+      message: 'No definition found.',
+      pronunciation: null,
+      entries: [],
+      relatedTerms: [],
+    }
+
+  if (dictionaryHasDefinitions(winner)) {
+    void putCachedDictionary(normalized, winner as DictionaryResponse)
+  }
+  return winner as DictResponse
 }
 
 // ── Dictionary Panel ──────────────────────────────────────────────────────────
@@ -882,83 +943,44 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
   const [vocabState, setVocabState] = useState<'idle' | 'busy' | 'saved'>('idle')
   const queryClient = useQueryClient()
 
-  // 1. Offline dictionary (backend)
-  const { data: offlineData, isLoading: offlineLoading } = useQuery({
+  // Single query: local seed/IDB first, then raced network. Prefetch on word
+  // selection often means this resolves from React Query cache instantly.
+  const { data: dictData, isLoading, isFetching } = useQuery({
     queryKey: dictionaryQueryKey(lookupWord),
     queryFn: () => fetchClientDictionary(lookupWord),
     staleTime: DICTIONARY_STALE_TIME_MS,
+    // Prefer any prefetched data so the panel paints without a flash of empty.
+    placeholderData: (previous) => previous,
   })
 
-  const hasOfflineDefs = !offlineLoading && dictionaryHasDefinitions(offlineData ?? null)
+  const hasDefs = dictionaryHasDefinitions(dictData ?? null)
 
-  // 2. Free Dictionary API fallback — fires only when offline dict has no definitions
-  const { data: freeRaw, isLoading: freeLoading } = useQuery({
-    queryKey: ['free-dict', lookupWord],
-    queryFn: async (): Promise<FreeEntry[] | null> => {
-      try {
-        const r = await fetch(
-          `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(lookupWord)}`,
-          { signal: AbortSignal.timeout(6000) },
-        )
-        if (!r.ok) return null
-        const j = await r.json()
-        return Array.isArray(j) ? j as FreeEntry[] : null
-      } catch { return null }
-    },
-    enabled: !offlineLoading && !hasOfflineDefs,
-    staleTime: 10 * 60_000,
-    retry: false,
-  })
-
-  const isLoading = offlineLoading || (!hasOfflineDefs && freeLoading)
-
-  // Merge into unified DisplayData
+  // Unified DisplayData from the single resolved payload
   const displayData = useMemo((): DisplayData | null => {
-    if (hasOfflineDefs && offlineData) {
-      return {
-        term: offlineData.term ?? lookupWord,
-        pronunciation: offlineData.pronunciation ?? null,
-        entries: (offlineData.entries ?? []).map(e => ({
-          partOfSpeech: e.partOfSpeech ?? '',
-          definitions: (e.definitions ?? []).map(d => ({
-            definition: d.definition,
-            examples:   d.examples ?? [],
-            synonyms:   d.synonyms ?? [],
-          })),
-        })),
-        relatedTerms: offlineData.relatedTerms ?? [],
-        source: 'offline',
-      }
+    if (!dictData) return null
+    const entries = (dictData.entries ?? []).map((e) => ({
+      partOfSpeech: e.partOfSpeech ?? '',
+      definitions: (e.definitions ?? []).map((d) => ({
+        definition: d.definition,
+        examples: d.examples ?? [],
+        synonyms: d.synonyms ?? [],
+      })),
+    }))
+    // Heuristic: free-dict payloads often lack relatedTerms from our seed.
+    const source: DisplayData['source'] =
+      hasDefs && (dictData.relatedTerms?.length ?? 0) === 0 && entries.length > 0
+        ? 'online'
+        : 'offline'
+    return {
+      term: dictData.term ?? lookupWord,
+      pronunciation: dictData.pronunciation ?? null,
+      entries,
+      relatedTerms: dictData.relatedTerms ?? [],
+      source: hasDefs ? source : 'offline',
     }
-    if (freeRaw && freeRaw.length > 0) {
-      const fe = freeRaw[0]
-      return {
-        term: fe.word,
-        pronunciation: fe.phonetic ?? null,
-        entries: fe.meanings.slice(0, 4).map(m => ({
-          partOfSpeech: m.partOfSpeech,
-          definitions: m.definitions.slice(0, 4).map(d => ({
-            definition: d.definition,
-            examples:   d.example ? [d.example] : [],
-            synonyms:   [...(d.synonyms ?? []), ...(m.synonyms ?? [])].slice(0, 6),
-          })),
-        })),
-        relatedTerms: offlineData?.relatedTerms ?? [],
-        source: 'online',
-      }
-    }
-    // Offline data available but genuinely empty (adverbs, etc.) — show partial
-    if (offlineData && !freeLoading) {
-      return {
-        term: offlineData.term ?? lookupWord,
-        pronunciation: offlineData.pronunciation ?? null,
-        entries: [],
-        relatedTerms: offlineData.relatedTerms ?? [],
-        source: 'offline',
-      }
-    }
-    return null
-  }, [hasOfflineDefs, offlineData, freeRaw, freeLoading, lookupWord])
+  }, [dictData, hasDefs, lookupWord])
+
+  const showLoading = (isLoading || isFetching) && !displayData
 
   function speak() {
     if (!supportsBrowserSpeech()) return
@@ -1050,8 +1072,8 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
       {/* ── Content ─────────────────────────────────────────── */}
       <div className="overflow-y-auto" style={{ maxHeight: '65vh' }}>
 
-        {/* Loading skeleton */}
-        {isLoading && (
+        {/* Loading skeleton — only when we have nothing to show yet */}
+        {showLoading && (
           <div className="px-5 pt-5 pb-4 animate-pulse space-y-3">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full shrink-0" style={{ background: `${colors.text}08` }} />
@@ -1068,7 +1090,7 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
         )}
 
         {/* Result */}
-        {!isLoading && displayData && (
+        {!showLoading && displayData && (
           <div>
             {/* ── Word hero ───────────────────────────────────── */}
             <div className="px-5 pt-5 pb-4" style={{ borderBottom: `1px solid ${colors.text}0e` }}>
@@ -1256,7 +1278,7 @@ function DictionaryPanel({ word: initialWord, onClose, colors }: {
         )}
 
         {/* Truly nothing */}
-        {!isLoading && !displayData && (
+        {!showLoading && !displayData && (
           <p className="px-5 pt-5 text-sm" style={{ color: `${colors.text}50` }}>
             No definition found for "{lookupWord}".
           </p>
