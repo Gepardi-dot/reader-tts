@@ -19,6 +19,10 @@ import {
   type DictionaryResponse,
 } from '@/shared/storage/dictionaryCache'
 import {
+  formatStudyDefinition,
+  pickBestDefinition,
+} from '@/shared/storage/dictionaryLookup'
+import {
   flushPerformanceTelemetry,
 } from '@/shared/telemetry/performanceTelemetry'
 import {
@@ -162,31 +166,32 @@ const HIGHLIGHT_BG: Record<'amber' | 'rose' | 'sky', string> = {
 
 type ReaderHighlight = ReaderPayload['highlights'][number]
 
-function firstDictionaryDefinition(payload: DictionaryResponse | null | undefined): {
+function firstDictionaryDefinition(
+  payload: DictionaryResponse | null | undefined,
+  options?: { context?: string | null },
+): {
   term: string
   definition: string | null
   pronunciation: string | null
   example: string | null
+  partOfSpeech: string | null
 } {
-  const term = (payload?.term ?? '').trim()
-  const entries = payload?.entries ?? []
-  for (const entry of entries) {
-    for (const def of entry.definitions ?? []) {
-      if (def.definition?.trim()) {
-        return {
-          term: term || '',
-          definition: def.definition.trim(),
-          pronunciation: payload?.pronunciation ?? null,
-          example: def.examples?.find((ex) => ex.trim())?.trim() ?? null,
-        }
-      }
+  const ranked = pickBestDefinition(payload, { context: options?.context })
+  if (ranked) {
+    return {
+      term: ranked.term || (payload?.term ?? '').trim(),
+      definition: formatStudyDefinition(ranked.definition, ranked.partOfSpeech),
+      pronunciation: ranked.pronunciation,
+      example: ranked.example,
+      partOfSpeech: ranked.partOfSpeech,
     }
   }
   return {
-    term: term || '',
+    term: (payload?.term ?? '').trim(),
     definition: null,
     pronunciation: payload?.pronunciation ?? null,
     example: null,
+    partOfSpeech: null,
   }
 }
 
@@ -775,15 +780,17 @@ function SelectionMenu({
           const contextEnd = Math.min(fullText.length, sel.endOffset + 140)
           const context = fullText.slice(contextStart, contextEnd)
           // Resolve definition so Vocabulary / Studio show a real answer card.
+          // Rank senses using book context so rare technical senses lose to reading senses.
           const dict = await fetchClientDictionary(sel.text).catch(() => null)
-          const resolved = firstDictionaryDefinition(dict as DictionaryResponse | null)
+          const resolved = firstDictionaryDefinition(dict as DictionaryResponse | null, { context })
           const front = (resolved.term || sel.text).trim()
           await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
             noteType: 'basic',
             front,
             back: resolved.definition,
             extra: resolved.pronunciation,
-            exampleSentence: resolved.example,
+            // Prefer the actual book sentence over a dictionary example.
+            exampleSentence: context.includes(front) ? context : (resolved.example ?? context),
             topic: 'Reading',
             tags: ['reader'],
             sourceRef: `reader-vocab:${front.toLowerCase()}`,
@@ -793,7 +800,9 @@ function SelectionMenu({
               start: sel.startOffset,
               end: sel.endOffset,
               context,
-              dictionarySource: resolved.definition ? 'dictionary' : null,
+              dictionarySource: resolved.definition ? 'dictionary-ranked' : null,
+              partOfSpeech: resolved.partOfSpeech,
+              rankedDefinition: true,
             },
           })
           queryClient.invalidateQueries({ queryKey: ['decks'] })
@@ -990,8 +999,8 @@ function normalizeLookupWord(value: string) {
     .trim()
     .toLowerCase()
     // strip wrapping quotes / punctuation commonly selected with words
-    .replace(/^[\s"'“”‘’(\[{«]+/, '')
-    .replace(/[\s"'“”‘’)\]},.;:!?»]+$/g, '')
+    .replace(/^[\s"'“”‘’([{«]+/u, '')
+    .replace(/[\s"'“”‘’)}\],.;:!?»]+$/gu, '')
     .replace(/[’']/g, "'")
 }
 
@@ -1253,10 +1262,10 @@ function DictionaryPanel({ word: initialWord, bookId, onClose, colors }: {
         relatedTerms: displayData?.relatedTerms ?? [],
       })
       const front = (resolved.term || lookupWord).trim()
-      const firstExample = displayData?.entries
-        ?.flatMap((e) => e.definitions.flatMap((d) => d.examples))
-        .find((ex) => ex.trim())
-        ?? resolved.example
+      const firstExample = resolved.example
+        ?? displayData?.entries
+          ?.flatMap((e) => e.definitions.flatMap((d) => d.examples))
+          .find((ex) => ex.trim())
       await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
         noteType: 'basic',
         front,
@@ -1269,7 +1278,9 @@ function DictionaryPanel({ word: initialWord, bookId, onClose, colors }: {
         metadata: {
           source: 'dictionary',
           bookId: bookId ?? null,
-          dictionarySource: displayData?.source ?? null,
+          dictionarySource: displayData?.source ? `${displayData.source}-ranked` : 'dictionary-ranked',
+          partOfSpeech: resolved.partOfSpeech,
+          rankedDefinition: true,
         },
       })
       queryClient.invalidateQueries({ queryKey: ['decks'] })

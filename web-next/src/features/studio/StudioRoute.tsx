@@ -20,6 +20,13 @@ import {
 } from './sessionPlan'
 import { StudioHeader, useStudioSummary } from './StudioHeader'
 import { speakStudioText } from './studioVoice'
+import {
+  formatStudyDefinition,
+  isFabricatedContextSentence,
+  isRealBookSentence,
+  lookupWordDefinition,
+  shouldRefreshDefinition,
+} from '@/shared/storage/dictionaryLookup'
 
 const C = {
   bg: 'transparent',
@@ -350,27 +357,35 @@ function definitionForCard(card: SessionCard) {
   ]
   for (const candidate of candidates) {
     const value = (candidate ?? '').trim()
-    if (isUsableDefinition(value, head)) return value
+    // Reject niche technical senses here so practice enriches them per-word.
+    if (isUsableDefinition(value, head) && !shouldRefreshDefinition(value, head)) return value
   }
-  // Prefer empty over a headword-as-definition (MCQ would become trivial/wrong).
+  // Prefer empty over a headword-as-definition or a known-bad grammar dump.
   const fallback = (card.cardType === 'reverse' ? card.cue : card.answer).trim()
-  if (fallback && fallback.toLowerCase() !== head.toLowerCase()) return fallback
+  if (
+    fallback
+    && fallback.toLowerCase() !== head.toLowerCase()
+    && !shouldRefreshDefinition(fallback, head)
+  ) {
+    return fallback
+  }
   return ''
 }
 
 function sentenceForCard(card: SessionCard, word: string, definition: string) {
   const example = (card.exampleSentence ?? '').trim()
-  if (example && example.toLowerCase() !== word.toLowerCase()) {
-    // Prefer sentences that actually contain the word for cloze.
-    if (new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(example)) {
-      return example
-    }
+  // Never invent or reuse a fake “story” quote that pastes the dictionary gloss.
+  if (isRealBookSentence(example, word, definition)) {
     return example
   }
-  if (definition && isUsableDefinition(definition, word)) {
-    return `In the story, the idea of “${word}” comes up — ${definition.replace(/\.$/, '')}.`
+  // Metadata context from reader selection (if present on the card payload).
+  const meta = (card as SessionCard & { metadata?: Record<string, unknown> }).metadata
+  const metaContext = typeof meta?.context === 'string' ? meta.context.trim() : ''
+  if (isRealBookSentence(metaContext, word, definition)) {
+    return metaContext
   }
-  return `As you read, notice how “${word}” is used in context.`
+  // Empty is better than a fabricated quote that confuses learners.
+  return ''
 }
 
 function cardToPracticeWord(card: SessionCard): PracticeWord {
@@ -416,7 +431,7 @@ const EXERCISE_LABEL: Record<ExerciseType, string> = {
   recall: 'Self-check',
   'write-sentence': 'Use in a sentence',
   'write-definition': 'Write the meaning',
-  'reverse-recall': 'Word from meaning',
+  'reverse-recall': 'Listen & type',
   listening: 'Listen & choose',
 }
 
@@ -606,12 +621,115 @@ function AudioBtn({ text, size = 32 }: { text: string; size?: number }) {
 
 function ExerciseHeader({ title, subtitle, word }: { title: string; subtitle?: string; word?: string }) {
   return (
-    <div style={{ marginBottom: 2 }}>
+    <div style={{ marginBottom: 2, flexShrink: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 4 }}>
         <Pill color={C.gold}>{title}</Pill>
         {word && <AudioBtn text={word} size={26} />}
       </div>
       {subtitle && <div style={{ color: C.muted, fontSize: 12, fontFamily: FONT.ui }}>{subtitle}</div>}
+    </div>
+  )
+}
+
+/**
+ * Available height for the practice column across zoom levels and shell chrome.
+ * Prefers the AppShell <main> box (already excludes sidebar/header/nav), then
+ * falls back to visualViewport so 70–100% browser zoom still fits.
+ */
+function usePracticeFrameHeight() {
+  const [height, setHeight] = useState<number>(() => {
+    if (typeof window === 'undefined') return 640
+    return Math.max(280, Math.floor((window.visualViewport?.height ?? window.innerHeight) * 0.88))
+  })
+
+  useEffect(() => {
+    const measure = () => {
+      const main = document.querySelector('main')
+      if (main) {
+        const h = main.getBoundingClientRect().height
+        // Leave a little room for studio outer padding.
+        setHeight(Math.max(260, Math.floor(h - 12)))
+        return
+      }
+      const vv = window.visualViewport
+      const vh = vv?.height ?? window.innerHeight
+      const isMobile = window.matchMedia('(max-width: 767px)').matches
+      const chrome = isMobile ? 48 + 56 : 0
+      const pad = isMobile ? 20 : 28
+      setHeight(Math.max(260, Math.floor(vh - chrome - pad)))
+    }
+    measure()
+    window.visualViewport?.addEventListener('resize', measure)
+    window.visualViewport?.addEventListener('scroll', measure)
+    window.addEventListener('resize', measure)
+    const ro = typeof ResizeObserver !== 'undefined' && document.querySelector('main')
+      ? new ResizeObserver(measure)
+      : null
+    const main = document.querySelector('main')
+    if (ro && main) ro.observe(main)
+    const mq = window.matchMedia('(max-width: 767px)')
+    mq.addEventListener?.('change', measure)
+    return () => {
+      window.visualViewport?.removeEventListener('resize', measure)
+      window.visualViewport?.removeEventListener('scroll', measure)
+      window.removeEventListener('resize', measure)
+      ro?.disconnect()
+      mq.removeEventListener?.('change', measure)
+    }
+  }, [])
+
+  return height
+}
+
+/** Pinned action footer — stays fully visible; body scrolls above it. */
+function StickyActionBar({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className="studio-action-bar"
+      style={{
+        flexShrink: 0,
+        zIndex: 6,
+        marginTop: 0,
+        paddingTop: 10,
+        paddingBottom: 'max(4px, env(safe-area-inset-bottom, 0px))',
+        background: '#ffffff',
+        borderTop: '1px solid rgba(0,0,0,0.06)',
+        boxShadow: '0 -6px 16px rgba(255,255,255,0.95)',
+      }}
+    >
+      {children}
+    </div>
+  )
+}
+
+/** Flex column: scrollable body + pinned action footer (always fully on-screen). */
+function ExerciseBody({ children, footer }: { children: ReactNode; footer?: ReactNode }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        flex: '1 1 auto',
+        minHeight: 0,
+        height: '100%',
+        maxHeight: '100%',
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          flex: '1 1 auto',
+          minHeight: 0,
+          overflowY: 'auto',
+          overflowX: 'hidden',
+          WebkitOverflowScrolling: 'touch',
+          overscrollBehavior: 'contain',
+          paddingBottom: footer ? 8 : 0,
+        }}
+      >
+        {children}
+      </div>
+      {footer ? <StickyActionBar>{footer}</StickyActionBar> : null}
     </div>
   )
 }
@@ -716,7 +834,7 @@ function ExerciseMCQ({
   })
   const bookContext = word.sentence
     && word.sentence.length > 16
-    && !/^as you read/i.test(word.sentence)
+    && !isFabricatedContextSentence(word.sentence, word.word, word.definition)
     ? word.sentence
     : null
 
@@ -767,8 +885,13 @@ function ExerciseMCQ({
     : options.map((opt, i) => ({ opt, i }))
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0 }}>
-      {/* Compact meta — no second giant header (progress bar already labels the exercise) */}
+    <ExerciseBody
+      footer={revealed ? (
+        <Btn onClick={() => onComplete({ correct })} style={{ width: '100%', padding: '12px 16px' }}>
+          Continue · Enter
+        </Btn>
+      ) : undefined}
+    >
       <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>
         {word.book} · keys 1–4
       </div>
@@ -790,7 +913,7 @@ function ExerciseMCQ({
         What does <strong style={{ color: C.text, fontFamily: FONT.display, fontSize: 15 }}>{word.word}</strong> mean here?
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: '1 1 auto', minHeight: 0 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {visibleOptions.map(({ opt, i }) => {
           const isSel = selected === opt
           const isCorrect = opt === word.definition
@@ -827,39 +950,34 @@ function ExerciseMCQ({
       </div>
 
       {revealed && (
-        <div style={{ marginTop: 12, flexShrink: 0 }}>
-          <div
-            style={{
-              padding: '10px 12px',
-              background: `${correct ? C.green : C.red}12`,
-              border: `1px solid ${correct ? C.green : C.red}33`,
-              borderRadius: 10,
-              color: correct ? C.green : C.red,
-              fontSize: 13,
-              fontFamily: FONT.ui,
-              fontWeight: 600,
-              display: 'flex',
-              gap: 8,
-              alignItems: 'flex-start',
-              marginBottom: 10,
-            }}
-          >
-            {correct ? <Check size={14} style={{ marginTop: 2, flexShrink: 0 }} /> : <X size={14} style={{ marginTop: 2, flexShrink: 0 }} />}
-            <div style={{ minWidth: 0 }}>
-              <div>{correct ? 'Correct' : 'Not quite'}</div>
-              <div style={{ marginTop: 3, fontWeight: 500, color: C.mutedHi, lineHeight: 1.4 }}>
-                <strong style={{ color: C.text }}>{word.word}</strong>
-                {': '}
-                <em style={{ color: C.text }}>{word.definition}</em>
-              </div>
+        <div
+          style={{
+            marginTop: 12,
+            padding: '10px 12px',
+            background: `${correct ? C.green : C.red}12`,
+            border: `1px solid ${correct ? C.green : C.red}33`,
+            borderRadius: 10,
+            color: correct ? C.green : C.red,
+            fontSize: 13,
+            fontFamily: FONT.ui,
+            fontWeight: 600,
+            display: 'flex',
+            gap: 8,
+            alignItems: 'flex-start',
+          }}
+        >
+          {correct ? <Check size={14} style={{ marginTop: 2, flexShrink: 0 }} /> : <X size={14} style={{ marginTop: 2, flexShrink: 0 }} />}
+          <div style={{ minWidth: 0 }}>
+            <div>{correct ? 'Correct' : 'Not quite'}</div>
+            <div style={{ marginTop: 3, fontWeight: 500, color: C.mutedHi, lineHeight: 1.4 }}>
+              <strong style={{ color: C.text }}>{word.word}</strong>
+              {': '}
+              <em style={{ color: C.text }}>{word.definition}</em>
             </div>
           </div>
-          <Btn onClick={() => onComplete({ correct })} style={{ width: '100%', padding: '12px 16px' }}>
-            Continue · Enter
-          </Btn>
         </div>
       )}
-    </div>
+    </ExerciseBody>
   )
 }
 
@@ -940,8 +1058,17 @@ function ExerciseListening({
     : options.map((opt, i) => ({ opt, i }))
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexShrink: 0 }}>
+    <ExerciseBody
+      footer={revealed ? (
+        <Btn
+          onClick={() => onComplete({ correct, hintsUsed: 0, attempts: 1 })}
+          style={{ width: '100%', padding: '12px 16px' }}
+        >
+          Continue · Enter
+        </Btn>
+      ) : undefined}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
         <div style={{ fontSize: 12.5, color: C.mutedHi }}>
           {hasPlayed ? 'What does this word mean?' : 'Playing the word…'}
           <span style={{ color: C.muted }}> · keys 1–4</span>
@@ -967,7 +1094,7 @@ function ExerciseListening({
         </button>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: '1 1 auto', minHeight: 0 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {visibleOptions.map(({ opt, i }) => {
           const isSel = selected === opt
           const isCorrectOpt = opt === word.definition
@@ -1009,44 +1136,36 @@ function ExerciseListening({
       </div>
 
       {revealed && (
-        <div style={{ marginTop: 12, flexShrink: 0 }}>
-          <div
-            style={{
-              padding: '10px 12px',
-              background: `${correct ? C.green : C.red}12`,
-              border: `1px solid ${correct ? C.green : C.red}33`,
-              borderRadius: 10,
-              color: correct ? C.green : C.red,
-              fontSize: 13,
-              fontFamily: FONT.ui,
-              fontWeight: 600,
-              display: 'flex',
-              gap: 8,
-              alignItems: 'flex-start',
-              marginBottom: 10,
-            }}
-          >
-            {correct ? <Check size={14} style={{ marginTop: 2, flexShrink: 0 }} /> : <X size={14} style={{ marginTop: 2, flexShrink: 0 }} />}
-            <div style={{ minWidth: 0 }}>
-              <div>{correct ? 'Correct' : 'Not quite'}</div>
-              <div style={{ marginTop: 3, fontWeight: 500, color: C.mutedHi, lineHeight: 1.4 }}>
-                <strong style={{ color: C.text }}>{word.word}</strong>
-                {word.phonetic ? <span style={{ fontFamily: FONT.mono, fontSize: 12, marginLeft: 6 }}>{word.phonetic}</span> : null}
-                <div style={{ marginTop: 2 }}>
-                  <em style={{ color: C.text }}>{word.definition}</em>
-                </div>
+        <div
+          style={{
+            marginTop: 12,
+            padding: '10px 12px',
+            background: `${correct ? C.green : C.red}12`,
+            border: `1px solid ${correct ? C.green : C.red}33`,
+            borderRadius: 10,
+            color: correct ? C.green : C.red,
+            fontSize: 13,
+            fontFamily: FONT.ui,
+            fontWeight: 600,
+            display: 'flex',
+            gap: 8,
+            alignItems: 'flex-start',
+          }}
+        >
+          {correct ? <Check size={14} style={{ marginTop: 2, flexShrink: 0 }} /> : <X size={14} style={{ marginTop: 2, flexShrink: 0 }} />}
+          <div style={{ minWidth: 0 }}>
+            <div>{correct ? 'Correct' : 'Not quite'}</div>
+            <div style={{ marginTop: 3, fontWeight: 500, color: C.mutedHi, lineHeight: 1.4 }}>
+              <strong style={{ color: C.text }}>{word.word}</strong>
+              {word.phonetic ? <span style={{ fontFamily: FONT.mono, fontSize: 12, marginLeft: 6 }}>{word.phonetic}</span> : null}
+              <div style={{ marginTop: 2 }}>
+                <em style={{ color: C.text }}>{word.definition}</em>
               </div>
             </div>
           </div>
-          <Btn
-            onClick={() => onComplete({ correct, hintsUsed: 0, attempts: 1 })}
-            style={{ width: '100%', padding: '12px 16px' }}
-          >
-            Continue · Enter
-          </Btn>
         </div>
       )}
-    </div>
+    </ExerciseBody>
   )
 }
 
@@ -1056,6 +1175,36 @@ function ExerciseCloze({ word, onComplete }: { word: PracticeWord; onComplete: (
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => { inputRef.current?.focus() }, [])
 
+  // Never run cloze on the old shared template / dictionary dump.
+  const passageOk = isRealBookSentence(word.sentence, word.word, word.definition)
+  if (!passageOk) {
+    return (
+      <ExerciseBody
+        footer={
+          <Btn onClick={() => onComplete({ correct: true, rating: 'hard' })} style={{ width: '100%', padding: '12px 16px' }}>
+            Skip — no book passage yet
+          </Btn>
+        }
+      >
+        <ExerciseHeader title="Context Cloze" subtitle="Needs a real sentence from your reading" />
+        <div style={{
+          marginTop: 14, padding: '14px 16px', borderRadius: 12,
+          background: `${C.amber}12`, border: `1px solid ${C.amber}40`,
+          color: C.amber, fontSize: 13.5, lineHeight: 1.5,
+        }}>
+          This card doesn’t have a real book sentence yet (only a placeholder). Save the word again from the reader to capture context, or skip for now.
+          {isUsableDefinition(word.definition, word.word) && (
+            <div style={{ marginTop: 10, color: C.text, fontStyle: 'italic' }}>
+              <strong style={{ fontStyle: 'normal' }}>{word.word}</strong>
+              {': '}
+              {word.definition}
+            </div>
+          )}
+        </div>
+      </ExerciseBody>
+    )
+  }
+
   const correct = input.trim().toLowerCase() === word.word.toLowerCase()
   const pattern = new RegExp(escapeRegExp(word.word), 'i')
   const match = word.sentence.match(pattern)
@@ -1063,7 +1212,13 @@ function ExerciseCloze({ word, onComplete }: { word: PracticeWord; onComplete: (
   const after = match ? word.sentence.slice((match.index ?? 0) + match[0].length) : word.sentence
 
   return (
-    <div>
+    <ExerciseBody
+      footer={!submitted ? (
+        <Btn onClick={() => setSubmitted(true)} disabled={!input.trim()} style={{ width: '100%', padding: '12px 16px' }}>Check</Btn>
+      ) : (
+        <Btn onClick={() => onComplete({ correct, typedResponse: input })} style={{ width: '100%', padding: '12px 16px' }}>Continue</Btn>
+      )}
+    >
       <ExerciseHeader title="Context Cloze" subtitle="Fill the word from the book passage" />
       <div style={{ background: 'rgba(0,0,0,0.03)', border: `1px solid rgba(0,0,0,0.07)`, borderLeft: `3px solid ${C.gold}`, borderRadius: '0 12px 12px 0', padding: '14px 16px', marginTop: 14, marginBottom: 16 }}>
         <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>
@@ -1090,40 +1245,33 @@ function ExerciseCloze({ word, onComplete }: { word: PracticeWord; onComplete: (
       </div>
 
       {!submitted ? (
-        <>
-          <input
-            ref={inputRef}
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && input.trim()) setSubmitted(true) }}
-            placeholder="Type the word"
-            style={{
-              width: '100%',
-              boxSizing: 'border-box',
-              background: C.cardHi,
-              border: `1px solid ${C.borderHi}`,
-              borderRadius: 12,
-              padding: '14px 16px',
-              color: C.text,
-              fontSize: 15,
-              fontFamily: FONT.ui,
-              outline: 'none',
-              marginBottom: 12,
-            }}
-          />
-          <Btn onClick={() => setSubmitted(true)} disabled={!input.trim()} style={{ width: '100%' }}>Check</Btn>
-        </>
+        <input
+          ref={inputRef}
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && input.trim()) setSubmitted(true) }}
+          placeholder="Type the word"
+          style={{
+            width: '100%',
+            boxSizing: 'border-box',
+            background: C.cardHi,
+            border: `1px solid ${C.borderHi}`,
+            borderRadius: 12,
+            padding: '14px 16px',
+            color: C.text,
+            fontSize: 15,
+            fontFamily: FONT.ui,
+            outline: 'none',
+            marginBottom: 4,
+          }}
+        />
       ) : (
-        <>
-          <div style={{ padding: '12px 14px', background: `${correct ? C.green : C.red}14`, border: `1px solid ${correct ? C.green : C.red}33`, borderRadius: 10, color: correct ? C.green : C.red, fontSize: 13, fontFamily: FONT.ui, fontWeight: 600, marginBottom: 12 }}>
-            {correct ? 'Exactly right' : `The word was "${word.word}"`}
-          </div>
-          <Btn onClick={() => onComplete({ correct, typedResponse: input })} style={{ width: '100%' }}>Continue</Btn>
-        </>
+        <div style={{ padding: '12px 14px', background: `${correct ? C.green : C.red}14`, border: `1px solid ${correct ? C.green : C.red}33`, borderRadius: 10, color: correct ? C.green : C.red, fontSize: 13, fontFamily: FONT.ui, fontWeight: 600, marginBottom: 4 }}>
+          {correct ? 'Exactly right' : `The word was "${word.word}"`}
+        </div>
       )}
-
-    </div>
+    </ExerciseBody>
   )
 }
 
@@ -1132,16 +1280,43 @@ function normalizeForReverseRecall(value: string): string {
 }
 
 function ExerciseReverseRecall({ word, onComplete }: { word: PracticeWord; onComplete: (result: StepCompletePayload) => void }) {
+  // Dictation: hear the word (neural TTS), type the spelling — never show the answer until checked.
   const [input, setInput] = useState('')
   const [attempts, setAttempts] = useState(0)
   const [hintShown, setHintShown] = useState(false)
   const [revealed, setRevealed] = useState(false)
   const [lastAttemptCorrect, setLastAttemptCorrect] = useState(false)
+  const [hasPlayed, setHasPlayed] = useState(false)
+  const [playing, setPlaying] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
-  useEffect(() => { inputRef.current?.focus() }, [])
 
   const target = normalizeForReverseRecall(word.word)
   const userAnswer = normalizeForReverseRecall(input)
+  const letterCount = word.word.replace(/[^a-zA-Z]/g, '').length
+  const hint = word.word.charAt(0)
+
+  async function play() {
+    if (playing) return
+    setPlaying(true)
+    try {
+      await speakStudioText(word.word)
+      setHasPlayed(true)
+    } finally {
+      setPlaying(false)
+      window.setTimeout(() => inputRef.current?.focus(), 0)
+    }
+  }
+
+  // Auto-play once when the card opens (user can replay anytime).
+  useEffect(() => {
+    const t = window.setTimeout(() => { void play() }, 320)
+    return () => window.clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [word.id])
+
+  useEffect(() => {
+    if (!revealed) inputRef.current?.focus()
+  }, [revealed, hintShown])
 
   function check() {
     if (!input.trim()) return
@@ -1167,22 +1342,75 @@ function ExerciseReverseRecall({ word, onComplete }: { word: PracticeWord; onCom
     })
   }
 
-  const hint = word.word.charAt(0)
+  const footer = !revealed ? (
+    <Btn onClick={check} disabled={!input.trim()} style={{ width: '100%', padding: '12px 16px' }}>Check</Btn>
+  ) : (
+    <Btn onClick={handleContinue} style={{ width: '100%', padding: '12px 16px' }}>Continue →</Btn>
+  )
 
   return (
-    <div>
-      <ExerciseHeader title="Reverse Recall" subtitle="Recall the word from its meaning" />
-      <div style={{ background: `${C.gold}10`, border: `1px solid ${C.gold}33`, borderLeft: `3px solid ${C.gold}`, borderRadius: '0 12px 12px 0', padding: '14px 16px', marginTop: 14, marginBottom: 16 }}>
-        <div style={{ color: C.gold, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>Definition</div>
-        <div style={{ color: C.cream, fontSize: 16, lineHeight: 1.6, fontFamily: FONT.display, fontStyle: 'italic' }}>{word.definition}</div>
-      </div>
+    <ExerciseBody footer={footer}>
+      <ExerciseHeader title="Listen & type" subtitle="Hear the word, then type the spelling" />
 
       {!revealed ? (
         <>
+          <div style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
+            padding: '18px 16px 16px', marginTop: 10, marginBottom: 14,
+            background: `${C.blue}08`, border: `1px solid ${C.blue}22`, borderRadius: 16,
+          }}>
+            <button
+              type="button"
+              onClick={() => { void play() }}
+              disabled={playing}
+              aria-label={hasPlayed ? 'Replay the word' : 'Play the word'}
+              style={{
+                width: 72, height: 72, borderRadius: '50%',
+                border: `2px solid ${C.blue}`,
+                background: playing ? C.blue : `${C.blue}14`,
+                color: playing ? '#fff' : C.blue,
+                cursor: playing ? 'wait' : 'pointer',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                boxShadow: `0 4px 16px ${C.blue}22`,
+                transition: 'all 0.15s',
+              }}
+            >
+              {playing ? (
+                <div style={{
+                  width: 22, height: 22, borderRadius: '50%',
+                  border: '2.5px solid rgba(255,255,255,0.35)',
+                  borderTopColor: '#fff',
+                  animation: 'studioSpin 0.7s linear infinite',
+                }} />
+              ) : (
+                <svg width={28} height={28} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                </svg>
+              )}
+            </button>
+            <div style={{ fontSize: 13, color: C.mutedHi, fontFamily: FONT.ui, textAlign: 'center' }}>
+              {playing ? 'Playing…' : hasPlayed ? 'Tap to replay · then type what you heard' : 'Playing the word…'}
+            </div>
+            <div style={{
+              fontSize: 12, color: C.muted, fontFamily: FONT.mono, letterSpacing: '0.18em',
+              background: 'rgba(0,0,0,0.04)', padding: '6px 12px', borderRadius: 99,
+            }}>
+              {Array.from({ length: Math.min(14, Math.max(3, letterCount)) }, () => '·').join(' ')}
+              <span style={{ marginLeft: 8, letterSpacing: '0.04em', opacity: 0.75 }}>
+                {letterCount} letter{letterCount === 1 ? '' : 's'}
+              </span>
+            </div>
+          </div>
+
           {hintShown && (
-            <div style={{ padding: '8px 12px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 10, marginBottom: 10, color: C.amber, fontSize: 12.5, fontFamily: FONT.ui, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ padding: '8px 12px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 10, marginBottom: 10, color: C.amber, fontSize: 12.5, fontFamily: FONT.ui, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <Sparkles size={12} />
               Hint: starts with <strong style={{ fontFamily: FONT.mono, fontSize: 14 }}>{hint}</strong>
+              {isUsableDefinition(word.definition, word.word) && (
+                <span style={{ color: C.mutedHi }}> · means “{word.definition.length > 48 ? `${word.definition.slice(0, 48)}…` : word.definition}”</span>
+              )}
             </div>
           )}
           <input
@@ -1191,22 +1419,27 @@ function ExerciseReverseRecall({ word, onComplete }: { word: PracticeWord; onCom
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && input.trim()) check() }}
-            placeholder="Type the word"
+            placeholder="Type the word you heard"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
             style={{
               width: '100%',
               boxSizing: 'border-box',
               background: C.cardHi,
-              border: `1px solid ${C.borderHi}`,
+              border: `1.5px solid ${C.gold}55`,
               borderRadius: 12,
               padding: '14px 16px',
               color: C.text,
-              fontSize: 15,
-              fontFamily: FONT.ui,
+              fontSize: 17,
+              fontFamily: FONT.display,
               outline: 'none',
-              marginBottom: 12,
+              marginBottom: 4,
+              textAlign: 'center',
+              letterSpacing: '0.02em',
             }}
           />
-          <Btn onClick={check} disabled={!input.trim()} style={{ width: '100%' }}>Check</Btn>
         </>
       ) : (
         <>
@@ -1216,25 +1449,29 @@ function ExerciseReverseRecall({ word, onComplete }: { word: PracticeWord; onCom
               ? (hintShown ? 'Got it with the hint' : 'Exactly right')
               : `The word was "${word.word}"`}
           </div>
-          <div style={{ borderRadius: 14, overflow: 'hidden', marginBottom: 12, border: '1px solid rgba(0,0,0,0.07)' }}>
+          <div style={{ borderRadius: 14, overflow: 'hidden', marginBottom: 4, border: '1px solid rgba(0,0,0,0.07)' }}>
             <div style={{ padding: '14px 16px', background: `${C.gold}10`, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div style={{ flex: 1 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontFamily: FONT.display, fontSize: 22, fontWeight: 700, color: C.cream }}>{word.word}</div>
                 {word.phonetic && <div style={{ color: C.muted, fontSize: 12, fontFamily: FONT.mono, marginTop: 2 }}>{word.phonetic}</div>}
+                {isUsableDefinition(word.definition, word.word) && (
+                  <div style={{ color: C.mutedHi, fontSize: 13.5, fontFamily: FONT.display, fontStyle: 'italic', marginTop: 6, lineHeight: 1.45 }}>
+                    {word.definition}
+                  </div>
+                )}
               </div>
               <AudioBtn text={word.word} />
             </div>
-            {word.sentence && (
+            {word.sentence && !isFabricatedContextSentence(word.sentence, word.word, word.definition) && (
               <div style={{ background: 'rgba(0,0,0,0.03)', borderLeft: `3px solid ${C.gold}`, padding: '10px 14px' }}>
                 <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{word.book}</div>
                 <div style={{ color: C.text, fontSize: 14, lineHeight: 1.6, fontFamily: FONT.display, fontStyle: 'italic' }}>"{word.sentence}"</div>
               </div>
             )}
           </div>
-          <Btn onClick={handleContinue} style={{ width: '100%' }}>Continue →</Btn>
         </>
       )}
-    </div>
+    </ExerciseBody>
   )
 }
 
@@ -1249,53 +1486,12 @@ function ExerciseRecall({ word, onComplete }: { word: PracticeWord; onComplete: 
   ]
 
   return (
-    <div>
-      <ExerciseHeader title="Active Recall" />
-      <p style={{ color: '#4a4a46', fontSize: 14, lineHeight: 1.55, margin: '0 0 16px' }}>
-        Recall the definition silently, then reveal and rate yourself.
-      </p>
-
-      {!revealed ? (
-        <>
-          <div
-            onClick={() => setRevealed(true)}
-            style={{
-              background: '#eff6ff',
-              border: '1.5px solid #93c5fd',
-              borderRadius: 14,
-              padding: '34px 20px',
-              textAlign: 'center',
-              cursor: 'pointer',
-              marginBottom: 14,
-              transition: 'background 0.15s',
-            }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#dbeafe' }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#eff6ff' }}
-          >
-            <div style={{ color: '#93c5fd', fontSize: 20, letterSpacing: 10, marginBottom: 10 }}>— — — — — —</div>
-            <div style={{ color: '#2563eb', fontSize: 13.5, fontWeight: 600, fontFamily: FONT.ui }}>Click to reveal</div>
-          </div>
-          <Btn onClick={() => setRevealed(true)} style={{ width: '100%', background: C.blue }}>Reveal definition</Btn>
-        </>
+    <ExerciseBody
+      footer={!revealed ? (
+        <Btn onClick={() => setRevealed(true)} style={{ width: '100%', background: C.blue, padding: '12px 16px' }}>Reveal definition</Btn>
       ) : (
-        <>
-          <div style={{ borderRadius: 14, overflow: 'hidden', marginBottom: 14, animation: 'studioFadeIn 0.3s ease', border: '1px solid rgba(0,0,0,0.07)' }}>
-            <div style={{ padding: '14px 16px', background: `${C.gold}10` }}>
-              <div style={{ color: C.gold, fontSize: 16, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.55 }}>{word.definition}</div>
-            </div>
-            <div style={{ background: 'rgba(0,0,0,0.03)', borderLeft: `3px solid ${C.gold}`, padding: '10px 14px' }}>
-              <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{word.book}</div>
-              <div style={{ color: C.text, fontSize: 14, lineHeight: 1.6, fontFamily: FONT.display, fontStyle: 'italic' }}>"{word.sentence}"</div>
-            </div>
-            {word.mnemonic && (
-              <div style={{ padding: '10px 14px', background: `${C.violet}10`, borderTop: `1px solid ${C.violet}22` }}>
-                <div style={{ color: C.violet, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 3 }}>Memory hook</div>
-                <div style={{ color: C.text, fontSize: 13, lineHeight: 1.5 }}>{word.mnemonic}</div>
-              </div>
-            )}
-          </div>
-
-          <div style={{ color: C.mutedHi, fontSize: 11.5, textAlign: 'center', marginBottom: 10, fontFamily: FONT.ui, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+        <div>
+          <div style={{ color: C.mutedHi, fontSize: 11.5, textAlign: 'center', marginBottom: 8, fontFamily: FONT.ui, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
             How well did you recall it?
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 6 }}>
@@ -1312,9 +1508,53 @@ function ExerciseRecall({ word, onComplete }: { word: PracticeWord; onComplete: 
               </button>
             ))}
           </div>
-        </>
+        </div>
       )}
-    </div>
+    >
+      <ExerciseHeader title="Active Recall" />
+      <p style={{ color: '#4a4a46', fontSize: 14, lineHeight: 1.55, margin: '0 0 16px' }}>
+        Recall the definition silently, then reveal and rate yourself.
+      </p>
+
+      {!revealed ? (
+        <div
+          onClick={() => setRevealed(true)}
+          style={{
+            background: '#eff6ff',
+            border: '1.5px solid #93c5fd',
+            borderRadius: 14,
+            padding: '34px 20px',
+            textAlign: 'center',
+            cursor: 'pointer',
+            marginBottom: 4,
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#dbeafe' }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#eff6ff' }}
+        >
+          <div style={{ color: '#93c5fd', fontSize: 20, letterSpacing: 10, marginBottom: 10 }}>— — — — — —</div>
+          <div style={{ color: '#2563eb', fontSize: 13.5, fontWeight: 600, fontFamily: FONT.ui }}>Click to reveal</div>
+        </div>
+      ) : (
+        <div style={{ borderRadius: 14, overflow: 'hidden', marginBottom: 4, animation: 'studioFadeIn 0.3s ease', border: '1px solid rgba(0,0,0,0.07)' }}>
+          <div style={{ padding: '14px 16px', background: `${C.gold}10` }}>
+            <div style={{ color: C.gold, fontSize: 16, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.55 }}>{word.definition}</div>
+          </div>
+          {word.sentence && !isFabricatedContextSentence(word.sentence, word.word, word.definition) && (
+            <div style={{ background: 'rgba(0,0,0,0.03)', borderLeft: `3px solid ${C.gold}`, padding: '10px 14px' }}>
+              <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{word.book}</div>
+              <div style={{ color: C.text, fontSize: 14, lineHeight: 1.6, fontFamily: FONT.display, fontStyle: 'italic' }}>"{word.sentence}"</div>
+            </div>
+          )}
+          {word.mnemonic && (
+            <div style={{ padding: '10px 14px', background: `${C.violet}10`, borderTop: `1px solid ${C.violet}22` }}>
+              <div style={{ color: C.violet, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 3 }}>Memory hook</div>
+              <div style={{ color: C.text, fontSize: 13, lineHeight: 1.5 }}>{word.mnemonic}</div>
+            </div>
+          )}
+        </div>
+      )}
+    </ExerciseBody>
   )
 }
 
@@ -1377,13 +1617,41 @@ function WriteSentenceProduction({ word, onComplete }: { word: PracticeWord; onC
     })
   }
 
-  return (
-    <div>
-      <ExerciseHeader title="Production Checkpoint" subtitle="Write 3 sentences in your own words" word={word.word} />
-      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: '14px 16px', marginTop: 14, marginBottom: 14 }}>
-        <div style={{ fontFamily: FONT.display, fontSize: 22, fontWeight: 700, color: C.cream }}>{word.word}</div>
-        <div style={{ color: C.gold, fontSize: 13, fontFamily: FONT.display, fontStyle: 'italic', marginTop: 2 }}>{word.definition}</div>
+  let footer: ReactNode = null
+  if (!submitted) {
+    footer = (
+      <Btn onClick={() => void submit()} disabled={!allValid} style={{ width: '100%', padding: '12px 16px' }}>
+        Check with AI
+      </Btn>
+    )
+  } else if (!checking && !production && error) {
+    footer = (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <Btn variant="warn" onClick={() => onComplete({ correct: false, typedResponse: text })}>Not quite</Btn>
+        <Btn variant="success" onClick={() => onComplete({ correct: true, typedResponse: text })}>Yes, good</Btn>
       </div>
+    )
+  } else if (!checking && production) {
+    footer = (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <Btn variant="danger" onClick={() => handleContinue('again')}>Again</Btn>
+        <Btn onClick={() => handleContinue()} disabled={checking}>{production.accepted ? 'Mark good →' : 'Continue →'}</Btn>
+      </div>
+    )
+  }
+
+  return (
+    <ExerciseBody footer={footer}>
+      <ExerciseHeader title="Production Checkpoint" subtitle="Write 3 sentences in your own words" />
+      {isUsableDefinition(word.definition, word.word) && (
+        <div style={{
+          background: `${C.gold}10`, border: `1px solid ${C.gold}28`, borderRadius: 12,
+          padding: '10px 12px', marginTop: 10, marginBottom: 10,
+          color: C.gold, fontSize: 13.5, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.45,
+        }}>
+          {word.definition}
+        </div>
+      )}
       {!submitted ? (
         <>
           <textarea
@@ -1391,10 +1659,10 @@ function WriteSentenceProduction({ word, onComplete }: { word: PracticeWord; onC
             value={text}
             onChange={(e) => setText(e.target.value)}
             placeholder={`Three sentences using "${word.word}", one per line`}
-            rows={6}
-            style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.borderHi}`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.display, outline: 'none', resize: 'none', marginBottom: 8, lineHeight: 1.6 }}
+            rows={5}
+            style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.borderHi}`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.display, outline: 'none', resize: 'vertical', maxHeight: 180, minHeight: 100, marginBottom: 8, lineHeight: 1.6 }}
           />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12, fontSize: 11, fontFamily: FONT.ui }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 4, fontSize: 11, fontFamily: FONT.ui }}>
             {[0, 1, 2].map((i) => {
               const c = lineChecks[i]
               const ok = c?.usesWord && c?.longEnough
@@ -1412,7 +1680,6 @@ function WriteSentenceProduction({ word, onComplete }: { word: PracticeWord; onC
               )
             })}
           </div>
-          <Btn onClick={() => void submit()} disabled={!allValid} style={{ width: '100%' }}>Check with AI</Btn>
         </>
       ) : (
         <>
@@ -1420,11 +1687,11 @@ function WriteSentenceProduction({ word, onComplete }: { word: PracticeWord; onC
           {!checking && production && (
             <>
               <div style={{
-                padding: '12px 14px',
+                padding: '10px 12px',
                 background: production.accepted ? `${C.green}10` : `${C.amber}10`,
                 border: `1px solid ${production.accepted ? C.green : C.amber}3A`,
                 borderRadius: 12,
-                marginBottom: 12,
+                marginBottom: 10,
                 color: production.accepted ? C.green : C.amber,
                 fontSize: 13,
                 fontWeight: 600,
@@ -1437,15 +1704,15 @@ function WriteSentenceProduction({ word, onComplete }: { word: PracticeWord; onC
                 {production.accepted ? 'Accepted — strong production' : 'Needs work — see notes below'}
               </div>
               {production.feedback && (
-                <div style={{ padding: '10px 14px', background: 'rgba(0,0,0,0.03)', border: `1px solid rgba(0,0,0,0.07)`, borderRadius: 10, marginBottom: 12, color: C.text, fontSize: 13, lineHeight: 1.5 }}>
+                <div style={{ padding: '10px 12px', background: 'rgba(0,0,0,0.03)', border: `1px solid rgba(0,0,0,0.07)`, borderRadius: 10, marginBottom: 10, color: C.text, fontSize: 13, lineHeight: 1.5 }}>
                   {production.feedback}
                 </div>
               )}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 4 }}>
                 {production.sentenceNotes.map((sn, i) => {
                   const tone = sn.accepted ? C.green : C.amber
                   return (
-                    <div key={i} style={{ padding: '10px 14px', background: `${tone}10`, border: `1px solid ${tone}3A`, borderRadius: 10 }}>
+                    <div key={i} style={{ padding: '10px 12px', background: `${tone}10`, border: `1px solid ${tone}3A`, borderRadius: 10 }}>
                       <div style={{ color: tone, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
                         {sn.accepted ? <Check size={11} /> : <Circle size={11} />}
                         Sentence {i + 1}
@@ -1459,24 +1726,13 @@ function WriteSentenceProduction({ word, onComplete }: { word: PracticeWord; onC
             </>
           )}
           {!checking && error && (
-            <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 12, color: C.amber, fontSize: 12.5 }}>
+            <div style={{ padding: '10px 12px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 4, color: C.amber, fontSize: 12.5 }}>
               {error} You can still continue and self-rate.
             </div>
           )}
-          {!checking && !production && error ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <Btn variant="warn" onClick={() => onComplete({ correct: false, typedResponse: text })}>Not quite</Btn>
-              <Btn variant="success" onClick={() => onComplete({ correct: true, typedResponse: text })}>Yes, good</Btn>
-            </div>
-          ) : !checking && production ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <Btn variant="danger" onClick={() => handleContinue('again')}>Again</Btn>
-              <Btn onClick={() => handleContinue()} disabled={checking}>{production.accepted ? 'Mark good →' : 'Continue →'}</Btn>
-            </div>
-          ) : null}
         </>
       )}
-    </div>
+    </ExerciseBody>
   )
 }
 
@@ -1545,56 +1801,68 @@ function WriteSentenceCoached({ word, onComplete }: { word: PracticeWord; onComp
     })
   }
 
-  return (
-    <div>
-      <ExerciseHeader title="Write Your Own Sentence" subtitle="Use the word in a context that's yours" word={word.word} />
-      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: '14px 16px', marginTop: 14, marginBottom: 14 }}>
-        <div style={{ fontFamily: FONT.display, fontSize: 22, fontWeight: 700, color: C.cream }}>{word.word}</div>
-        <div style={{ color: C.gold, fontSize: 13, fontFamily: FONT.display, fontStyle: 'italic', marginTop: 2 }}>{word.definition}</div>
+  let footer: ReactNode = null
+  if (!submitted) {
+    footer = <Btn onClick={() => void submit()} disabled={!valid} style={{ width: '100%', padding: '12px 16px' }}>Check with AI</Btn>
+  } else if (!checking && !coach && error) {
+    footer = (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <Btn variant="warn" onClick={() => onComplete({ correct: false, typedResponse: text })}>Not quite</Btn>
+        <Btn variant="success" onClick={() => onComplete({ correct: true, typedResponse: text })}>Yes, good</Btn>
       </div>
+    )
+  } else if (canRetry) {
+    footer = (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <Btn variant="ghost" onClick={startRetry}>Try again</Btn>
+        <Btn onClick={handleContinue} disabled={checking}>Use this answer →</Btn>
+      </div>
+    )
+  } else if (submitted && !checking) {
+    footer = <Btn onClick={handleContinue} disabled={checking} style={{ width: '100%', padding: '12px 16px' }}>Continue →</Btn>
+  }
+
+  return (
+    <ExerciseBody footer={footer}>
+      <ExerciseHeader title="Write Your Own Sentence" subtitle="Use the word in a context that's yours" />
+      {isUsableDefinition(word.definition, word.word) && (
+        <div style={{
+          background: `${C.gold}10`, border: `1px solid ${C.gold}28`, borderRadius: 12,
+          padding: '10px 12px', marginTop: 10, marginBottom: 10,
+          color: C.gold, fontSize: 13.5, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.45,
+        }}>
+          {word.definition}
+        </div>
+      )}
       {!submitted ? (
         <>
           {turnIndex === 2 && coach === null && (
-            <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 10, color: C.amber, fontSize: 12.5, fontFamily: FONT.ui }}>
+            <div style={{ padding: '10px 12px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 10, color: C.amber, fontSize: 12.5, fontFamily: FONT.ui }}>
               One more attempt — try a different angle this time.
             </div>
           )}
-          <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} placeholder={`Write a sentence using "${word.word}"`} rows={3} style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.borderHi}`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.display, outline: 'none', resize: 'none', marginBottom: 8, lineHeight: 1.5 }} />
-          <div style={{ display: 'flex', gap: 10, marginBottom: 12, fontSize: 11, fontFamily: FONT.ui }}>
+          <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} placeholder={`Write a sentence using "${word.word}"`} rows={3} style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.borderHi}`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.display, outline: 'none', resize: 'vertical', maxHeight: 140, marginBottom: 8, lineHeight: 1.5 }} />
+          <div style={{ display: 'flex', gap: 10, marginBottom: 4, fontSize: 11, fontFamily: FONT.ui }}>
             <span style={{ color: wordUsed ? C.green : C.muted, display: 'inline-flex', alignItems: 'center', gap: 4 }}>{wordUsed ? <Check size={12} /> : <Circle size={12} />} uses the word</span>
             <span style={{ color: longEnough ? C.green : C.muted, display: 'inline-flex', alignItems: 'center', gap: 4 }}>{longEnough ? <Check size={12} /> : <Circle size={12} />} 4+ words</span>
           </div>
-          <Btn onClick={() => void submit()} disabled={!valid} style={{ width: '100%' }}>Check with AI</Btn>
         </>
       ) : (
         <>
-          <div style={{ padding: '12px 14px', background: 'rgba(0,0,0,0.04)', border: `1px solid rgba(0,0,0,0.07)`, borderRadius: 12, marginBottom: 12 }}>
+          <div style={{ padding: '12px 14px', background: 'rgba(0,0,0,0.04)', border: `1px solid rgba(0,0,0,0.07)`, borderRadius: 12, marginBottom: 10 }}>
             <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>Your sentence</div>
             <div style={{ color: C.text, fontSize: 14.5, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.5 }}>"{text}"</div>
           </div>
           {checking && <AICheckingBadge />}
           {!checking && coach && <AIVerdictCard check={coachToVocabCheck(coach)} />}
           {!checking && error && (
-            <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 12, color: C.amber, fontSize: 12.5 }}>
+            <div style={{ padding: '10px 12px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 4, color: C.amber, fontSize: 12.5 }}>
               {error} You can still continue and self-rate.
             </div>
           )}
-          {!checking && !coach && error ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <Btn variant="warn" onClick={() => onComplete({ correct: false, typedResponse: text })}>Not quite</Btn>
-              <Btn variant="success" onClick={() => onComplete({ correct: true, typedResponse: text })}>Yes, good</Btn>
-            </div>
-          ) : canRetry ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <Btn variant="ghost" onClick={startRetry}>Try again</Btn>
-              <Btn onClick={handleContinue} disabled={checking}>Use this answer →</Btn>
-            </div>
-          ) : (
-            <Btn onClick={handleContinue} disabled={checking} style={{ width: '100%' }}>Continue →</Btn>
-          )}
         </>
       )}
-    </div>
+    </ExerciseBody>
   )
 }
 
@@ -1658,26 +1926,43 @@ function ExerciseWriteDefinition({ word, onComplete }: { word: PracticeWord; onC
     })
   }
 
-  return (
-    <div>
-      <ExerciseHeader title="Free Recall" subtitle="Write the definition from memory" word={word.word} />
-      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: 20, marginTop: 14, marginBottom: 14, textAlign: 'center' }}>
-        <div style={{ fontFamily: FONT.display, fontSize: 22, fontWeight: 700, color: C.cream }}>{word.word}</div>
-        {word.phonetic && <div style={{ color: C.muted, fontSize: 13, fontFamily: FONT.mono, marginTop: 4 }}>{word.phonetic}</div>}
+  let footer: ReactNode = null
+  if (!submitted) {
+    footer = <Btn onClick={() => void submit()} disabled={!text.trim()} style={{ width: '100%', padding: '12px 16px' }}>Check with AI</Btn>
+  } else if (!checking && !coach && error) {
+    footer = (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+        <Btn variant="danger" onClick={() => onComplete({ rating: 'again', correct: false, typedResponse: text })}>Off</Btn>
+        <Btn variant="warn" onClick={() => onComplete({ rating: 'hard', correct: true, typedResponse: text })}>Partial</Btn>
+        <Btn variant="success" onClick={() => onComplete({ rating: 'good', correct: true, typedResponse: text })}>Spot on</Btn>
       </div>
+    )
+  } else if (canRetry) {
+    footer = (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <Btn variant="ghost" onClick={startRetry}>Try again</Btn>
+        <Btn onClick={handleContinue} disabled={checking}>Use this answer →</Btn>
+      </div>
+    )
+  } else if (submitted && !checking) {
+    footer = <Btn onClick={handleContinue} disabled={checking} style={{ width: '100%', padding: '12px 16px' }}>Continue →</Btn>
+  }
+
+  return (
+    <ExerciseBody footer={footer}>
+      <ExerciseHeader title="Free Recall" subtitle="Write the definition from memory" />
       {!submitted ? (
         <>
           {turnIndex === 2 && coach === null && (
-            <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 10, color: C.amber, fontSize: 12.5, fontFamily: FONT.ui }}>
+            <div style={{ padding: '10px 12px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 10, color: C.amber, fontSize: 12.5, fontFamily: FONT.ui }}>
               One more attempt — try to be more precise this time.
             </div>
           )}
-          <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} placeholder="What does this word mean?" rows={2} style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.borderHi}`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.ui, outline: 'none', resize: 'none', marginBottom: 10, lineHeight: 1.5 }} />
-          <Btn onClick={() => void submit()} disabled={!text.trim()} style={{ width: '100%' }}>Check with AI</Btn>
+          <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} placeholder="What does this word mean?" rows={3} style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.borderHi}`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.ui, outline: 'none', resize: 'vertical', maxHeight: 140, marginTop: 10, marginBottom: 4, lineHeight: 1.5 }} />
         </>
       ) : (
         <>
-          <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ marginTop: 10, marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ padding: '12px 14px', background: 'rgba(0,0,0,0.04)', borderRadius: 10, border: `1px solid rgba(0,0,0,0.07)` }}>
               <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>You wrote</div>
               <div style={{ color: C.text, fontSize: 14, fontFamily: FONT.ui, lineHeight: 1.5 }}>{text}</div>
@@ -1690,27 +1975,13 @@ function ExerciseWriteDefinition({ word, onComplete }: { word: PracticeWord; onC
           {checking && <AICheckingBadge />}
           {!checking && coach && <AIVerdictCard check={coachToVocabCheck(coach)} />}
           {!checking && error && (
-            <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 12, color: C.amber, fontSize: 12.5 }}>
+            <div style={{ padding: '10px 12px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 4, color: C.amber, fontSize: 12.5 }}>
               {error} You can still continue and self-rate.
             </div>
           )}
-          {!checking && !coach && error ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
-              <Btn variant="danger" onClick={() => onComplete({ rating: 'again', correct: false, typedResponse: text })}>Off</Btn>
-              <Btn variant="warn" onClick={() => onComplete({ rating: 'hard', correct: true, typedResponse: text })}>Partial</Btn>
-              <Btn variant="success" onClick={() => onComplete({ rating: 'good', correct: true, typedResponse: text })}>Spot on</Btn>
-            </div>
-          ) : canRetry ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <Btn variant="ghost" onClick={startRetry}>Try again</Btn>
-              <Btn onClick={handleContinue} disabled={checking}>Use this answer →</Btn>
-            </div>
-          ) : (
-            <Btn onClick={handleContinue} disabled={checking} style={{ width: '100%' }}>Continue →</Btn>
-          )}
         </>
       )}
-    </div>
+    </ExerciseBody>
   )
 }
 
@@ -1752,41 +2023,59 @@ function ExerciseMnemonic({ word, onComplete }: { word: PracticeWord; onComplete
     }
   }
 
-  return (
-    <div>
-      <ExerciseHeader title="Memory Hook" subtitle="Build a mnemonic you'll see next time" word={word.word} />
-      <div style={{ background: `linear-gradient(135deg, ${C.violet}12, rgba(0,0,0,0.03))`, border: `1px solid ${C.violet}25`, borderRadius: 14, padding: 14, marginTop: 12, marginBottom: 12 }}>
-        <div style={{ fontFamily: FONT.display, fontSize: 22, fontWeight: 700, color: C.cream }}>{word.word}</div>
-        {word.phonetic && <div style={{ color: C.muted, fontSize: 12, fontFamily: FONT.mono, marginTop: 2, marginBottom: 6 }}>{word.phonetic}</div>}
-        <div style={{ color: C.gold, fontSize: 13.5, fontFamily: FONT.display, fontStyle: 'italic' }}>{word.definition}</div>
+  let footer: ReactNode = null
+  if (!saved) {
+    footer = (
+      <Btn onClick={() => void save()} disabled={text.trim().length < 10} style={{ width: '100%', background: C.violet, color: '#ffffff', padding: '12px 16px' }}>
+        Save & check with AI
+      </Btn>
+    )
+  } else if (!checking) {
+    footer = (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {check?.suggestion && (
+          <Btn variant="ghost" onClick={applySuggestion} style={{ width: '100%', fontSize: 13, padding: '11px 14px' }}>
+            Use AI's suggestion
+          </Btn>
+        )}
+        <Btn onClick={() => onComplete({ correct: true, mnemonic: text })} style={{ width: '100%', padding: '12px 16px' }}>
+          Continue →
+        </Btn>
       </div>
+    )
+  }
+
+  return (
+    <ExerciseBody footer={footer}>
+      <ExerciseHeader title="Memory Hook" subtitle="Build a mnemonic you'll see next time" />
+      {isUsableDefinition(word.definition, word.word) && (
+        <div style={{
+          background: `linear-gradient(135deg, ${C.violet}12, rgba(0,0,0,0.03))`,
+          border: `1px solid ${C.violet}25`, borderRadius: 12,
+          padding: '10px 12px', marginTop: 10, marginBottom: 10,
+          color: C.gold, fontSize: 13.5, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.45,
+        }}>
+          {word.definition}
+        </div>
+      )}
       {!saved ? (
-        <>
-          <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} placeholder="An image, sound, or mini-story that makes it stick…" rows={2} style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.violet}44`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.display, outline: 'none', resize: 'none', marginBottom: 10, lineHeight: 1.5 }} />
-          <Btn onClick={() => void save()} disabled={text.trim().length < 10} style={{ width: '100%', background: C.violet, color: '#ffffff' }}>Save & check with AI</Btn>
-        </>
+        <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} placeholder="An image, sound, or mini-story that makes it stick…" rows={3} style={{ width: '100%', boxSizing: 'border-box', background: C.cardHi, border: `1px solid ${C.violet}44`, borderRadius: 12, padding: '12px 14px', color: C.text, fontSize: 14, fontFamily: FONT.display, outline: 'none', resize: 'vertical', maxHeight: 140, marginBottom: 4, lineHeight: 1.5 }} />
       ) : (
         <>
-          <div style={{ padding: '12px 14px', background: `${C.violet}18`, border: `1px solid ${C.violet}55`, borderRadius: 12, marginBottom: 12 }}>
+          <div style={{ padding: '12px 14px', background: `${C.violet}18`, border: `1px solid ${C.violet}55`, borderRadius: 12, marginBottom: 10 }}>
             <div style={{ color: C.violet, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>Your memory hook</div>
             <div style={{ color: C.text, fontSize: 14, fontFamily: FONT.display, fontStyle: 'italic', lineHeight: 1.5 }}>"{text}"</div>
           </div>
           {checking && <AICheckingBadge />}
           {!checking && check && <AIVerdictCard check={check} />}
           {!checking && error && (
-            <div style={{ padding: '10px 14px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 12, color: C.amber, fontSize: 12.5 }}>
+            <div style={{ padding: '10px 12px', background: `${C.amber}14`, border: `1px solid ${C.amber}40`, borderRadius: 12, marginBottom: 4, color: C.amber, fontSize: 12.5 }}>
               {error} Saving your hook anyway.
             </div>
           )}
-          {!checking && check?.suggestion && (
-            <Btn variant="ghost" onClick={applySuggestion} style={{ width: '100%', marginBottom: 8, fontSize: 13, padding: '11px 14px' }}>
-              Use AI's suggestion
-            </Btn>
-          )}
-          <Btn onClick={() => onComplete({ correct: true, mnemonic: text })} disabled={checking} style={{ width: '100%' }}>Continue →</Btn>
         </>
       )}
-    </div>
+    </ExerciseBody>
   )
 }
 
@@ -1956,6 +2245,7 @@ function PracticeScreen({
   sessionLabel?: string
 }) {
   const [xpAnim, setXpAnim] = useState<string | null>(null)
+  const frameHeight = usePracticeFrameHeight()
   const progress = (stepIndex + 0.15) / Math.max(1, totalSteps)
 
   function handleComplete(payload: StepCompletePayload) {
@@ -1967,30 +2257,37 @@ function PracticeScreen({
     onComplete(payload)
   }
 
-  // Listening must NOT show the headword (that spoils the exercise).
-  // MCQ is compact so answer feedback stays on-screen.
+  // Listening + listen-and-type must NOT show the headword (that spoils the exercise).
+  // Write/production exercises are tall after AI feedback — use compact hero + scroll body.
   const isListening = step.exercise === 'listening'
+  const isDictation = step.exercise === 'reverse-recall'
   const compactHero = step.exercise === 'mcq'
+    || step.exercise === 'write-sentence'
+    || step.exercise === 'write-definition'
+    || step.exercise === 'mnemonic'
 
   return (
     <div
+      className="studio-practice-frame"
       style={{
         display: 'flex',
         flexDirection: 'column',
-        // Fit practice into the viewport; avoid page-level scroll for results.
-        minHeight: 'calc(100svh - 48px)',
-        maxHeight: 'calc(100svh - 24px)',
+        // visualViewport-based height so browser zoom (70–100%) keeps Continue in view
+        height: frameHeight,
+        maxHeight: frameHeight,
+        minHeight: 0,
         opacity: busy ? 0.72 : 1,
         pointerEvents: busy ? 'none' : 'auto',
+        boxSizing: 'border-box',
       }}
     >
-      {/* Session progress — sticky top */}
-      <div style={{ marginBottom: 12, flexShrink: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+      {/* Session progress — sticky top (compact so tall cards fit under zoom) */}
+      <div style={{ marginBottom: 8, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
           <span style={{
-            fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+            fontSize: 10.5, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
             color: C.blue, background: `${C.blue}12`, border: `1px solid ${C.blue}28`,
-            padding: '4px 9px', borderRadius: 99,
+            padding: '3px 8px', borderRadius: 99,
           }}>
             {EXERCISE_LABEL[step.exercise] ?? step.exercise}
           </span>
@@ -2006,7 +2303,7 @@ function PracticeScreen({
             </span>
           </div>
         </div>
-        <ProgressBar progress={progress} color={C.blue} height={5} />
+        <ProgressBar progress={progress} color={C.blue} height={4} />
       </div>
 
       {/* Word hero */}
@@ -2021,42 +2318,47 @@ function PracticeScreen({
           <div style={{ fontSize: 15, fontWeight: 600, color: C.mutedHi }}>Listen carefully</div>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Pick the meaning — the word is hidden</div>
         </div>
-      ) : compactHero ? (
+      ) : isDictation ? (
         <div style={{ textAlign: 'center', paddingBottom: 10, flexShrink: 0 }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: C.mutedHi }}>Listen & type</div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Spelling is hidden — use the play button</div>
+        </div>
+      ) : compactHero ? (
+        <div style={{ textAlign: 'center', paddingBottom: 6, flexShrink: 0 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
             <h2 style={{
-              fontSize: 28, fontWeight: 700, fontFamily: FONT.display, color: C.text,
+              fontSize: 24, fontWeight: 700, fontFamily: FONT.display, color: C.text,
               letterSpacing: '-0.02em', lineHeight: 1.1, margin: 0,
             }}>
               {step.word.word}
             </h2>
-            <AudioBtn text={step.word.word} size={32} />
+            <AudioBtn text={step.word.word} size={28} />
           </div>
           {step.word.phonetic && (
-            <div style={{ fontSize: 12, color: C.muted, fontFamily: FONT.mono, marginTop: 4 }}>{step.word.phonetic}</div>
+            <div style={{ fontSize: 11, color: C.muted, fontFamily: FONT.mono, marginTop: 2 }}>{step.word.phonetic}</div>
           )}
         </div>
       ) : (
-        <div style={{ textAlign: 'center', paddingBottom: 14, flexShrink: 0 }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 12, marginBottom: 4 }}>
-            <h2 style={{ fontSize: 32, fontWeight: 700, fontFamily: FONT.display, color: C.text, letterSpacing: '-0.02em', lineHeight: 1, margin: 0 }}>
+        <div style={{ textAlign: 'center', paddingBottom: 10, flexShrink: 0 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10, marginBottom: 2 }}>
+            <h2 style={{ fontSize: 28, fontWeight: 700, fontFamily: FONT.display, color: C.text, letterSpacing: '-0.02em', lineHeight: 1, margin: 0 }}>
               {step.word.word}
             </h2>
-            <AudioBtn text={step.word.word} size={34} />
+            <AudioBtn text={step.word.word} size={30} />
           </div>
           {step.word.phonetic && (
-            <div style={{ fontSize: 12, color: C.muted, fontFamily: FONT.mono, marginBottom: 2 }}>{step.word.phonetic}</div>
+            <div style={{ fontSize: 11, color: C.muted, fontFamily: FONT.mono, marginBottom: 2 }}>{step.word.phonetic}</div>
           )}
-          <div style={{ fontSize: 12, color: C.muted, fontStyle: 'italic' }}>from <em>{step.word.book}</em></div>
+          <div style={{ fontSize: 11, color: C.muted, fontStyle: 'italic' }}>from <em>{step.word.book}</em></div>
         </div>
       )}
 
-      {/* Exercise card — fills remaining viewport height */}
+      {/* Exercise card — fills remaining height; body scrolls, actions stay pinned */}
       <div
         key={step.id}
-        className="studio-card"
+        className="studio-card studio-practice-card"
         style={{
-          padding: '16px 16px 14px',
+          padding: '12px 12px 8px',
           animation: 'studioSlideIn 0.28s cubic-bezier(0.22,1,0.36,1)',
           flex: '1 1 auto',
           minHeight: 0,
@@ -2075,7 +2377,7 @@ function PracticeScreen({
         {step.exercise === 'mnemonic' && <ExerciseMnemonic word={step.word} onComplete={handleComplete} />}
       </div>
 
-      {busy && <div style={{ color: C.muted, fontSize: 12, textAlign: 'center', marginTop: 8, flexShrink: 0 }}>Saving progress…</div>}
+      {busy && <div style={{ color: C.muted, fontSize: 12, textAlign: 'center', marginTop: 6, flexShrink: 0 }}>Saving progress…</div>}
     </div>
   )
 }
@@ -2262,7 +2564,6 @@ export function StudioRoute() {
   const [submitting, setSubmitting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
   const [sessionMode, setSessionMode] = useState<SessionMode>('quick')
-  const [missedWordIds, setMissedWordIds] = useState<string[]>([])
   const [sessionXp, setSessionXp] = useState(0)
   const stepStartedAt = useRef(Date.now())
   const sessionResultsRef = useRef<PracticeResult[]>([])
@@ -2358,55 +2659,121 @@ export function StudioRoute() {
         return
       }
 
-      // Enrich weak definitions (headword-as-answer, single tokens, placeholders).
-      const needsEnrichment = words.some((w) => !isUsableDefinition(w.definition, w.word))
+      // Always sanitize: each word gets its own ranked definition; kill shared fake
+      // "In the story, the idea of…" templates so cloze never sees them.
+      const needsEnrichment = words.some((w) => (
+        shouldRefreshDefinition(w.definition, w.word)
+        || !isUsableDefinition(w.definition, w.word)
+        || isFabricatedContextSentence(w.sentence, w.word, w.definition)
+        || (Boolean(w.sentence) && !isRealBookSentence(w.sentence, w.word, w.definition))
+      ))
       if (needsEnrichment) {
         setEnrichProgress({ done: 0, total: words.length })
-        const contextById = new Map<string, CardContext>()
+        const enrichedById = new Map<string, { definition: string; sentence: string; phonetic: string | null }>()
         let done = 0
         await Promise.all(
           words.map(async (w) => {
-            if (isUsableDefinition(w.definition, w.word)) {
-              done += 1
-              setEnrichProgress({ done, total: words.length })
-              return
-            }
+            const needsDef = shouldRefreshDefinition(w.definition, w.word)
+              || !isUsableDefinition(w.definition, w.word)
+            const sentenceIsFake = Boolean(w.sentence)
+              && !isRealBookSentence(w.sentence, w.word, w.definition)
             try {
-              const ctx = await fetchCardContext(w.id)
-              if (ctx.definition && isUsableDefinition(ctx.definition, w.word)) {
-                contextById.set(w.id, ctx)
+              // Real book line only (never the shared template).
+              let bookContext = isRealBookSentence(w.sentence, w.word, w.definition)
+                ? w.sentence
+                : ''
+              if (!bookContext) {
+                try {
+                  const ctx = await fetchCardContext(w.id)
+                  if (isRealBookSentence(ctx.contextParagraph, w.word, ctx.definition)) {
+                    bookContext = ctx.contextParagraph
+                  }
+                } catch { /* optional */ }
               }
+
+              let nextDef = w.definition
+              let nextPhonetic = w.phonetic
+              let dictExample: string | null = null
+
+              // Look up THIS word only (never reuse another card's gloss).
+              if (needsDef) {
+                const hit = await lookupWordDefinition(w.word, { context: bookContext || null })
+                if (hit && isUsableDefinition(hit.definition, w.word)) {
+                  nextDef = formatStudyDefinition(hit.definition, hit.partOfSpeech)
+                  nextPhonetic = hit.pronunciation ?? nextPhonetic
+                  dictExample = hit.example
+                }
+              }
+
+              // Prefer real book context; else a dictionary example that contains the word;
+              // else empty (cloze will not be scheduled without a real sentence).
+              let nextSentence = bookContext
+              if (!nextSentence && dictExample && isRealBookSentence(dictExample, w.word, nextDef)) {
+                nextSentence = dictExample
+              }
+              if (sentenceIsFake && !nextSentence) nextSentence = ''
+
+              // Persist per-word fix. Use '' (not null) so COALESCE overwrites the old template.
+              if (deck?.id && (needsDef || sentenceIsFake)) {
+                void api.post(`/api/vocabulary/decks/${deck.id}/notes`, {
+                  noteType: 'basic',
+                  front: w.word,
+                  back: nextDef || w.definition || w.word,
+                  extra: nextPhonetic,
+                  // Empty string clears fabricated example_sentence in D1.
+                  exampleSentence: nextSentence || '',
+                  topic: w.book || 'Reading',
+                  metadata: {
+                    dictionarySource: 'ranked-per-word',
+                    rankedDefinition: true,
+                    clearedFabricatedContext: sentenceIsFake,
+                  },
+                }).catch(() => { /* non-blocking */ })
+              }
+
+              enrichedById.set(w.id, {
+                definition: nextDef,
+                sentence: nextSentence,
+                phonetic: nextPhonetic,
+              })
             } catch (err) {
-              console.warn('Context fetch failed for', w.word, err)
+              console.warn('Definition enrich failed for', w.word, err)
+              // Still strip fabricated sentence from the live session even if lookup fails.
+              if (sentenceIsFake) {
+                enrichedById.set(w.id, {
+                  definition: w.definition,
+                  sentence: '',
+                  phonetic: w.phonetic,
+                })
+              }
             } finally {
               done += 1
               setEnrichProgress({ done, total: words.length })
             }
           }),
         )
-        if (contextById.size > 0) {
+        if (enrichedById.size > 0) {
           words = words.map((w) => {
-            const ctx = contextById.get(w.id)
-            if (!ctx) return w
-            const hadRealSentence = Boolean(
-              w.sentence
-              && w.sentence.toLowerCase() !== w.word.toLowerCase()
-              && !w.sentence.toLowerCase().startsWith('as you read'),
-            )
-            const newSentence = hadRealSentence
-              ? w.sentence
-              : (ctx.contextParagraph || w.sentence)
+            const hit = enrichedById.get(w.id)
+            if (!hit) return w
             return {
               ...w,
-              definition: isUsableDefinition(w.definition, w.word) ? w.definition : ctx.definition,
-              sentence: newSentence,
-              phonetic: ctx.pronunciation ?? w.phonetic,
+              definition: hit.definition || w.definition,
+              sentence: hit.sentence,
+              phonetic: hit.phonetic ?? w.phonetic,
               card: { ...w.card, productionTarget: w.word },
             }
           })
         }
         setEnrichProgress(null)
       }
+
+      // Hard filter: no practice step may carry a fabricated template.
+      words = words.map((w) => (
+        isRealBookSentence(w.sentence, w.word, w.definition)
+          ? w
+          : { ...w, sentence: '' }
+      ))
 
       const plan = buildSessionPlan(words)
       if (plan.length === 0) {
@@ -2592,14 +2959,14 @@ export function StudioRoute() {
     }
   }, [appendedRemedials, persistMnemonic, queryClient, ratedCardIds, results, sessionPlan, stepIndex, submitting])
 
-  // Keep missed-word list in sync with the finished session log.
-  useEffect(() => {
-    if (screen !== 'results' || results.length === 0) return
-    const missed = aggregateSessionResults(results)
+  // Derive missed list from results (no setState-in-effect).
+  const missedWordIds = useMemo(() => {
+    const log = results.length > 0 ? results : sessionResultsRef.current
+    if (log.length === 0) return [] as string[]
+    return aggregateSessionResults(log)
       .filter((w) => w.needsRepeat)
       .map((w) => w.wordId || w.word)
-    setMissedWordIds(missed)
-  }, [screen, results])
+  }, [results])
 
   function resetSessionLocalState() {
     sessionResultsRef.current = []
@@ -2666,15 +3033,16 @@ export function StudioRoute() {
     <div
       style={{
         background: GRAD,
-        minHeight: '100svh',
-        // During practice, lock page scroll so answer feedback stays in focus.
-        height: screen === 'practice' ? '100svh' : undefined,
+        minHeight: screen === 'practice' ? undefined : '100%',
+        // Practice fills the parent main pane; no 100svh (that double-counts shell chrome / zoom).
+        height: screen === 'practice' ? '100%' : undefined,
         overflow: screen === 'practice' ? 'hidden' : undefined,
         color: C.text,
         fontFamily: FONT.ui,
         display: 'flex',
         justifyContent: 'center',
         padding: screen === 'practice' ? 0 : '0 0 40px',
+        boxSizing: 'border-box',
       }}
     >
       <style>{`
@@ -2685,15 +3053,21 @@ export function StudioRoute() {
         .studio-scope input::placeholder, .studio-scope textarea::placeholder { color: ${C.muted}; opacity: 1; }
         .studio-scope input:focus, .studio-scope textarea:focus { border-color: ${C.gold} !important; outline: none; box-shadow: 0 0 0 3px ${C.gold}28; }
         .studio-card { background: #fff; border-radius: 20px; box-shadow: ${CARD_SHADOW}; }
+        .studio-practice-card > * { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; }
       `}</style>
       <div
         className="studio-scope"
         style={{
           width: '100%',
           maxWidth: 560,
-          // Practice mode: less bottom padding so the card can use the full viewport.
-          padding: screen === 'practice' ? '12px 16px 16px' : '20px 16px 80px',
+          // Practice mode: tight padding; height comes from visualViewport measure.
+          padding: screen === 'practice' ? '10px 14px 8px' : '20px 16px 80px',
           boxSizing: 'border-box',
+          height: screen === 'practice' ? '100%' : undefined,
+          minHeight: 0,
+          display: screen === 'practice' ? 'flex' : undefined,
+          flexDirection: screen === 'practice' ? 'column' : undefined,
+          overflow: screen === 'practice' ? 'hidden' : undefined,
         }}
       >
         {(screen === 'dashboard' || screen === 'results') && activeDeck && (

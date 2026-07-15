@@ -201,7 +201,7 @@ export function AppShell() {
           <BrandLogo />
         </header>
 
-        <main className="flex-1 overflow-y-auto overscroll-y-contain">
+        <main className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain">
           <Outlet />
         </main>
 

@@ -109,25 +109,24 @@ export function AudioPreviewPanel({
   const [draftProvider, setDraftProvider] = useState(initialProvider)
   const [draftVoice, setDraftVoice] = useState<string | null>(voice)
 
-  // If parent prefs still pointed at a removed provider (browser), snap to Kokoro/Gemini.
+  // If parent prefs still pointed at a removed provider (browser), resolve to Kokoro/Gemini
+  // without setState-in-effect (eslint react-hooks/set-state-in-effect).
   const draftProviderKnown = providerOptions.some((p) => p.id === draftProvider)
-  useEffect(() => {
-    if (draftProviderKnown) return
-    const next = providerOptions.find((p) => p.recommended)?.id
+  const resolvedDraftProvider = draftProviderKnown
+    ? draftProvider
+    : (providerOptions.find((p) => p.recommended)?.id
       ?? providerOptions[0]?.id
-      ?? 'kokoro'
-    const nextProvider = providerOptions.find((p) => p.id === next)
-    setDraftProvider(next)
-    setDraftVoice(defaultVoiceForProvider(nextProvider))
-  }, [draftProviderKnown, providerOptions])
-
-  const activeProvider = providerOptions.find(p => p.id === draftProvider)
+      ?? 'kokoro')
+  const activeProvider = providerOptions.find(p => p.id === resolvedDraftProvider)
   const providerVoices = activeProvider?.voices ?? []
   const selectedProviderUnavailable = Boolean(providersRes?.providers?.length && (!activeProvider || !activeProvider.available))
-  const draftVoiceIsAvailable = Boolean(draftVoice && providerVoices.some((item) => item.id === draftVoice))
-  const selectedVoiceId = draftVoiceIsAvailable ? draftVoice : defaultVoiceForProvider(activeProvider)
+  const draftVoiceMatchesProvider = Boolean(draftVoice && providerVoices.some((item) => item.id === draftVoice))
+  // When we silently remapped the provider, use that provider's default voice until the user picks one.
+  const selectedVoiceId = draftProviderKnown && draftVoiceMatchesProvider
+    ? draftVoice
+    : defaultVoiceForProvider(activeProvider)
   const selectedVoiceIndex = providerVoices.findIndex((item) => item.id === selectedVoiceId)
-  const appliedVoice = committedVoiceForDraft(draftProvider, selectedVoiceId)
+  const appliedVoice = committedVoiceForDraft(resolvedDraftProvider, selectedVoiceId)
   const committedProviderInfo = providerOptions.find(p => p.id === provider)
   const committedVoiceLabel = committedProviderInfo
     ?.voices.find((item) => item.id === voice)
@@ -135,24 +134,24 @@ export function AudioPreviewPanel({
   const hasDraftChanges = audioPreferenceDraftChanged({
     committedProvider: provider,
     committedVoice: voice,
-    draftProvider,
+    draftProvider: resolvedDraftProvider,
     draftVoice: selectedVoiceId,
   })
 
   function applyDraftSelection() {
     if (selectedProviderUnavailable) {
-      const message = `${activeProvider?.label ?? draftProvider} is not configured yet. Choose an available provider.`
+      const message = `${activeProvider?.label ?? resolvedDraftProvider} is not configured yet. Choose an available provider.`
       setErrorMsg(message)
       onError?.(message)
       return
     }
     stopPlayback()
     setErrorMsg(null)
-    onSelectionChange({ provider: draftProvider, voice: appliedVoice })
-    onCommitVoice?.({ provider: draftProvider, voice: appliedVoice })
+    onSelectionChange({ provider: resolvedDraftProvider, voice: appliedVoice })
+    onCommitVoice?.({ provider: resolvedDraftProvider, voice: appliedVoice })
     queuePerformanceTelemetry({
       eventName: 'tts.voice_apply',
-      provider: draftProvider,
+      provider: resolvedDraftProvider,
       metadata: {
         previousProvider: provider,
         previousVoice: voice ?? '',
@@ -177,12 +176,12 @@ export function AudioPreviewPanel({
     updateChunk(idx, { status: 'fetching' })
     const fetchPromise = (async () => {
       try {
-        const { lengthScale, sentenceSilence } = pacingFor(draftProvider)
+        const { lengthScale, sentenceSilence } = pacingFor(resolvedDraftProvider)
         const previewLengthScale = Math.max(0.6, Math.min(lengthScale * rateRef.current, 1.5))
         const preview = await request<ProviderTestResult>('/api/providers/test', {
           method: 'POST',
           body: JSON.stringify({
-            provider: draftProvider,
+            provider: resolvedDraftProvider,
             voice: selectedVoiceId,
             model: null,
             narration_style: '',
@@ -220,7 +219,7 @@ export function AudioPreviewPanel({
 
   function prefetchAhead(fromIdx: number, currentChunks: AudioChunk[], signal: AbortSignal) {
     if (signal.aborted) return
-    const target = PREFETCH_AHEAD_TARGET[draftProvider] ?? DEFAULT_PREFETCH_AHEAD
+    const target = PREFETCH_AHEAD_TARGET[resolvedDraftProvider] ?? DEFAULT_PREFETCH_AHEAD
     for (let offset = 1; offset <= target; offset += 1) {
       const idx = fromIdx + offset
       const chunk = currentChunks[idx]
@@ -325,7 +324,7 @@ export function AudioPreviewPanel({
     setErrorMsg(null)
 
     if (selectedProviderUnavailable) {
-      const message = `${activeProvider?.label ?? draftProvider} is not configured yet. Choose an available provider.`
+      const message = `${activeProvider?.label ?? resolvedDraftProvider} is not configured yet. Choose an available provider.`
       setErrorMsg(message)
       onError?.(message)
       return
@@ -396,7 +395,7 @@ export function AudioPreviewPanel({
 
   const bufferLabel = (() => {
     if (!isBuffering) return null
-    if (draftProvider === 'neutts_local' || draftProvider === 'kokoro') return 'Generating sample…'
+    if (resolvedDraftProvider === 'neutts_local' || resolvedDraftProvider === 'kokoro') return 'Generating sample…'
     return 'Loading preview…'
   })()
 
@@ -409,7 +408,7 @@ export function AudioPreviewPanel({
     setDraftVoice(providerVoices[nextIndex].id)
     queuePerformanceTelemetry({
       eventName: 'tts.voice_draft_changed',
-      provider: draftProvider,
+      provider: resolvedDraftProvider,
       metadata: {
         source: direction > 0 ? 'next' : 'previous',
         voice: providerVoices[nextIndex].id,
@@ -421,7 +420,7 @@ export function AudioPreviewPanel({
     <div className="px-3.5 pt-2.5 space-y-3" style={{ color: colors.text, paddingBottom: 16 }}>
       <div>
         <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Provider</p>
-        <Select value={draftProvider} onValueChange={(v) => {
+        <Select value={resolvedDraftProvider} onValueChange={(v) => {
           if (v == null) return
           stopPlayback()
           setErrorMsg(null)
@@ -460,7 +459,7 @@ export function AudioPreviewPanel({
               setDraftVoice(v)
               queuePerformanceTelemetry({
                 eventName: 'tts.voice_draft_changed',
-                provider: draftProvider,
+                provider: resolvedDraftProvider,
                 metadata: {
                   source: 'voice_select',
                   voice: v,

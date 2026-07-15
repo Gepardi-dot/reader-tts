@@ -1891,7 +1891,8 @@ async function createVocabularyNote(request: Request, env: Env, user: User, deck
              extra = COALESCE(?, extra),
              hint = COALESCE(?, hint),
              explanation = COALESCE(?, explanation),
-             example_sentence = COALESCE(?, example_sentence),
+             // Allow clearing fabricated templates with '' (COALESCE would keep the old junk if null).
+             example_sentence = CASE WHEN ? IS NOT NULL THEN ? ELSE example_sentence END,
              topic = COALESCE(?, topic),
              source_book_id = COALESCE(?, source_book_id),
              source_book_title = COALESCE(?, source_book_title),
@@ -1903,6 +1904,7 @@ async function createVocabularyNote(request: Request, env: Env, user: User, deck
         extra,
         hint,
         explanation,
+        exampleSentence,
         exampleSentence,
         topic,
         sourceBook?.id ?? null,

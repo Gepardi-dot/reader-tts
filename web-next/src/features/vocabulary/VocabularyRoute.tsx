@@ -3,7 +3,13 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Layers, LayoutGrid, AlignLeft, ChevronDown, ChevronUp } from 'lucide-react'
 import { api } from '@/shared/api/client'
-import { lookupWordDefinition } from '@/shared/storage/dictionaryLookup'
+import {
+  formatStudyDefinition,
+  isFabricatedContextSentence,
+  isRealBookSentence,
+  lookupWordDefinition,
+  shouldRefreshDefinition,
+} from '@/shared/storage/dictionaryLookup'
 import { isUsableDefinition } from '@/features/studio/vocabUtils'
 
 type CardState = 'new' | 'learning' | 'review' | 'relearning'
@@ -32,10 +38,16 @@ interface VocabNote {
   back: string | null
   extra: string | null
   explanation: string | null
+  exampleSentence?: string | null
   topic: string | null
   sourceBookId: string | null
   sourceBookTitle: string | null
-  metadata: { dictionarySource?: string | null } | null
+  metadata: {
+    dictionarySource?: string | null
+    context?: string | null
+    rankedDefinition?: boolean
+    partOfSpeech?: string | null
+  } | null
   cards: VocabNoteCard[]
 }
 
@@ -307,7 +319,7 @@ export function VocabularyRoute() {
     enabled: Boolean(deck?.id),
   })
 
-  // Backfill missing / unusable definitions so cards are Practice-ready.
+  // Backfill missing / unusable / niche-technical definitions so cards are Practice-ready.
   const attemptedBackfillRef = useRef(new Set<string>())
   const [lookingUpIds, setLookingUpIds] = useState<Set<string>>(() => new Set())
 
@@ -315,8 +327,9 @@ export function VocabularyRoute() {
     if (!dashboard?.notes || !deck?.id) return
     const stale = dashboard.notes.filter((n) => {
       if (attemptedBackfillRef.current.has(n.id)) return false
-      return !isUsableDefinition(n.back, n.front)
-        && !isUsableDefinition(n.explanation, n.front)
+      const current = n.back || n.explanation
+      const fakeSentence = isFabricatedContextSentence(n.exampleSentence, n.front, current)
+      return shouldRefreshDefinition(current, n.front) || fakeSentence
     })
     if (stale.length === 0) return
 
@@ -333,20 +346,51 @@ export function VocabularyRoute() {
         if (cancelled) return
         attemptedBackfillRef.current.add(note.id)
         try {
-          const hit = await lookupWordDefinition(note.front)
-          if (!hit || !isUsableDefinition(hit.definition, note.front)) continue
+          const metaContext = typeof note.metadata?.context === 'string' ? note.metadata.context : null
+          const rawContext = note.exampleSentence || metaContext
+          const context = rawContext
+            && isRealBookSentence(rawContext, note.front, note.back || note.explanation)
+            ? rawContext
+            : (metaContext && isRealBookSentence(metaContext, note.front, note.back || note.explanation)
+              ? metaContext
+              : null)
+
+          const hit = await lookupWordDefinition(note.front, { context })
+          if (!hit || !isUsableDefinition(hit.definition, note.front)) {
+            // Still clear a fabricated sentence even if lookup fails.
+            if (isFabricatedContextSentence(note.exampleSentence, note.front, note.back)) {
+              await api.post(`/api/vocabulary/decks/${deck.id}/notes`, {
+                noteType: 'basic',
+                front: note.front,
+                back: note.back,
+                exampleSentence: '',
+                metadata: { ...(note.metadata ?? {}), clearedFabricatedContext: true },
+              }).catch(() => {})
+            }
+            continue
+          }
+          if (shouldRefreshDefinition(hit.definition, note.front)) continue
+
+          const definition = formatStudyDefinition(hit.definition, hit.partOfSpeech)
+          // Prefer real book context; never re-save the shared template.
+          const nextSentence = context
+            || (hit.example && isRealBookSentence(hit.example, note.front, definition) ? hit.example : '')
+            || ''
 
           await api.post(`/api/vocabulary/decks/${deck.id}/notes`, {
             noteType: 'basic',
             front: note.front,
-            back: hit.definition,
+            back: definition,
             extra: hit.pronunciation ?? note.extra,
-            exampleSentence: hit.example,
+            exampleSentence: nextSentence,
             topic: note.topic ?? 'Reading',
             metadata: {
               ...(note.metadata ?? {}),
-              dictionarySource: hit.source === 'online' ? 'free-dictionary' : 'local-seed',
+              dictionarySource: hit.source === 'online' ? 'free-dictionary-ranked' : 'local-seed-ranked',
+              rankedDefinition: true,
+              partOfSpeech: hit.partOfSpeech,
               bookId: note.sourceBookId,
+              clearedFabricatedContext: true,
             },
           })
 
@@ -359,11 +403,15 @@ export function VocabularyRoute() {
                 n.id === note.id
                   ? {
                       ...n,
-                      back: hit.definition,
+                      back: definition,
                       extra: hit.pronunciation ?? n.extra,
+                      exampleSentence: nextSentence || null,
                       metadata: {
                         ...(n.metadata ?? {}),
-                        dictionarySource: hit.source === 'online' ? 'free-dictionary' : 'local-seed',
+                        dictionarySource: hit.source === 'online' ? 'free-dictionary-ranked' : 'local-seed-ranked',
+                        rankedDefinition: true,
+                        partOfSpeech: hit.partOfSpeech,
+                        clearedFabricatedContext: true,
                       },
                     }
                   : n

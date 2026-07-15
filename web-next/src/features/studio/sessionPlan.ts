@@ -3,6 +3,7 @@
 // anti-patterns (don't-start-hardest, don't-end-on-failure), adaptive re-queueing.
 
 import { DEFINITION_DISTRACTOR_BANK, isUsableDefinition } from './vocabUtils'
+import { isRealBookSentence } from '@/shared/storage/dictionaryLookup'
 
 export type CardStage = 'new' | 'learning' | 'review' | 'relearning'
 
@@ -211,12 +212,8 @@ export function buildSmartSessionPlan<W extends PlanInputWord & {
     const def = (word as { definition?: string }).definition ?? ''
     const sentence = (word as { sentence?: string }).sentence ?? ''
     const hasUsableDefinition = isUsableDefinition(def, head)
-    const hasBookSentence = Boolean(
-      sentence
-      && sentence.length > 12
-      && !/^as you read/i.test(sentence)
-      && (!head || new RegExp(`\\b${head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(sentence)),
-    )
+    // Only real passages count — never the old "In the story, the idea of…" template.
+    const hasBookSentence = isRealBookSentence(sentence, head, def)
     const exercise = pickExerciseForWordContent(
       word.stage,
       available,

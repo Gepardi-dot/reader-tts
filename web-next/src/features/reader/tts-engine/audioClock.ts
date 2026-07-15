@@ -454,7 +454,6 @@ export class AudioClock {
     this.handlers = handlers
     this.expectMore = expectMore
     this.active = remaining.length > 0
-    this.paused = this.paused
 
     for (const item of remaining) {
       this.append(item.buffer, {
