@@ -2767,12 +2767,10 @@ export function ReaderRoute() {
     const state = buildStateFromRange(word.range, 'word', word.text)
     if (!state) return
 
+    // Show selection menu only — TTS starts from the Play action, not on tap.
     setSelection(state)
-    if (effectiveTtsProvider === BROWSER_TTS_PROVIDER_ID || effectiveTtsProvider === 'kokoro' || effectiveTtsProvider === 'google') {
-      void playWord(state.text, state.startOffset)
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection, payload?.text, scrollPct, effectiveTtsProvider])
+  }, [selection, payload?.text, scrollPct])
 
   // ── Mobile drag-to-select ─────────────────────────────────────────────────
   // Touch a word and slide your finger across the sentence to grow the
