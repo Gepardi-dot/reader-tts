@@ -10,14 +10,16 @@ export interface AudioTextChunk {
 
 // Streaming-style playback: keep the first request small so audio can start quickly,
 // then synthesize larger follow-up chunks while the first chunk is playing.
+// Keep first units short so Kokoro can stream first-sentence PCM quickly and
+// Gemini can return a small cold chunk. Follow-up chunks are larger for throughput.
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
-  google: 160,
-  kokoro: 65,
+  google: 140,
+  kokoro: 48,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {
-  google: 320,
-  kokoro: 160,
+  google: 280,
+  kokoro: 120,
 }
 
 export const DEFAULT_FIRST_AUDIO_CHARS = 180
@@ -43,7 +45,7 @@ export const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
 export const PREFETCH_AHEAD_TARGET: Record<string, number> = {
   google: 1,
-  kokoro: 3,
+  kokoro: 4,
 }
 
 export const DEFAULT_PREFETCH_AHEAD = 2

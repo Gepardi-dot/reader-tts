@@ -55,13 +55,13 @@ New element at `z-[6x]` or higher: add it to this table AND verify against sheet
 
 If a user reports a quality problem, suspect the implementation before defending it. Each item below is a choice that was made, not a law of nature.
 
-- **Gapless playback uses Web Audio API at 1.0× only.** `ctx.createBufferSource` scheduled at `max(now+0.002, lastScheduledEnd)`. Non-1.0 rates fall back to `HTMLAudioElement` (preservesPitch=true) — slight chunk-boundary gap, no pitch distortion. The single-shot synth path requires the full WAV in memory before playback starts; sentence-level chunks are produced by the worker (`synthesizeLocalStreaming`) but not yet plumbed into the Web Audio scheduler.
-- **On-device Kokoro is the primary fast path.** Worker downloads `onnx-community/Kokoro-82M-v1.0-ONNX` (q8, ~82 MB) on app boot via `startWarmup()` in `main.tsx`. Service worker caches the bytes in `kokoro-model-v1` Cache Storage; `navigator.storage.persist()` is requested up-front. After model load, the worker runs a dummy `generate('a')` to compile WASM kernels — only then does it post `'ready'`. WASM threading is on when `crossOriginIsolated === true` (COOP/COEP headers).
-- **Per-page synthesis (remote path).** Each request synthesizes one page worth of chunks. Page boundaries come from `paginateReaderText()` upstream of TTS.
-- **Presynth marker is single-provider.** `.presynth-done.json` records ONE provider+voice (whichever finishes last). Voice switch → entire book re-warms.
-- **kokoro-onnx returns complete WAVs.** Streaming would require the Kokoro server (`scripts/kokoro_server.py`) to switch to chunked-transfer-encoding.
-- **SHA-1 cache key over 10 fields.** Any one field changing → cache miss → cold synth.
-- **Live audio providers:** on-device `kokoro` (default, in-browser via kokoro-js + ONNX Runtime Web) plus remote fallbacks `google` (Gemini Flash TTS) and remote `kokoro` (via Fly.io, not yet deployed).
+- **TTS v3 runtime** (`tts-engine/ttsRuntime.ts`): imperative producer/consumer. React only observes snapshots. See `docs/tts-v3-runtime.md`.
+- **AudioClock** appends WebAudio buffers end-to-end; underruns wait for the producer instead of stop/restarting the graph.
+- **Kokoro streams sentence PCM** via `synthesizeLocalStreaming` → `pcmToAudioBuffer` → clock.append as each frame arrives (first-audio no longer waits for full WAV). Full WAV still cached to IndexedDB on complete.
+- **Gemini** loads full live-audio chunks (edge/R2 cache) and appends when decoded; cold miss shows buffering, never silent browser-speech mask.
+- **Browser speech** is a selected provider only (`browser`), not a hidden fallback for native voices.
+- **On-device Kokoro model path** unchanged: worker + `kokoro-model-v1` SW cache + COOP/COEP for WASM threads.
+- **Chunk sizes** (approx): Kokoro first ~48 / follow ~120; Gemini first ~140 / follow ~280; Kokoro prefetch ahead ~4, Gemini ~1.
 
 ---
 
@@ -71,12 +71,11 @@ These are *not* "things to work around" — they are signals that the architectu
 
 | Problem | Likely better path |
 |---------|-------------------|
-| Web Audio API requires full WAV (single-shot synth) — first-audio latency = full chunk synth time | Use the streaming infrastructure already in `kokoroWorker.ts` (`pipeline.stream()` + `synthesizeLocalStreaming` in `modelCache.ts`) — wire sentence-level PCM chunks directly into the Web Audio scheduler |
+| Gemini cold-start latency on every fresh chunk | Warm first 1–2 chunks on book open / play intent; keep edge+R2 cache hot |
 | Voice switch re-warms whole book (single-provider marker) | Marker keyed per `provider+voice`; warm caches stay warm |
-| Auto-presynth on Vercel never completes (daemon thread death) | Move synth to Fly.io worker; Vercel is wrong host for long-lived work |
-| Gemini cold-start latency on every fresh chunk | Pre-warm on book open; or move default provider to Kokoro (in-browser path now warms on app boot) |
-| `ctx.resume()` gesture unlock fragile on iOS Safari | Replace with persistent unlocked context on first user interaction |
-| Cost-bounded prefetch (`ahead > 6 = expensive`) | Cost shouldn't gate UX; if latency is the complaint, lift the cap and use cheaper provider |
+| `ctx.resume()` gesture unlock fragile on iOS Safari | Persistent unlocked AudioContext on first user gesture |
+| Non-1.0 rate still uses `playbackRate` (pitch shift) | Pitch-preserving path for rate ≠ 1 (HTMLAudio or time-stretch) |
+| Preview panel may still use a separate audio path | Route preview through `TtsRuntime` with a short text range |
 
 If you fix one of these, **delete the corresponding row** and update "Current implementation" to match.
 

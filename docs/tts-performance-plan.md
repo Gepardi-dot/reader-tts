@@ -85,4 +85,5 @@ The reader UI remains the same playbar contract: phase, current chunk, total chu
 - 2026-07-06: Added the product finish plan and started replacing restart-after-drain native playback with an appendable WebAudio scheduler so Kokoro/Gemini chunks can be scheduled as soon as they become ready.
 - 2026-07-06: Extracted TTS session state into a tested runtime object so active session ids, abort controllers, phase/lane, current chunk, and voice-switch restarts share one source of truth.
 - 2026-07-06: Split Kokoro/Gemini chunk loading into a tested native audio source contract, leaving the React hook responsible for orchestration rather than provider fetch/decode/cache details.
-- Next: use `GET /api/telemetry/tts-summary` after real Kokoro/Gemini sessions to tune handoff thresholds, chunk sizes, and read-ahead windows from measured first-audio, native-handoff, quota-backoff, and underrun evidence.
+- 2026-07-15: Shipped TTS v3 runtime — imperative `TtsRuntime` with `AudioClock` (append-only WebAudio), `BufferPool` (producer), and streaming Kokoro PCM into the clock for first-audio. React hook is a thin adapter. See `docs/tts-v3-runtime.md`.
+- Next: exercise real Kokoro/Gemini sessions; use `GET /api/telemetry/tts-summary` to tune chunk sizes and read-ahead from first-audio and `tts.native_underrun_v3` evidence.
