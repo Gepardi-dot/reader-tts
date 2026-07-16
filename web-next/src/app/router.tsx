@@ -1,5 +1,6 @@
 import { createBrowserRouter, Navigate, redirect } from 'react-router-dom'
-import { restoreSession } from '@/lib/auth'
+import { getStoredUser, restoreSession } from '@/lib/auth'
+import { needsVoiceOnboarding } from '@/features/reader/voiceOnboarding'
 
 const hydrateFallbackElement = (
   <div className="flex min-h-[240px] items-center justify-center px-4 text-sm text-muted-foreground">
@@ -19,6 +20,16 @@ async function requireAuth() {
   return null
 }
 
+/** Auth + force Kokoro voice pick before main app (prefetch/cache align to one voice). */
+async function requireAuthWithVoice() {
+  await requireAuth()
+  const user = getStoredUser()
+  if (user && needsVoiceOnboarding(user.id)) {
+    throw redirect('/onboarding/voice')
+  }
+  return null
+}
+
 export const router = createBrowserRouter([
   {
     path: '/login',
@@ -26,9 +37,17 @@ export const router = createBrowserRouter([
     hydrateFallbackElement,
   },
   {
+    path: '/onboarding/voice',
+    lazy: () => import('@/features/auth/VoiceOnboardingRoute').then((mod) => ({
+      Component: mod.VoiceOnboardingRoute,
+    })),
+    loader: requireAuth,
+    hydrateFallbackElement,
+  },
+  {
     path: '/',
     lazy: () => import('./AppShell').then((mod) => ({ Component: mod.AppShell })),
-    loader: requireAuth,
+    loader: requireAuthWithVoice,
     hydrateFallbackElement,
     children: [
       { index: true, element: <Navigate to="/library" replace /> },
@@ -69,11 +88,11 @@ export const router = createBrowserRouter([
       },
     ],
   },
-  // Reader is outside AppShell but still requires auth
+  // Reader is outside AppShell but still requires auth + voice onboarding
   {
     path: '/book/:bookId',
     lazy: () => import('@/features/reader/ReaderRoute').then((mod) => ({ Component: mod.ReaderRoute })),
-    loader: requireAuth,
+    loader: requireAuthWithVoice,
     hydrateFallbackElement,
   },
 ])

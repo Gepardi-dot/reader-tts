@@ -18,6 +18,10 @@ import {
   resolvedVoiceForProvider,
   saveAudioPrefs,
 } from './audioPreferences'
+import { DEFAULT_KOKORO_VOICE, KOKORO_VOICE_CATALOG } from './kokoroVoices'
+import { markVoiceOnboardingComplete } from './voiceOnboarding'
+import { getStoredUser } from '@/lib/auth'
+import { warmHostedKokoro } from '@/features/studio/studioVoice'
 
 interface ProvidersResponse {
   providers: TtsProviderInfo[]
@@ -33,14 +37,26 @@ export function AudioSettingsRoute() {
     queryFn: () => api.get<ProvidersResponse>('/api/providers'),
   })
 
-  const providers = normalizeTtsProviders(res?.providers)
+  const providers = normalizeTtsProviders(res?.providers).map((provider) => {
+    // Ensure Kokoro always exposes the full client catalog when API voices are empty/partial.
+    if (provider.id !== 'kokoro') return provider
+    const byId = new Map(provider.voices.map((v) => [v.id, v]))
+    for (const v of KOKORO_VOICE_CATALOG) {
+      if (!byId.has(v.id)) byId.set(v.id, { id: v.id, label: v.label })
+    }
+    return {
+      ...provider,
+      voices: [...byId.values()],
+      defaultVoice: provider.defaultVoice ?? DEFAULT_KOKORO_VOICE,
+    }
+  })
   const initialPrefs = loadAudioPrefs()
 
   const [selectedProvider, setSelectedProvider] = useState(
     () => initialPrefs.provider,
   )
   const [selectedVoice, setSelectedVoice] = useState<string | null>(
-    () => initialPrefs.voice,
+    () => initialPrefs.voice ?? initialPrefs.voicesByProvider.kokoro ?? DEFAULT_KOKORO_VOICE,
   )
   const [speed, setSpeed] = useState('1.0')
   const [saved, setSaved] = useState(false)
@@ -50,11 +66,18 @@ export function AudioSettingsRoute() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const voiceToSave = selectedVoice ?? defaultVoiceForProvider(currentProvider)
+      const voiceToSave = selectedVoice
+        ?? defaultVoiceForProvider(currentProvider)
+        ?? DEFAULT_KOKORO_VOICE
       saveAudioPrefs(audioPrefsWithSelection(loadAudioPrefs(), {
         provider: selectedProvider,
         voice: voiceToSave,
       }))
+      const userId = getStoredUser()?.id
+      if (userId && selectedProvider === 'kokoro') {
+        markVoiceOnboardingComplete(userId)
+      }
+      warmHostedKokoro(true)
       try { await api.patch('/api/settings/audio', { speed: parseFloat(speed) }) } catch { /* optional */ }
     },
     onSuccess: () => {

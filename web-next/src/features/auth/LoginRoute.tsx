@@ -23,11 +23,17 @@ export function LoginRoute() {
     setLoading(true)
     try {
       if (mode === 'signin') {
-        await signIn(email, password)
-        navigate('/library', { replace: true })
+        const user = await signIn(email, password)
+        // Existing accounts without a saved voice go pick one (prefetch/cache need it).
+        const { needsVoiceOnboarding } = await import('@/features/reader/voiceOnboarding')
+        navigate(
+          needsVoiceOnboarding(user.id) ? '/onboarding/voice' : '/library',
+          { replace: true },
+        )
       } else {
         await signUp(email, password)
-        navigate('/library', { replace: true })
+        // New accounts always choose a Kokoro voice before the library.
+        navigate('/onboarding/voice', { replace: true })
       }
     } catch (err: unknown) {
       if (err instanceof AuthApiError && err.code === 'email_taken') {

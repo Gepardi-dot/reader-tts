@@ -10,6 +10,10 @@
 
 import { api, request } from '@/shared/api/client'
 import { loadAudioPrefs } from '@/features/reader/audioPreferences'
+import {
+  DEFAULT_KOKORO_VOICE,
+  isKnownKokoroVoice,
+} from '@/features/reader/kokoroVoices'
 import { playableAudioUrl } from '@/features/reader/tts-engine/liveAudio'
 import { synthesizeKokoroLocal } from '@/features/reader/tts-engine/kokoroAudio'
 import { isModelReady } from '@/shared/storage/modelCache'
@@ -20,12 +24,9 @@ const INFLIGHT = new Map<string, Promise<string | null>>()
 let currentAudio: HTMLAudioElement | null = null
 let speakGeneration = 0
 let warmupKicked = false
+/** Track last warmed voice so a voice change re-pings Fly with the new id. */
+let warmedVoice: string | null = null
 
-/** Female Kokoro voices — practice defaults to Heart for clarity. */
-const FEMALE_KOKORO_VOICES = new Set([
-  'af_heart', 'af_sarah', 'af_sky', 'af_bella', 'bf_emma',
-])
-const DEFAULT_PRACTICE_VOICE = 'af_heart'
 const DEFAULT_GEMINI_FEMALE = 'Kore'
 
 /** Slightly brisk for short headwords. */
@@ -35,15 +36,18 @@ const HOSTED_TIMEOUT_MS = 12_000
 const PREFETCH_CONCURRENCY = 3
 const PREFETCH_LIMIT = 16
 
-function preferredPracticeVoice(): { provider: 'kokoro' | 'google'; voice: string } {
+/**
+ * Practice + prefetch always use the user's chosen Kokoro voice
+ * (from post-signup onboarding or Audio settings).
+ */
+export function preferredPracticeVoice(): { provider: 'kokoro' | 'google'; voice: string } {
   const prefs = loadAudioPrefs()
-  if (prefs.provider === 'kokoro') {
-    const remembered = prefs.voicesByProvider.kokoro ?? prefs.voice
-    if (remembered && FEMALE_KOKORO_VOICES.has(remembered)) {
-      return { provider: 'kokoro', voice: remembered }
-    }
+  const remembered = prefs.voicesByProvider.kokoro
+    ?? (prefs.provider === 'kokoro' ? prefs.voice : null)
+  if (isKnownKokoroVoice(remembered)) {
+    return { provider: 'kokoro', voice: remembered }
   }
-  return { provider: 'kokoro', voice: DEFAULT_PRACTICE_VOICE }
+  return { provider: 'kokoro', voice: DEFAULT_KOKORO_VOICE }
 }
 
 function rememberUrl(key: string, url: string) {
@@ -110,12 +114,14 @@ function speakBrowserFallback(text: string) {
 }
 
 /** Ping Worker → Fly Kokoro health so the machine is warm before first Play. */
-export function warmHostedKokoro() {
-  if (warmupKicked) return
+export function warmHostedKokoro(force = false) {
+  const voice = preferredPracticeVoice().voice
+  if (!force && warmupKicked && warmedVoice === voice) return
   warmupKicked = true
+  warmedVoice = voice
   void api.post('/api/providers/warmup', {
     provider: 'kokoro',
-    voice: preferredPracticeVoice().voice,
+    voice,
   }).catch(() => { /* best-effort */ })
 }
 
