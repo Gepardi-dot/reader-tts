@@ -6,6 +6,7 @@ import { api } from '@/shared/api/client'
 import {
   formatStudyDefinition,
   isFabricatedContextSentence,
+  isNicheDomainDefinition,
   isRealBookSentence,
   lookupWordDefinition,
   shouldRefreshDefinition,
@@ -319,14 +320,17 @@ export function VocabularyRoute() {
     enabled: Boolean(deck?.id),
   })
 
-  // Backfill missing / unusable / niche-technical definitions so cards are Practice-ready.
-  const attemptedBackfillRef = useRef(new Set<string>())
+  // Backfill missing definitions via Worker dictionary API (COEP-safe).
+  // Only mark "done" after success or a hard miss — transient failures can retry.
+  const filledOkRef = useRef(new Set<string>())
+  const hardMissRef = useRef(new Set<string>())
   const [lookingUpIds, setLookingUpIds] = useState<Set<string>>(() => new Set())
+  const [backfillPass, setBackfillPass] = useState(0)
 
   useEffect(() => {
     if (!dashboard?.notes || !deck?.id) return
     const stale = dashboard.notes.filter((n) => {
-      if (attemptedBackfillRef.current.has(n.id)) return false
+      if (filledOkRef.current.has(n.id) || hardMissRef.current.has(n.id)) return false
       const current = n.back || n.explanation
       const fakeSentence = isFabricatedContextSentence(n.exampleSentence, n.front, current)
       return shouldRefreshDefinition(current, n.front) || fakeSentence
@@ -344,7 +348,6 @@ export function VocabularyRoute() {
       let refreshed = 0
       for (const note of stale) {
         if (cancelled) return
-        attemptedBackfillRef.current.add(note.id)
         try {
           const metaContext = typeof note.metadata?.context === 'string' ? note.metadata.context : null
           const rawContext = note.exampleSentence || metaContext
@@ -357,7 +360,7 @@ export function VocabularyRoute() {
 
           const hit = await lookupWordDefinition(note.front, { context })
           if (!hit || !isUsableDefinition(hit.definition, note.front)) {
-            // Still clear a fabricated sentence even if lookup fails.
+            hardMissRef.current.add(note.id)
             if (isFabricatedContextSentence(note.exampleSentence, note.front, note.back)) {
               await api.post(`/api/vocabulary/decks/${deck.id}/notes`, {
                 noteType: 'basic',
@@ -369,10 +372,13 @@ export function VocabularyRoute() {
             }
             continue
           }
-          if (shouldRefreshDefinition(hit.definition, note.front)) continue
+          // Accept ranked Free Dict hits; only skip true placeholders/niche garbage.
+          if (shouldRefreshDefinition(hit.definition, note.front) && isNicheDomainDefinition(hit.definition)) {
+            hardMissRef.current.add(note.id)
+            continue
+          }
 
           const definition = formatStudyDefinition(hit.definition, hit.partOfSpeech)
-          // Prefer real book context; never re-save the shared template.
           const nextSentence = context
             || (hit.example && isRealBookSentence(hit.example, note.front, definition) ? hit.example : '')
             || ''
@@ -386,7 +392,7 @@ export function VocabularyRoute() {
             topic: note.topic ?? 'Reading',
             metadata: {
               ...(note.metadata ?? {}),
-              dictionarySource: hit.source === 'online' ? 'free-dictionary-ranked' : 'local-seed-ranked',
+              dictionarySource: hit.source === 'online' ? 'worker-dictionary' : 'local-seed-ranked',
               rankedDefinition: true,
               partOfSpeech: hit.partOfSpeech,
               bookId: note.sourceBookId,
@@ -394,7 +400,7 @@ export function VocabularyRoute() {
             },
           })
 
-          // Optimistic UI update so cards show defs immediately.
+          filledOkRef.current.add(note.id)
           queryClient.setQueryData<DeckDashboard>(['deck-dashboard', deck.id], (prev) => {
             if (!prev) return prev
             return {
@@ -408,7 +414,7 @@ export function VocabularyRoute() {
                       exampleSentence: nextSentence || null,
                       metadata: {
                         ...(n.metadata ?? {}),
-                        dictionarySource: hit.source === 'online' ? 'free-dictionary-ranked' : 'local-seed-ranked',
+                        dictionarySource: hit.source === 'online' ? 'worker-dictionary' : 'local-seed-ranked',
                         rankedDefinition: true,
                         partOfSpeech: hit.partOfSpeech,
                         clearedFabricatedContext: true,
@@ -419,8 +425,9 @@ export function VocabularyRoute() {
             }
           })
           refreshed++
-        } catch { /* ignore individual failures */ }
-        finally {
+        } catch {
+          // Network blip — leave out of filledOk/hardMiss so a later pass can retry.
+        } finally {
           if (!cancelled) {
             setLookingUpIds((prev) => {
               const next = new Set(prev)
@@ -438,7 +445,7 @@ export function VocabularyRoute() {
     }
     void refresh()
     return () => { cancelled = true }
-  }, [dashboard?.notes, deck?.id, queryClient])
+  }, [dashboard?.notes, deck?.id, queryClient, backfillPass])
 
   const isLoading = decksLoading || (Boolean(deck) && dashLoading)
   const words = (dashboard?.notes ?? []).filter(
@@ -473,11 +480,27 @@ export function VocabularyRoute() {
               {missingDefs > 0 && lookingUpIds.size > 0 ? ' · filling definitions…' : ''}
             </p>
           </div>
-          <Link to="/studio">
-            <button className="flex items-center gap-2 h-10 px-5 rounded-xl bg-primary text-primary-foreground text-[13.5px] font-semibold cursor-pointer border-0 hover:opacity-90 transition-opacity shadow-sm">
-              {deck && deck.dueNow > 0 ? `Practice · ${deck.dueNow} due` : 'Practice'}
-            </button>
-          </Link>
+          <div className="flex items-center gap-2">
+            {missingDefs > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  hardMissRef.current.clear()
+                  filledOkRef.current.clear()
+                  setBackfillPass((n) => n + 1)
+                }}
+                disabled={lookingUpIds.size > 0}
+                className="h-10 px-4 rounded-xl border border-border bg-white text-[13px] font-medium text-foreground cursor-pointer hover:bg-muted/40 disabled:opacity-50"
+              >
+                {lookingUpIds.size > 0 ? 'Filling…' : `Fill ${missingDefs} definition${missingDefs === 1 ? '' : 's'}`}
+              </button>
+            )}
+            <Link to="/studio">
+              <button className="flex items-center gap-2 h-10 px-5 rounded-xl bg-primary text-primary-foreground text-[13.5px] font-semibold cursor-pointer border-0 hover:opacity-90 transition-opacity shadow-sm">
+                {deck && deck.dueNow > 0 ? `Practice · ${deck.dueNow} due` : 'Practice'}
+              </button>
+            </Link>
+          </div>
         </div>
 
         {/* Stats row */}

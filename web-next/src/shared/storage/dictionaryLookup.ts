@@ -353,11 +353,52 @@ export function pickBestDefinition(
   }
 }
 
+function lemmaVariants(term: string): string[] {
+  const base = term.trim().toLowerCase().replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '')
+  if (!base) return []
+  const out: string[] = [base]
+  const push = (v: string) => {
+    const t = v.trim().toLowerCase()
+    if (t && t.length >= 2 && !out.includes(t)) out.push(t)
+  }
+  if (base.endsWith("'s") || base.endsWith('’s')) push(base.slice(0, -2))
+  if (base.endsWith('ies') && base.length > 4) push(`${base.slice(0, -3)}y`)
+  if (base.endsWith('ing') && base.length > 5) {
+    push(base.slice(0, -3))
+    push(`${base.slice(0, -3)}e`)
+  }
+  if (base.endsWith('ed') && base.length > 4) {
+    push(base.slice(0, -2))
+    push(base.slice(0, -1))
+  }
+  if (base.endsWith('es') && base.length > 3) push(base.slice(0, -2))
+  if (base.endsWith('s') && !base.endsWith('ss') && base.length > 3) push(base.slice(0, -1))
+  if (base.endsWith('ly') && base.length > 4) push(base.slice(0, -2))
+  return out
+}
+
+/**
+ * Preferred path under COEP require-corp: same-origin Worker proxies Free Dictionary
+ * (browser → dictionaryapi.dev often fails without CORP on that CDN).
+ */
+async function fetchWorkerDictionary(term: string): Promise<DictionaryResponse | null> {
+  try {
+    const { request } = await import('@/shared/api/client')
+    const data = await request<DictionaryResponse>(
+      `/api/dictionary/lookup?term=${encodeURIComponent(term)}`,
+    )
+    if (hasDictionaryDefinitions(data)) return data
+    return null
+  } catch {
+    return null
+  }
+}
+
 async function fetchFreeDictionary(term: string): Promise<DictionaryResponse | null> {
   try {
     const r = await fetch(
       `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`,
-      { signal: AbortSignal.timeout(5000) },
+      { signal: AbortSignal.timeout(5000), mode: 'cors' },
     )
     if (!r.ok) return null
     const j = await r.json() as Array<{
@@ -376,7 +417,6 @@ async function fetchFreeDictionary(term: string): Promise<DictionaryResponse | n
       available: true,
       message: null,
       pronunciation: fe.phonetic ?? null,
-      // Keep more senses so ranking can choose well (was sliced too aggressively before).
       entries: (fe.meanings ?? []).slice(0, 8).map((m) => ({
         partOfSpeech: m.partOfSpeech,
         definitions: (m.definitions ?? []).slice(0, 6).map((d) => ({
@@ -397,21 +437,36 @@ export async function lookupWordDefinition(
   term: string,
   options: LookupDefinitionOptions = {},
 ): Promise<WordDefinitionHit | null> {
-  const normalized = term.trim().toLowerCase()
-  if (!normalized) return null
+  const variants = lemmaVariants(term)
+  if (variants.length === 0) return null
 
   await ensureDictionarySeed().catch(() => {})
 
-  const local = await resolveLocalDictionary(normalized)
-  let hit = pickBestDefinition(local, options)
-  if (hit) return { ...hit, source: 'local' }
-
-  const free = await fetchFreeDictionary(normalized)
-  if (hasDictionaryDefinitions(free)) {
-    void putCachedDictionary(normalized, free as DictionaryResponse)
+  for (const candidate of variants) {
+    const local = await resolveLocalDictionary(candidate)
+    const hit = pickBestDefinition(local, options)
+    if (hit) return { ...hit, term: term.trim() || hit.term, source: 'local' }
   }
-  hit = pickBestDefinition(free, options)
-  if (hit) return { ...hit, source: 'online' }
+
+  // Worker proxy first (works with COEP / production Cloudflare host).
+  for (const candidate of variants) {
+    const viaWorker = await fetchWorkerDictionary(candidate)
+    if (hasDictionaryDefinitions(viaWorker)) {
+      void putCachedDictionary(candidate, viaWorker as DictionaryResponse)
+      const hit = pickBestDefinition(viaWorker, options)
+      if (hit) return { ...hit, term: term.trim() || hit.term, source: 'online' }
+    }
+  }
+
+  // Direct Free Dictionary (may fail under COEP in production).
+  for (const candidate of variants) {
+    const free = await fetchFreeDictionary(candidate)
+    if (hasDictionaryDefinitions(free)) {
+      void putCachedDictionary(candidate, free as DictionaryResponse)
+      const hit = pickBestDefinition(free, options)
+      if (hit) return { ...hit, term: term.trim() || hit.term, source: 'online' }
+    }
+  }
 
   return null
 }
