@@ -174,7 +174,8 @@ export default {
 
   /** Cron: poke Fly Kokoro so first user Play is not a cold start. */
   async scheduled(_event: { cron: string; scheduledTime: number }, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(keepKokoroWarm(env, { synth: true }))
+    // Health only — a concurrent tiny synth can hang the single Kokoro process under load.
+    ctx.waitUntil(keepKokoroWarm(env, { synth: false }))
   },
 }
 

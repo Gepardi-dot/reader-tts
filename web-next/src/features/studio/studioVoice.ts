@@ -133,12 +133,13 @@ export function warmHostedKokoro(force = false, options?: { prime?: boolean }) {
 /** Keep-alive while the tab is open (Fly cold starts were multi-second). */
 export function startKokoroKeepAlive() {
   if (typeof window === 'undefined') return () => undefined
-  warmHostedKokoro(true, { prime: true })
+  // Health ping on open (no synth — avoids stacking jobs on the single Fly worker).
+  warmHostedKokoro(true)
   const tick = () => {
     if (document.visibilityState !== 'visible') return
     warmHostedKokoro(true)
   }
-  const id = window.setInterval(tick, 90_000)
+  const id = window.setInterval(tick, 60_000)
   const onVis = () => {
     if (document.visibilityState === 'visible') warmHostedKokoro(true)
   }
