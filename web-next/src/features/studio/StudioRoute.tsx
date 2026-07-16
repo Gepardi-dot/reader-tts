@@ -19,7 +19,7 @@ import {
   type SessionMode,
 } from './sessionPlan'
 import { StudioHeader, useStudioSummary } from './StudioHeader'
-import { speakStudioText } from './studioVoice'
+import { prefetchStudioWords, speakStudioText } from './studioVoice'
 import {
   formatStudyDefinition,
   isFabricatedContextSentence,
@@ -581,7 +581,7 @@ function AudioBtn({ text, size = 32 }: { text: string; size?: number }) {
       onClick={(e) => { void go(e) }}
       aria-label={`Pronounce ${text}`}
       disabled={loading}
-      title="Play with neural voice (Kokoro)"
+      title="Play with neural female voice (Kokoro)"
       style={{
         width: size, height: size, borderRadius: '50%',
         background: speaking || loading ? C.blue : `${C.blue}15`,
@@ -2784,6 +2784,8 @@ export function StudioRoute() {
       setDeckSummary(res.deck ?? activeDeck)
       setPracticeWords(words)
       setSessionPlan(plan)
+      // Warm neural Kokoro for upcoming words (female Heart) so the first tap is snappy.
+      prefetchStudioWords(plan.map((s) => s.word.word))
       sessionResultsRef.current = []
       setResults([])
       setSessionXp(0)

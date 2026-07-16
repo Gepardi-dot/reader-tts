@@ -1,35 +1,47 @@
 /**
- * High-quality practice pronunciation via Kokoro neural TTS.
+ * High-quality practice pronunciation via hosted Kokoro (female by default).
  *
- * Order of preference:
- *  1. On-device Kokoro (same model as the reader — best latency once warm)
- *  2. Hosted Kokoro / Gemini via /api/providers/test
- *  3. Browser speech only if neural paths are unavailable
+ * Practice always prefers neural Kokoro over browser speech:
+ *  1. Hosted Kokoro (production path — fast single-word synth)
+ *  2. On-device Kokoro if the reader model is already warm
+ *  3. Gemini female (Kore) if Kokoro fails
+ *  4. Browser speech last resort (female English voice when available)
  */
 
 import { request } from '@/shared/api/client'
 import { loadAudioPrefs } from '@/features/reader/audioPreferences'
 import { playableAudioUrl } from '@/features/reader/tts-engine/liveAudio'
 import { synthesizeKokoroLocal } from '@/features/reader/tts-engine/kokoroAudio'
-import { isModelReady, startWarmup } from '@/shared/storage/modelCache'
+import { isModelReady } from '@/shared/storage/modelCache'
 
 const AUDIO_CACHE = new Map<string, string>()
-const AUDIO_CACHE_CAP = 64
+const AUDIO_CACHE_CAP = 80
 let currentAudio: HTMLAudioElement | null = null
 let speakGeneration = 0
-let warmupKicked = false
 
-/** Slightly slower than book narration so single words are clear. */
-const PRACTICE_SPEED = 0.9
+/** Female Kokoro voices — practice defaults to Heart for clarity. */
+const FEMALE_KOKORO_VOICES = new Set([
+  'af_heart', 'af_sarah', 'af_sky', 'af_bella', 'bf_emma',
+])
+const DEFAULT_PRACTICE_VOICE = 'af_heart'
+const DEFAULT_GEMINI_FEMALE = 'Kore'
+
+/** Slightly brisk for short headwords (was 0.9 — felt slow). */
+const PRACTICE_SPEED = 1.05
 const PRACTICE_LENGTH_SCALE = 1 / PRACTICE_SPEED
+const HOSTED_TIMEOUT_MS = 12_000
 
-function preferredStudioVoice(): { provider: 'kokoro' | 'google'; voice: string } {
+function preferredPracticeVoice(): { provider: 'kokoro' | 'google'; voice: string } {
+  // Practice always aims for Kokoro first (hosted is configured in production).
+  // If the reader prefs already picked a female Kokoro voice, keep it.
   const prefs = loadAudioPrefs()
-  const provider = prefs.provider === 'google' ? 'google' : 'kokoro'
-  const remembered = prefs.voicesByProvider[provider] ?? prefs.voice
-  const voice = remembered
-    || (provider === 'google' ? 'Kore' : 'af_heart')
-  return { provider, voice }
+  if (prefs.provider === 'kokoro') {
+    const remembered = prefs.voicesByProvider.kokoro ?? prefs.voice
+    if (remembered && FEMALE_KOKORO_VOICES.has(remembered)) {
+      return { provider: 'kokoro', voice: remembered }
+    }
+  }
+  return { provider: 'kokoro', voice: DEFAULT_PRACTICE_VOICE }
 }
 
 function rememberUrl(key: string, url: string) {
@@ -60,30 +72,38 @@ function stopCurrentAudio() {
   } catch { /* ignore */ }
 }
 
+function pickFemaleBrowserVoice(): SpeechSynthesisVoice | null {
+  try {
+    const voices = window.speechSynthesis.getVoices()
+    if (!voices.length) return null
+    const en = voices.filter((v) => /^en/i.test(v.lang))
+    const femaleName = /female|samantha|karen|moira|tessa|fiona|victoria|zira|susan|hazel|aria|jenny|natasha|google uk english female|google us english/i
+    return en.find((v) => femaleName.test(v.name))
+      || en.find((v) => /natural|neural|premium|enhanced/i.test(v.name) && !/male|david|daniel|mark|james|george/i.test(v.name))
+      || en.find((v) => /en-US|en_US/i.test(v.lang))
+      || en[0]
+      || null
+  } catch {
+    return null
+  }
+}
+
 function speakBrowserFallback(text: string) {
   try {
     window.speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(text)
-    utterance.rate = 0.88
-    utterance.pitch = 1
-    const voices = window.speechSynthesis.getVoices()
-    const preferred = voices.find((v) => /en(-|_)?(US|GB)/i.test(v.lang) && /natural|neural|premium|enhanced|samantha|daniel|google|microsoft/i.test(v.name))
-      || voices.find((v) => /^en/i.test(v.lang) && /google|microsoft|apple|samantha|daniel/i.test(v.name))
-      || voices.find((v) => /^en/i.test(v.lang))
-    if (preferred) utterance.voice = preferred
+    utterance.rate = 1.0
+    utterance.pitch = 1.05
+    const preferred = pickFemaleBrowserVoice()
+    if (preferred) {
+      utterance.voice = preferred
+      utterance.lang = preferred.lang || 'en-US'
+    } else {
+      utterance.lang = 'en-US'
+    }
     window.speechSynthesis.speak(utterance)
   } catch {
     // optional
-  }
-}
-
-function ensureWarmup() {
-  if (warmupKicked) return
-  warmupKicked = true
-  try {
-    startWarmup()
-  } catch {
-    // optional — hosted path still works
   }
 }
 
@@ -98,7 +118,6 @@ async function playUrl(url: string, gen: number, onPlaying?: () => void): Promis
   if (gen !== speakGeneration) return
   const audio = new Audio(url)
   audio.preload = 'auto'
-  // Keep pitch natural if the browser supports it (rate stays 1.0 for neural files).
   try { (audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true } catch { /* ignore */ }
   currentAudio = audio
   await new Promise<void>((resolve, reject) => {
@@ -122,8 +141,6 @@ async function playUrl(url: string, gen: number, onPlaying?: () => void): Promis
       audio.removeEventListener('error', onError)
       const name = err && typeof err === 'object' && 'name' in err ? String((err as { name: string }).name) : ''
       const msg = err instanceof Error ? err.message : String(err)
-      // Don't degrade to robot browser TTS just because autoplay was blocked —
-      // the Replay / speaker button is a real user gesture and will play neural.
       if (name === 'NotAllowedError' || /user didn't interact|not allowed|play\(\)/i.test(msg)) {
         reject(new AutoplayBlockedError())
         return
@@ -140,12 +157,10 @@ async function tryLocalKokoro(text: string, voice: string, gen: number): Promise
   if (cached) return cached
 
   const controller = new AbortController()
-  // Cancel local synth if a newer speak superseded us.
-  const cancelIfStale = () => {
-    if (gen !== speakGeneration) controller.abort()
+  if (gen !== speakGeneration) {
+    controller.abort()
+    return null
   }
-  cancelIfStale()
-  if (controller.signal.aborted) return null
 
   const result = await synthesizeKokoroLocal(text, voice, PRACTICE_SPEED, controller.signal)
   if (!result || gen !== speakGeneration) return null
@@ -165,27 +180,33 @@ async function tryHostedNeural(
   const cached = AUDIO_CACHE.get(cacheKey)
   if (cached) return cached
 
-  const preview = await request<{ audioUrl: string }>('/api/providers/test', {
-    method: 'POST',
-    body: JSON.stringify({
-      provider,
-      voice,
-      text,
-      length_scale: PRACTICE_LENGTH_SCALE,
-      sentence_silence: 0.05,
-      // Empty style for Kokoro; Gemini uses a light warm cue when set.
-      narration_style: provider === 'google' ? 'warm' : '',
-    }),
-  })
-  if (gen !== speakGeneration) return null
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), HOSTED_TIMEOUT_MS)
+  try {
+    const preview = await request<{ audioUrl: string }>('/api/providers/test', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider,
+        voice,
+        text,
+        length_scale: PRACTICE_LENGTH_SCALE,
+        sentence_silence: 0.02,
+        narration_style: provider === 'google' ? 'warm' : '',
+      }),
+      signal: controller.signal,
+    })
+    if (gen !== speakGeneration) return null
 
-  const playable = await playableAudioUrl(preview.audioUrl)
-  if (gen !== speakGeneration) {
-    playable.revoke()
-    return null
+    const playable = await playableAudioUrl(preview.audioUrl, controller.signal)
+    if (gen !== speakGeneration) {
+      playable.revoke()
+      return null
+    }
+    rememberUrl(cacheKey, playable.url)
+    return playable.url
+  } finally {
+    window.clearTimeout(timer)
   }
-  rememberUrl(cacheKey, playable.url)
-  return playable.url
 }
 
 export type SpeakStudioOptions = {
@@ -194,7 +215,7 @@ export type SpeakStudioOptions = {
 }
 
 /**
- * Speak a short practice word/phrase with neural TTS (Kokoro by default).
+ * Speak a short practice word/phrase with neural TTS (female Kokoro by default).
  * Resolves when playback finishes (or fails through to browser speech).
  */
 export async function speakStudioText(text: string, options?: SpeakStudioOptions): Promise<void> {
@@ -203,32 +224,33 @@ export async function speakStudioText(text: string, options?: SpeakStudioOptions
 
   const gen = ++speakGeneration
   stopCurrentAudio()
-  ensureWarmup()
 
-  const { provider, voice } = preferredStudioVoice()
+  const { voice } = preferredPracticeVoice()
   const onPlaying = options?.onPlaying
 
   try {
-    // 1) On-device Kokoro when the reader model is already warm.
-    if (provider === 'kokoro') {
-      const localUrl = await tryLocalKokoro(cleaned, voice, gen)
-      if (localUrl && gen === speakGeneration) {
-        await playUrl(localUrl, gen, onPlaying)
-        return
-      }
+    // 1) Hosted Kokoro first — production path; snappy female voice for headwords.
+    const hostedKokoro = await tryHostedNeural(cleaned, 'kokoro', voice, gen)
+    if (hostedKokoro && gen === speakGeneration) {
+      await playUrl(hostedKokoro, gen, onPlaying)
+      return
     }
 
-    // 2) Hosted neural (Kokoro or Gemini per user audio prefs).
-    const hostedUrl = await tryHostedNeural(cleaned, provider, voice, gen)
-    if (hostedUrl && gen === speakGeneration) {
-      await playUrl(hostedUrl, gen, onPlaying)
+    // 2) On-device Kokoro only if already warm (don't wait for download).
+    const localUrl = await tryLocalKokoro(cleaned, voice, gen)
+    if (localUrl && gen === speakGeneration) {
+      await playUrl(localUrl, gen, onPlaying)
+      return
+    }
+
+    // 3) Gemini female as backup neural path.
+    const hostedGemini = await tryHostedNeural(cleaned, 'google', DEFAULT_GEMINI_FEMALE, gen)
+    if (hostedGemini && gen === speakGeneration) {
+      await playUrl(hostedGemini, gen, onPlaying)
       return
     }
   } catch (err) {
-    if (err instanceof AutoplayBlockedError) {
-      // Neural audio is cached; user can tap Replay / speaker for real voice.
-      return
-    }
+    if (err instanceof AutoplayBlockedError) return
     console.warn('[studioVoice] neural TTS failed, using browser speech', err)
   }
 
@@ -244,8 +266,15 @@ export function stopStudioSpeech() {
 }
 
 export function estimateSpeakMs(text: string) {
-  // Rough UI “speaking” duration while waiting for real ended event.
-  // Neural practice runs ~0.9× → a bit longer than reading pace.
   const chars = Math.max(4, text.trim().length)
-  return Math.min(9000, Math.max(1100, Math.round(chars * 100 + 500)))
+  return Math.min(7000, Math.max(800, Math.round(chars * 70 + 350)))
+}
+
+/** Prefetch neural audio for upcoming practice words (best-effort). */
+export function prefetchStudioWords(words: string[]) {
+  const unique = [...new Set(words.map((w) => w.replace(/\s+/g, ' ').trim().toLowerCase()).filter(Boolean))]
+  const { voice } = preferredPracticeVoice()
+  for (const word of unique.slice(0, 8)) {
+    void tryHostedNeural(word, 'kokoro', voice, speakGeneration).catch(() => { /* ignore */ })
+  }
 }
