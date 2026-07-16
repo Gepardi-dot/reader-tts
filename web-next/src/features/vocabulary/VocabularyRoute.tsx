@@ -351,23 +351,40 @@ export function VocabularyRoute() {
 
   // Backfill missing definitions via Worker dictionary API (COEP-safe).
   // Only mark "done" after success or a hard miss — transient failures can retry.
+  // Important: do NOT re-run this effect when notes update mid-fill (that cancelled the
+  // loop after the first success and left the rest on "No definition yet").
   const filledOkRef = useRef(new Set<string>())
   const hardMissRef = useRef(new Set<string>())
+  const backfillGenRef = useRef(0)
   const [lookingUpIds, setLookingUpIds] = useState<Set<string>>(() => new Set())
   const [backfillPass, setBackfillPass] = useState(0)
+  const dashboardReady = Boolean(dashboard?.notes && deck?.id)
+  const hasMissingDefs = Boolean(
+    dashboard?.notes?.some((n) => {
+      if (n.front.trim().split(/\s+/).length !== 1) return false
+      return !displayDefinition(n)
+    }),
+  )
 
   useEffect(() => {
-    if (!dashboard?.notes || !deck?.id) return
-    const stale = dashboard.notes.filter((n) => {
-      if (filledOkRef.current.has(n.id) || hardMissRef.current.has(n.id)) return false
-      const current = n.back || n.explanation
-      const fakeSentence = isFabricatedContextSentence(n.exampleSentence, n.front, current)
-      return shouldRefreshDefinition(current, n.front) || fakeSentence
-    })
-    if (stale.length === 0) return
+    if (!dashboardReady || !deck?.id || !hasMissingDefs) return
 
-    let cancelled = false
+    const deckId = deck.id
+    const gen = ++backfillGenRef.current
+    const isActive = () => backfillGenRef.current === gen
+
     const refresh = async () => {
+      const dash = queryClient.getQueryData<DeckDashboard>(['deck-dashboard', deckId])
+      if (!dash?.notes) return
+
+      const stale = dash.notes.filter((n) => {
+        if (filledOkRef.current.has(n.id) || hardMissRef.current.has(n.id)) return false
+        const current = n.back || n.explanation
+        const fakeSentence = isFabricatedContextSentence(n.exampleSentence, n.front, current)
+        return shouldRefreshDefinition(current, n.front) || fakeSentence
+      })
+      if (stale.length === 0) return
+
       setLookingUpIds((prev) => {
         const next = new Set(prev)
         for (const n of stale) next.add(n.id)
@@ -375,106 +392,125 @@ export function VocabularyRoute() {
       })
 
       let refreshed = 0
-      for (const note of stale) {
-        if (cancelled) return
-        try {
-          const metaContext = typeof note.metadata?.context === 'string' ? note.metadata.context : null
-          const rawContext = note.exampleSentence || metaContext
-          const context = rawContext
-            && isRealBookSentence(rawContext, note.front, note.back || note.explanation)
-            ? rawContext
-            : (metaContext && isRealBookSentence(metaContext, note.front, note.back || note.explanation)
-              ? metaContext
-              : null)
+      try {
+        // Small concurrency: faster fill without hammering Free Dictionary.
+        const CONCURRENCY = 3
+        let cursor = 0
+        const workers = Array.from({ length: Math.min(CONCURRENCY, stale.length) }, async () => {
+          while (cursor < stale.length && isActive()) {
+            const index = cursor
+            cursor += 1
+            const note = stale[index]
+            try {
+              const metaContext = typeof note.metadata?.context === 'string' ? note.metadata.context : null
+              const rawContext = note.exampleSentence || metaContext
+              const context = rawContext
+                && isRealBookSentence(rawContext, note.front, note.back || note.explanation)
+                ? rawContext
+                : (metaContext && isRealBookSentence(metaContext, note.front, note.back || note.explanation)
+                  ? metaContext
+                  : null)
 
-          const hit = await lookupWordDefinition(note.front, { context })
-          if (!hit || !isUsableDefinition(hit.definition, note.front)) {
-            hardMissRef.current.add(note.id)
-            if (isFabricatedContextSentence(note.exampleSentence, note.front, note.back)) {
-              await api.post(`/api/vocabulary/decks/${deck.id}/notes`, {
+              const hit = await lookupWordDefinition(note.front, { context })
+              if (!isActive()) return
+              if (!hit || !isUsableDefinition(hit.definition, note.front)) {
+                hardMissRef.current.add(note.id)
+                if (isFabricatedContextSentence(note.exampleSentence, note.front, note.back)) {
+                  await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
+                    noteType: 'basic',
+                    front: note.front,
+                    back: note.back,
+                    exampleSentence: '',
+                    metadata: { ...(note.metadata ?? {}), clearedFabricatedContext: true },
+                  }).catch(() => {})
+                }
+                continue
+              }
+              // Accept ranked Free Dict hits; only skip true placeholders/niche garbage.
+              if (shouldRefreshDefinition(hit.definition, note.front) && isNicheDomainDefinition(hit.definition)) {
+                hardMissRef.current.add(note.id)
+                continue
+              }
+
+              const definition = formatStudyDefinition(hit.definition, hit.partOfSpeech)
+              const nextSentence = context
+                || (hit.example && isRealBookSentence(hit.example, note.front, definition) ? hit.example : '')
+                || ''
+
+              await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
                 noteType: 'basic',
                 front: note.front,
-                back: note.back,
-                exampleSentence: '',
-                metadata: { ...(note.metadata ?? {}), clearedFabricatedContext: true },
-              }).catch(() => {})
+                back: definition,
+                extra: hit.pronunciation ?? note.extra,
+                exampleSentence: nextSentence,
+                topic: note.topic ?? 'Reading',
+                metadata: {
+                  ...(note.metadata ?? {}),
+                  dictionarySource: hit.source === 'online' ? 'worker-dictionary' : 'local-seed-ranked',
+                  rankedDefinition: true,
+                  partOfSpeech: hit.partOfSpeech,
+                  bookId: note.sourceBookId,
+                  clearedFabricatedContext: true,
+                },
+              })
+              if (!isActive()) return
+
+              filledOkRef.current.add(note.id)
+              refreshed += 1
+              queryClient.setQueryData<DeckDashboard>(['deck-dashboard', deckId], (prev) => {
+                if (!prev) return prev
+                return {
+                  ...prev,
+                  notes: prev.notes.map((n) => (
+                    n.id === note.id
+                      ? {
+                          ...n,
+                          back: definition,
+                          extra: hit.pronunciation ?? n.extra,
+                          exampleSentence: nextSentence || null,
+                          metadata: {
+                            ...(n.metadata ?? {}),
+                            dictionarySource: hit.source === 'online' ? 'worker-dictionary' : 'local-seed-ranked',
+                            rankedDefinition: true,
+                            partOfSpeech: hit.partOfSpeech,
+                            clearedFabricatedContext: true,
+                          },
+                        }
+                      : n
+                  )),
+                }
+              })
+            } catch {
+              // Network/SQL blip — leave out of filledOk/hardMiss so a later pass can retry.
+            } finally {
+              if (isActive()) {
+                setLookingUpIds((prev) => {
+                  const next = new Set(prev)
+                  next.delete(note.id)
+                  return next
+                })
+              }
             }
-            continue
           }
-          // Accept ranked Free Dict hits; only skip true placeholders/niche garbage.
-          if (shouldRefreshDefinition(hit.definition, note.front) && isNicheDomainDefinition(hit.definition)) {
-            hardMissRef.current.add(note.id)
-            continue
-          }
-
-          const definition = formatStudyDefinition(hit.definition, hit.partOfSpeech)
-          const nextSentence = context
-            || (hit.example && isRealBookSentence(hit.example, note.front, definition) ? hit.example : '')
-            || ''
-
-          await api.post(`/api/vocabulary/decks/${deck.id}/notes`, {
-            noteType: 'basic',
-            front: note.front,
-            back: definition,
-            extra: hit.pronunciation ?? note.extra,
-            exampleSentence: nextSentence,
-            topic: note.topic ?? 'Reading',
-            metadata: {
-              ...(note.metadata ?? {}),
-              dictionarySource: hit.source === 'online' ? 'worker-dictionary' : 'local-seed-ranked',
-              rankedDefinition: true,
-              partOfSpeech: hit.partOfSpeech,
-              bookId: note.sourceBookId,
-              clearedFabricatedContext: true,
-            },
-          })
-
-          filledOkRef.current.add(note.id)
-          queryClient.setQueryData<DeckDashboard>(['deck-dashboard', deck.id], (prev) => {
-            if (!prev) return prev
-            return {
-              ...prev,
-              notes: prev.notes.map((n) => (
-                n.id === note.id
-                  ? {
-                      ...n,
-                      back: definition,
-                      extra: hit.pronunciation ?? n.extra,
-                      exampleSentence: nextSentence || null,
-                      metadata: {
-                        ...(n.metadata ?? {}),
-                        dictionarySource: hit.source === 'online' ? 'worker-dictionary' : 'local-seed-ranked',
-                        rankedDefinition: true,
-                        partOfSpeech: hit.partOfSpeech,
-                        clearedFabricatedContext: true,
-                      },
-                    }
-                  : n
-              )),
-            }
-          })
-          refreshed++
-        } catch {
-          // Network blip — leave out of filledOk/hardMiss so a later pass can retry.
-        } finally {
-          if (!cancelled) {
-            setLookingUpIds((prev) => {
-              const next = new Set(prev)
-              next.delete(note.id)
-              return next
-            })
-          }
-        }
+        })
+        await Promise.all(workers)
+      } finally {
+        if (isActive()) setLookingUpIds(new Set())
       }
 
-      if (!cancelled && refreshed > 0) {
-        queryClient.invalidateQueries({ queryKey: ['deck-dashboard', deck.id] })
-        queryClient.invalidateQueries({ queryKey: ['decks'] })
+      if (isActive() && refreshed > 0) {
+        void queryClient.invalidateQueries({ queryKey: ['deck-dashboard', deckId] })
+        void queryClient.invalidateQueries({ queryKey: ['decks'] })
       }
     }
+
     void refresh()
-    return () => { cancelled = true }
-  }, [dashboard?.notes, deck?.id, queryClient, backfillPass])
+    return () => {
+      // Invalidate this generation so in-flight work stops applying updates.
+      if (backfillGenRef.current === gen) backfillGenRef.current += 1
+    }
+    // Intentionally omit dashboard.notes: progressive setQueryData must not abort the loop.
+  }, [dashboardReady, deck?.id, backfillPass, queryClient, hasMissingDefs])
 
   const isLoading = decksLoading || (Boolean(deck) && dashLoading)
   const words = (dashboard?.notes ?? []).filter(

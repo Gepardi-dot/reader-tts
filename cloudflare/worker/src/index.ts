@@ -2013,7 +2013,11 @@ async function createVocabularyNote(request: Request, env: Env, user: User, deck
   const extra = stringField(body.extra) || null
   const hint = stringField(body.hint) || null
   const explanation = stringField(body.explanation) || null
-  const exampleSentence = stringField(body.exampleSentence) || null
+  // Allow explicit empty string to clear fabricated example sentences.
+  const hasExampleSentence = Object.prototype.hasOwnProperty.call(body, 'exampleSentence')
+  const exampleSentence = hasExampleSentence
+    ? (typeof body.exampleSentence === 'string' ? body.exampleSentence.trim() : '')
+    : null
   const topic = stringField(body.topic) || null
   const answer = back || explanation || front
 
@@ -2024,6 +2028,10 @@ async function createVocabularyNote(request: Request, env: Env, user: User, deck
     const nextAnswer = back || explanation
       || (existing.back == null ? null : String(existing.back))
       || front
+    // When exampleSentence is omitted, keep the existing value.
+    const nextExample = hasExampleSentence
+      ? exampleSentence
+      : (existing.example_sentence == null ? null : String(existing.example_sentence))
 
     await env.DB.batch([
       env.DB.prepare(
@@ -2032,8 +2040,7 @@ async function createVocabularyNote(request: Request, env: Env, user: User, deck
              extra = COALESCE(?, extra),
              hint = COALESCE(?, hint),
              explanation = COALESCE(?, explanation),
-             // Allow clearing fabricated templates with '' (COALESCE would keep the old junk if null).
-             example_sentence = CASE WHEN ? IS NOT NULL THEN ? ELSE example_sentence END,
+             example_sentence = ?,
              topic = COALESCE(?, topic),
              source_book_id = COALESCE(?, source_book_id),
              source_book_title = COALESCE(?, source_book_title),
@@ -2045,8 +2052,7 @@ async function createVocabularyNote(request: Request, env: Env, user: User, deck
         extra,
         hint,
         explanation,
-        exampleSentence,
-        exampleSentence,
+        nextExample,
         topic,
         sourceBook?.id ?? null,
         sourceBook?.title ?? null,
