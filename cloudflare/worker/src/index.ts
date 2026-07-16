@@ -1058,6 +1058,7 @@ async function synthesizeKokoroRemote(
 
   let response: Response
   try {
+    // Bound wait so a dead Fly machine fails loudly instead of hanging samples/Play.
     response = await fetch(`${base}/v1/synthesize`, {
       method: 'POST',
       headers,
@@ -1066,10 +1067,17 @@ async function synthesizeKokoroRemote(
         voice,
         speed,
       }),
+      signal: AbortSignal.timeout(25_000),
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    throw new ApiError(502, `Hosted Kokoro unreachable: ${message.slice(0, 300)}`)
+    const timedOut = /abort|timeout|TimeoutError/i.test(message)
+    throw new ApiError(
+      502,
+      timedOut
+        ? 'Hosted Kokoro timed out (Fly may be stopped or cold). Restart: fly machines list -a kokoro-reader && fly machines start <id> -a kokoro-reader'
+        : `Hosted Kokoro unreachable: ${message.slice(0, 300)}`,
+    )
   }
 
   if (!response.ok) {
@@ -1203,7 +1211,10 @@ async function providersWarmup(request: Request, env: Env, ctx: ExecutionContext
     }
     // Health ping first (cheap) — defeats Fly scale-to-zero lag on next Play.
     ctx.waitUntil(
-      fetch(`${base}/v1/health`, { headers }).catch(() => undefined),
+      fetch(`${base}/v1/health`, {
+        headers,
+        signal: AbortSignal.timeout(8_000),
+      }).catch(() => undefined),
     )
   }
 
