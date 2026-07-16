@@ -712,11 +712,13 @@ interface SelectionMenuProps {
   onOpenPanel: (p: SecondaryPanel) => void
   onToast: (msg: string) => void
   onPlayWord: (text: string, startOffset: number) => void
+  /** Speculative warm on Play press (before click completes). */
+  onWarmAtOffset?: (startOffset: number) => void
 }
 
 function SelectionMenu({
   sel, bookId, fullText,
-  onClose, onOpenPanel, onToast, onPlayWord,
+  onClose, onOpenPanel, onToast, onPlayWord, onWarmAtOffset,
 }: SelectionMenuProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [busyColor,  setBusyColor]  = useState<string | null>(null)
@@ -924,6 +926,13 @@ function SelectionMenu({
           <button
             key={id}
             onClick={() => sel.mode === 'word' ? handleWord(id) : handleSentence(id)}
+            onPointerDown={(e) => {
+              // Start network/synth on press so Play often hits a warm cache.
+              if (id === 'play' && sel.mode === 'word') {
+                e.stopPropagation()
+                onWarmAtOffset?.(sel.startOffset)
+              }
+            }}
             disabled={busyAction === id}
             className="flex-1 flex flex-col items-center gap-1.5 py-3 px-1 text-white hover:bg-white/10 active:bg-white/15 transition-colors disabled:opacity-40"
           >
@@ -3706,6 +3715,11 @@ export function ReaderRoute() {
             onOpenPanel={openPanel}
             onToast={showToast}
             onPlayWord={playWord}
+            onWarmAtOffset={(offset) => {
+              if (effectiveTtsProvider === 'kokoro' || effectiveTtsProvider === 'google') {
+                warmCloudAtOffset(offset)
+              }
+            }}
           />
         )}
       </AnimatePresence>

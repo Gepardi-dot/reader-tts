@@ -8,24 +8,30 @@ export interface AudioTextChunk {
   text: string
 }
 
-// Streaming-style playback: tiny first request for fast first-audio, larger
-// follow-ups while the first unit plays. Kokoro worker synth is serialized, so
-// follow-ups must be long enough to cover the next job without multi-second
-// prebuffer (prebuffer felt like a hang).
-// Cloud path (hosted Kokoro + Gemini): short first chunk for fast cold start,
-// larger follow-ups once audio is already playing.
+// Progressive chunk ramp for fast first-audio without starving follow-ups:
+//   chunk 0 → short (~sentence) for instant Play
+//   chunk 1 → medium while 0 plays
+//   chunk 2+ → steady size for fewer round-trips
+// Hosted Kokoro/Gemini: start after chunk 0 only; prefetch 1+ in parallel.
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
-  google: 120,
-  // Smaller first unit → faster hosted Kokoro synth on Play (or selection warm).
-  kokoro: 80,
+  google: 100,
+  // ~one short sentence — enough for natural start, small enough for fast synth.
+  kokoro: 56,
+}
+
+/** Second slice after the first; bridges until steady-state chunks arrive. */
+export const SECOND_AUDIO_CHARS: Record<string, number> = {
+  google: 180,
+  kokoro: 150,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {
   google: 280,
-  kokoro: 240,
+  kokoro: 280,
 }
 
 export const DEFAULT_FIRST_AUDIO_CHARS = 180
+export const DEFAULT_SECOND_AUDIO_CHARS = 220
 export const DEFAULT_AUDIO_CHARS = 800
 export const PREFETCH_CHUNK_LIMIT = 3
 export const AUDIO_SLICE_CHARS = 2200
@@ -49,8 +55,19 @@ export const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
 export const PREFETCH_AHEAD_TARGET: Record<string, number> = {
   google: 1,
-  // Hosted Kokoro is server-side; mild read-ahead like Gemini (cache-friendly).
-  kokoro: 2,
+  // Hosted Kokoro: keep 2–3 ahead so the short first slice never underruns.
+  kokoro: 3,
+}
+
+/** Char budget for the Nth chunk in the progressive ramp (0-based). */
+export function targetCharsForChunkIndex(provider: string, index: number): number {
+  if (index <= 0) return FIRST_AUDIO_CHARS[provider] ?? DEFAULT_FIRST_AUDIO_CHARS
+  if (index === 1) {
+    return SECOND_AUDIO_CHARS[provider]
+      ?? CHUNK_CHARS[provider]
+      ?? DEFAULT_SECOND_AUDIO_CHARS
+  }
+  return CHUNK_CHARS[provider] ?? DEFAULT_AUDIO_CHARS
 }
 
 export const DEFAULT_PREFETCH_AHEAD = 2
@@ -191,22 +208,33 @@ export function audioSliceStart(textLength: number, scrollPct: number) {
 }
 
 /**
- * Split text into chunks at sentence boundaries.
+ * Split text into chunks at sentence boundaries with a progressive size ramp.
  * Returns absolute offsets within the full book text so the backend can
  * validate each slice against the canonical book text.
+ *
+ * @param targetChars steady-state size (chunk index ≥ 2)
+ * @param firstTargetChars chunk 0 (fast start)
+ * @param secondTargetChars chunk 1 (bridge)
  */
 export function buildAudioChunks(
   fullText: string,
   globalStart: number,
   targetChars: number,
   firstTargetChars = targetChars,
+  secondTargetChars = targetChars,
 ): AudioTextChunk[] {
   const chunks: AudioTextChunk[] = []
   let localPos = 0
 
   while (localPos < fullText.length) {
-    const isFirstChunk = chunks.length === 0
-    const currentTarget = isFirstChunk ? firstTargetChars : targetChars
+    const index = chunks.length
+    const isFirstChunk = index === 0
+    const isSecondChunk = index === 1
+    const currentTarget = isFirstChunk
+      ? firstTargetChars
+      : isSecondChunk
+        ? secondTargetChars
+        : targetChars
     const remaining = fullText.length - localPos
     if (remaining <= currentTarget) {
       chunks.push({
@@ -217,8 +245,9 @@ export function buildAudioChunks(
       break
     }
 
-    const backtrack = isFirstChunk ? 60 : 100
-    const lookahead = isFirstChunk ? 60 : 200
+    // Prefer real sentence ends, especially on the short first slice.
+    const backtrack = isFirstChunk ? 48 : isSecondChunk ? 80 : 100
+    const lookahead = isFirstChunk ? 90 : isSecondChunk ? 140 : 200
     const searchStart = Math.max(0, currentTarget - backtrack)
     const searchWindow = fullText.slice(
       localPos + searchStart,
@@ -232,15 +261,30 @@ export function buildAudioChunks(
       }
     }
 
+    // First chunk: also accept early sentence end in the first half of the window
+    // so we start on a full short sentence when possible.
+    if (isFirstChunk && boundary < 0) {
+      for (let i = 0; i < searchWindow.length; i += 1) {
+        if (/[.!?]/.test(searchWindow[i]) && /[\s"']/.test(searchWindow[i + 1] ?? ' ')) {
+          const abs = searchStart + i + 1
+          if (abs >= Math.min(28, currentTarget * 0.45)) {
+            boundary = i + 1
+            break
+          }
+        }
+      }
+    }
+
     const hardSlice = fullText.slice(localPos, localPos + currentTarget)
     const lastSpace = Math.max(
       hardSlice.lastIndexOf(' '),
       hardSlice.lastIndexOf('\n'),
       hardSlice.lastIndexOf('\t'),
     )
+    const minSpaceRatio = isFirstChunk ? 0.45 : 0.6
     const chunkLen = boundary >= 0
       ? searchStart + boundary
-      : (lastSpace > currentTarget * 0.6 ? lastSpace + 1 : currentTarget)
+      : (lastSpace > currentTarget * minSpaceRatio ? lastSpace + 1 : currentTarget)
 
     const localEnd = localPos + chunkLen
     const slice = fullText.slice(localPos, localEnd)
@@ -260,6 +304,7 @@ export function buildAudioChunksFromGridWindow({
   windowChunks,
   targetChars,
   firstTargetChars,
+  secondTargetChars,
 }: {
   fullText: string
   grid: Array<{ start: number; end: number }>
@@ -267,6 +312,7 @@ export function buildAudioChunksFromGridWindow({
   windowChunks: number
   targetChars: number
   firstTargetChars: number
+  secondTargetChars?: number
 }): AudioTextChunk[] {
   if (!fullText || grid.length === 0 || windowChunks <= 0) return []
   const boundedStart = Math.max(0, Math.min(start, fullText.length))
@@ -274,7 +320,13 @@ export function buildAudioChunksFromGridWindow({
   const lastGridIdx = Math.min(grid.length - 1, chunkIdx + Math.max(1, Math.floor(windowChunks)) - 1)
   const boundedEnd = Math.max(boundedStart, Math.min(grid[lastGridIdx]?.end ?? boundedStart, fullText.length))
   const snippet = fullText.slice(boundedStart, boundedEnd)
-  return buildAudioChunks(snippet, boundedStart, targetChars, firstTargetChars)
+  return buildAudioChunks(
+    snippet,
+    boundedStart,
+    targetChars,
+    firstTargetChars,
+    secondTargetChars ?? targetChars,
+  )
 }
 
 // Binary search: find the grid chunk whose range contains `offset`.

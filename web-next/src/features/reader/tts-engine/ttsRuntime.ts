@@ -474,6 +474,7 @@ export class TtsRuntime {
           1,
           PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD,
           controller.signal,
+          { parallel: true },
         )
       }
     })
@@ -487,23 +488,16 @@ export class TtsRuntime {
     try {
       this.clock.setExpectMore(true)
       this.loadingChunkIndexes.add(0)
-      // Kick follow-up fetch immediately (hosted path is sequential; first chunk
-      // often already warm from selection speculative fetch).
-      void pool.prefetchFrom(
-        1,
-        PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD,
-        controller.signal,
-      )
+      // Parallel: load the short first slice + progressive follow-ups together.
+      // Play starts as soon as chunk 0 has a frame; mid/steady chunks fill behind.
+      const ahead = PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD
+      void pool.prefetchFrom(1, ahead, controller.signal, { parallel: true })
       await pool.ensure(0, controller.signal, false)
       this.loadingChunkIndexes.delete(0)
       if (generation !== this.generation) return
 
       if (!firstFrameSeen) {
-        void pool.prefetchFrom(
-          1,
-          PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD,
-          controller.signal,
-        )
+        void pool.prefetchFrom(1, ahead, controller.signal, { parallel: true })
       }
 
       if (this.clock.scheduledCount === 0) {

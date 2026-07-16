@@ -3,7 +3,9 @@ import {
   CHUNK_CHARS,
   DEFAULT_AUDIO_CHARS,
   DEFAULT_FIRST_AUDIO_CHARS,
+  DEFAULT_SECOND_AUDIO_CHARS,
   FIRST_AUDIO_CHARS,
+  SECOND_AUDIO_CHARS,
   buildAudioChunks,
   buildAudioChunksFromGridWindow,
   findGridChunk,
@@ -48,6 +50,7 @@ export function buildTtsChunks({
 
   const chunkSize = CHUNK_CHARS[provider] ?? DEFAULT_AUDIO_CHARS
   const firstChunkSize = FIRST_AUDIO_CHARS[provider] ?? DEFAULT_FIRST_AUDIO_CHARS
+  const secondChunkSize = SECOND_AUDIO_CHARS[provider] ?? DEFAULT_SECOND_AUDIO_CHARS
   const useGrid = provider === 'kokoro' && !kokoroModelReady && presynthGrid && presynthGrid.length > 0
 
   if (useGrid) {
@@ -60,6 +63,7 @@ export function buildTtsChunks({
       windowChunks: 50,
       targetChars: chunkSize,
       firstTargetChars: firstChunkSize,
+      secondTargetChars: secondChunkSize,
     })
 
     const fallback = raw.length > 0
@@ -77,6 +81,6 @@ export function buildTtsChunks({
 
   const end = Math.min(bookText.length, start + AUDIO_SLICE_CHARS)
   const snippet = bookText.slice(start, end)
-  return buildAudioChunks(snippet, start, chunkSize, firstChunkSize).map(toTtsChunk)
+  return buildAudioChunks(snippet, start, chunkSize, firstChunkSize, secondChunkSize).map(toTtsChunk)
 }
 

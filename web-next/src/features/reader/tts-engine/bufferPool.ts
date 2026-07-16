@@ -136,12 +136,34 @@ export class BufferPool {
     return promise
   }
 
-  prefetchFrom(index: number, target: number, signal: AbortSignal) {
+  /**
+   * Prefetch chunks starting at `index` for `target` count.
+   * Hosted paths benefit from parallel kick-off (default); on-device serial
+   * loaders still dedupe via `ensure` inflight maps.
+   */
+  prefetchFrom(
+    index: number,
+    target: number,
+    signal: AbortSignal,
+    options?: { parallel?: boolean },
+  ) {
     if (signal.aborted) return Promise.resolve()
     const start = Math.max(0, index)
     const stop = Math.min(this.chunks.length - 1, start + Math.max(0, target) - 1)
+    const parallel = options?.parallel !== false
 
     const run = async () => {
+      if (parallel) {
+        const jobs: Promise<void>[] = []
+        for (let cursor = start; cursor <= stop; cursor += 1) {
+          if (signal.aborted) return
+          const chunk = this.chunks[cursor]
+          if (!chunk || chunk.status === 'ready' || chunk.status === 'fetching') continue
+          jobs.push(this.ensure(cursor, signal, true).catch(() => undefined))
+        }
+        await Promise.all(jobs)
+        return
+      }
       for (let cursor = start; cursor <= stop; cursor += 1) {
         if (signal.aborted) return
         const chunk = this.chunks[cursor]
