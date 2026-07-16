@@ -2,6 +2,10 @@ name = "reader-tts-api"
 main = "src/index.ts"
 compatibility_date = "2026-06-29"
 
+# Keep Fly Kokoro awake so first Play/sample is not a multi-second cold start.
+[triggers]
+crons = ["*/2 * * * *"]
+
 # Unified host: SPA + /api on the same Worker (best latency, same-origin auth).
 # Build web-next first (see npm run deploy:cloudflare).
 [assets]

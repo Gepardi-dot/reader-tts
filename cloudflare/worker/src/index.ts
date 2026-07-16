@@ -171,6 +171,11 @@ export default {
       return withCors(json({ detail: 'Internal server error' }, 500), request, env)
     }
   },
+
+  /** Cron: poke Fly Kokoro so first user Play is not a cold start. */
+  async scheduled(_event: { cron: string; scheduledTime: number }, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(keepKokoroWarm(env, { synth: true }))
+  },
 }
 
 function primaryAppOrigin(env: Env, request?: Request) {
@@ -1195,27 +1200,66 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
   return json(payload)
 }
 
+/**
+ * Keep Fly Kokoro process/path hot.
+ * - health: cheap liveness (defeats scale-to-zero / proxy lag)
+ * - optional tiny synth: keeps model path exercised so first user Play is a disk/edge hit
+ */
+async function keepKokoroWarm(
+  env: Env,
+  options: { voice?: string | null; synth?: boolean } = {},
+): Promise<{ ok: boolean; healthMs?: number; synthMs?: number; error?: string }> {
+  if (!kokoroRemoteConfigured(env)) return { ok: false, error: 'not_configured' }
+  const base = env.KOKORO_REMOTE_URL!.trim().replace(/\/+$/, '')
+  const apiKey = env.KOKORO_REMOTE_API_KEY?.trim()
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`
+    headers['X-Api-Key'] = apiKey
+  }
+
+  const healthStarted = Date.now()
+  try {
+    const health = await fetch(`${base}/v1/health`, {
+      headers,
+      signal: AbortSignal.timeout(8_000),
+    })
+    if (!health.ok) {
+      return { ok: false, healthMs: Date.now() - healthStarted, error: `health_${health.status}` }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { ok: false, healthMs: Date.now() - healthStarted, error: message.slice(0, 120) }
+  }
+  const healthMs = Date.now() - healthStarted
+
+  if (!options.synth) return { ok: true, healthMs }
+
+  const synthStarted = Date.now()
+  try {
+    await synthesizeKokoroRemote(env, {
+      text: 'Ready.',
+      voice: options.voice || KOKORO_DEFAULT_VOICE,
+      lengthScale: 1,
+    })
+    return { ok: true, healthMs, synthMs: Date.now() - synthStarted }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    // Health succeeded — still useful; synth is best-effort.
+    return { ok: true, healthMs, synthMs: Date.now() - synthStarted, error: message.slice(0, 120) }
+  }
+}
+
 /** Keep Fly Kokoro awake + optionally prime a short synth (best-effort). */
 async function providersWarmup(request: Request, env: Env, ctx: ExecutionContext) {
   const body = await readJson<Record<string, unknown>>(request).catch(() => ({} as Record<string, unknown>))
   const provider = stringField(body.provider) || 'kokoro'
   const voice = stringField(body.voice)
+  const wantSynth = body.synth === true || body.prime === true
 
   if (provider === 'kokoro' && kokoroRemoteConfigured(env)) {
-    const base = env.KOKORO_REMOTE_URL!.trim().replace(/\/+$/, '')
-    const apiKey = env.KOKORO_REMOTE_API_KEY?.trim()
-    const headers: Record<string, string> = { Accept: 'application/json' }
-    if (apiKey) {
-      headers.Authorization = `Bearer ${apiKey}`
-      headers['X-Api-Key'] = apiKey
-    }
-    // Health ping first (cheap) — defeats Fly scale-to-zero lag on next Play.
-    ctx.waitUntil(
-      fetch(`${base}/v1/health`, {
-        headers,
-        signal: AbortSignal.timeout(8_000),
-      }).catch(() => undefined),
-    )
+    // Don't block the HTTP response on Fly — client continues immediately.
+    ctx.waitUntil(keepKokoroWarm(env, { voice, synth: wantSynth }))
   }
 
   return json({

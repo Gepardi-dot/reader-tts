@@ -3077,19 +3077,28 @@ export function ReaderRoute() {
     presynthGridRef.current = grid
   }, [payload?.text, effectiveTtsProvider])
 
-  // Hosted Kokoro/Gemini: idle warm around the viewport so ahead chunks land in
-  // IndexedDB (survives refresh) + Worker edge/R2. Debounced on scroll.
+  // Hosted Kokoro/Gemini: warm the viewport slice so Play often hits edge/IDB.
+  // Immediate warm when the book opens; light debounce only on scroll moves.
   const aheadWarmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const didImmediateWarm = useRef(false)
   useEffect(() => {
     if (effectiveTtsProvider !== 'kokoro' && effectiveTtsProvider !== 'google') return
     if (!payload?.text || !bookId || !effectiveTtsVoice) return
     if (wordAudioPhase !== 'idle') return
 
-    if (aheadWarmTimer.current) clearTimeout(aheadWarmTimer.current)
-    aheadWarmTimer.current = setTimeout(() => {
+    const runWarm = () => {
       const start = audioSliceStart(payload.text.length, scrollPct)
       warmCloudAtOffset(start)
-    }, 600)
+    }
+
+    if (!didImmediateWarm.current) {
+      didImmediateWarm.current = true
+      runWarm()
+      return
+    }
+
+    if (aheadWarmTimer.current) clearTimeout(aheadWarmTimer.current)
+    aheadWarmTimer.current = setTimeout(runWarm, 350)
 
     return () => {
       if (aheadWarmTimer.current) clearTimeout(aheadWarmTimer.current)
@@ -3103,6 +3112,24 @@ export function ReaderRoute() {
     wordAudioPhase,
     warmCloudAtOffset,
   ])
+
+  // Unlock AudioContext on first gesture so Play doesn't stall on autoplay policy.
+  useEffect(() => {
+    const unlock = () => {
+      try {
+        const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+        if (!Ctx) return
+        const ctx = new Ctx()
+        void ctx.resume().finally(() => { void ctx.close().catch(() => undefined) })
+      } catch { /* ignore */ }
+    }
+    window.addEventListener('pointerdown', unlock, { once: true, passive: true })
+    window.addEventListener('keydown', unlock, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+  }, [])
 
   function patchAppearance(patch: Partial<Appearance>) {
     setAppearance(a => ({ ...a, ...patch }))

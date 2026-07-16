@@ -8,20 +8,21 @@ export interface AudioTextChunk {
   text: string
 }
 
-// Progressive chunk ramp — sized so first audio is ~2–3s of speech (not a
-// micro-slice), then mid/steady keep the pipeline full without stacking too
-// many concurrent Fly Kokoro jobs (which made first audio *slower*).
-//
-// Speech is roughly ~14–18 chars/sec; ~110 chars ≈ 2.5–3s of audio cushion.
+// Progressive chunk ramp:
+//   chunk 0 → short (~1.5–2s speech) so first synth is quick on Fly
+//   chunk 1 → medium while 0 plays
+//   chunk 2+ → steady
+// Speech ≈ 14–18 chars/sec; ~70 chars ≈ 1.5–2s of cushion after first audio starts.
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
-  google: 120,
-  kokoro: 110,
+  google: 100,
+  // Shorter = faster cold synth; follow-up fills while this plays.
+  kokoro: 70,
 }
 
 /** Second slice after the first; bridges until steady-state chunks arrive. */
 export const SECOND_AUDIO_CHARS: Record<string, number> = {
   google: 200,
-  kokoro: 200,
+  kokoro: 180,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {

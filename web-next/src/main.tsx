@@ -76,9 +76,9 @@ void import('@/shared/storage/dictionaryCache').then((dictionaryCache) => {
   void dictionaryCache.ensureDictionarySeed()
 })
 
-// Ping hosted Kokoro via Worker so Fly is less likely cold on first practice Play.
+// Keep Fly Kokoro warm for the whole session (health every 90s + initial prime synth).
 void import('@/features/studio/studioVoice').then((studioVoice) => {
-  studioVoice.warmHostedKokoro()
+  studioVoice.startKokoroKeepAlive()
 })
 
 createRoot(document.getElementById('root')!).render(

@@ -113,16 +113,40 @@ function speakBrowserFallback(text: string) {
   }
 }
 
-/** Ping Worker → Fly Kokoro health so the machine is warm before first Play. */
-export function warmHostedKokoro(force = false) {
+/**
+ * Ping Worker → Fly Kokoro so the machine stays warm before first Play.
+ * Pass `prime: true` occasionally to run a tiny synth (keeps model path hot).
+ */
+export function warmHostedKokoro(force = false, options?: { prime?: boolean }) {
   const voice = preferredPracticeVoice().voice
-  if (!force && warmupKicked && warmedVoice === voice) return
+  const prime = Boolean(options?.prime)
+  if (!force && !prime && warmupKicked && warmedVoice === voice) return
   warmupKicked = true
   warmedVoice = voice
   void api.post('/api/providers/warmup', {
     provider: 'kokoro',
     voice,
+    ...(prime ? { synth: true } : {}),
   }).catch(() => { /* best-effort */ })
+}
+
+/** Keep-alive while the tab is open (Fly cold starts were multi-second). */
+export function startKokoroKeepAlive() {
+  if (typeof window === 'undefined') return () => undefined
+  warmHostedKokoro(true, { prime: true })
+  const tick = () => {
+    if (document.visibilityState !== 'visible') return
+    warmHostedKokoro(true)
+  }
+  const id = window.setInterval(tick, 90_000)
+  const onVis = () => {
+    if (document.visibilityState === 'visible') warmHostedKokoro(true)
+  }
+  document.addEventListener('visibilitychange', onVis)
+  return () => {
+    window.clearInterval(id)
+    document.removeEventListener('visibilitychange', onVis)
+  }
 }
 
 class AutoplayBlockedError extends Error {
