@@ -2,22 +2,24 @@
  * High-quality practice pronunciation via hosted Kokoro (female by default).
  *
  * Practice always prefers neural Kokoro over browser speech:
- *  1. Hosted Kokoro (production path — fast single-word synth)
+ *  1. Hosted Kokoro (production path — edge-cached on Worker)
  *  2. On-device Kokoro if the reader model is already warm
  *  3. Gemini female (Kore) if Kokoro fails
  *  4. Browser speech last resort (female English voice when available)
  */
 
-import { request } from '@/shared/api/client'
+import { api, request } from '@/shared/api/client'
 import { loadAudioPrefs } from '@/features/reader/audioPreferences'
 import { playableAudioUrl } from '@/features/reader/tts-engine/liveAudio'
 import { synthesizeKokoroLocal } from '@/features/reader/tts-engine/kokoroAudio'
 import { isModelReady } from '@/shared/storage/modelCache'
 
 const AUDIO_CACHE = new Map<string, string>()
-const AUDIO_CACHE_CAP = 80
+const AUDIO_CACHE_CAP = 96
+const INFLIGHT = new Map<string, Promise<string | null>>()
 let currentAudio: HTMLAudioElement | null = null
 let speakGeneration = 0
+let warmupKicked = false
 
 /** Female Kokoro voices — practice defaults to Heart for clarity. */
 const FEMALE_KOKORO_VOICES = new Set([
@@ -26,14 +28,14 @@ const FEMALE_KOKORO_VOICES = new Set([
 const DEFAULT_PRACTICE_VOICE = 'af_heart'
 const DEFAULT_GEMINI_FEMALE = 'Kore'
 
-/** Slightly brisk for short headwords (was 0.9 — felt slow). */
+/** Slightly brisk for short headwords. */
 const PRACTICE_SPEED = 1.05
 const PRACTICE_LENGTH_SCALE = 1 / PRACTICE_SPEED
 const HOSTED_TIMEOUT_MS = 12_000
+const PREFETCH_CONCURRENCY = 3
+const PREFETCH_LIMIT = 16
 
 function preferredPracticeVoice(): { provider: 'kokoro' | 'google'; voice: string } {
-  // Practice always aims for Kokoro first (hosted is configured in production).
-  // If the reader prefs already picked a female Kokoro voice, keep it.
   const prefs = loadAudioPrefs()
   if (prefs.provider === 'kokoro') {
     const remembered = prefs.voicesByProvider.kokoro ?? prefs.voice
@@ -107,6 +109,16 @@ function speakBrowserFallback(text: string) {
   }
 }
 
+/** Ping Worker → Fly Kokoro health so the machine is warm before first Play. */
+export function warmHostedKokoro() {
+  if (warmupKicked) return
+  warmupKicked = true
+  void api.post('/api/providers/warmup', {
+    provider: 'kokoro',
+    voice: preferredPracticeVoice().voice,
+  }).catch(() => { /* best-effort */ })
+}
+
 class AutoplayBlockedError extends Error {
   constructor() {
     super('autoplay-blocked')
@@ -170,43 +182,58 @@ async function tryLocalKokoro(text: string, voice: string, gen: number): Promise
   return url
 }
 
+function hostedCacheKey(provider: string, voice: string, text: string) {
+  return `hosted:${provider}:${voice}:${PRACTICE_LENGTH_SCALE.toFixed(3)}:${text.toLowerCase()}`
+}
+
 async function tryHostedNeural(
   text: string,
   provider: 'kokoro' | 'google',
   voice: string,
   gen: number,
 ): Promise<string | null> {
-  const cacheKey = `hosted:${provider}:${voice}:${PRACTICE_LENGTH_SCALE.toFixed(3)}:${text.toLowerCase()}`
+  const cacheKey = hostedCacheKey(provider, voice, text)
   const cached = AUDIO_CACHE.get(cacheKey)
   if (cached) return cached
 
-  const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), HOSTED_TIMEOUT_MS)
-  try {
-    const preview = await request<{ audioUrl: string }>('/api/providers/test', {
-      method: 'POST',
-      body: JSON.stringify({
-        provider,
-        voice,
-        text,
-        length_scale: PRACTICE_LENGTH_SCALE,
-        sentence_silence: 0.02,
-        narration_style: provider === 'google' ? 'warm' : '',
-      }),
-      signal: controller.signal,
-    })
-    if (gen !== speakGeneration) return null
-
-    const playable = await playableAudioUrl(preview.audioUrl, controller.signal)
-    if (gen !== speakGeneration) {
-      playable.revoke()
-      return null
-    }
-    rememberUrl(cacheKey, playable.url)
-    return playable.url
-  } finally {
-    window.clearTimeout(timer)
+  const existing = INFLIGHT.get(cacheKey)
+  if (existing) {
+    const url = await existing
+    if (url && gen === speakGeneration) return url
+    return url
   }
+
+  const work = (async (): Promise<string | null> => {
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), HOSTED_TIMEOUT_MS)
+    try {
+      const preview = await request<{ audioUrl: string }>('/api/providers/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider,
+          voice,
+          text,
+          length_scale: PRACTICE_LENGTH_SCALE,
+          sentence_silence: 0.02,
+          narration_style: provider === 'google' ? 'warm' : '',
+        }),
+        signal: controller.signal,
+      })
+      const playable = await playableAudioUrl(preview.audioUrl, controller.signal)
+      rememberUrl(cacheKey, playable.url)
+      return playable.url
+    } catch {
+      return null
+    } finally {
+      window.clearTimeout(timer)
+      INFLIGHT.delete(cacheKey)
+    }
+  })()
+
+  INFLIGHT.set(cacheKey, work)
+  const url = await work
+  if (url && gen !== speakGeneration) return url
+  return url
 }
 
 export type SpeakStudioOptions = {
@@ -224,12 +251,13 @@ export async function speakStudioText(text: string, options?: SpeakStudioOptions
 
   const gen = ++speakGeneration
   stopCurrentAudio()
+  warmHostedKokoro()
 
   const { voice } = preferredPracticeVoice()
   const onPlaying = options?.onPlaying
 
   try {
-    // 1) Hosted Kokoro first — production path; snappy female voice for headwords.
+    // 1) Hosted Kokoro first — Worker edge-caches short previews.
     const hostedKokoro = await tryHostedNeural(cleaned, 'kokoro', voice, gen)
     if (hostedKokoro && gen === speakGeneration) {
       await playUrl(hostedKokoro, gen, onPlaying)
@@ -270,11 +298,36 @@ export function estimateSpeakMs(text: string) {
   return Math.min(7000, Math.max(800, Math.round(chars * 70 + 350)))
 }
 
-/** Prefetch neural audio for upcoming practice words (best-effort). */
+/**
+ * Prefetch neural audio for upcoming practice words (best-effort, concurrent).
+ * Also warms Fly Kokoro so the first real tap is not a cold start.
+ */
 export function prefetchStudioWords(words: string[]) {
-  const unique = [...new Set(words.map((w) => w.replace(/\s+/g, ' ').trim().toLowerCase()).filter(Boolean))]
+  warmHostedKokoro()
+  const unique = [...new Set(
+    words.map((w) => w.replace(/\s+/g, ' ').trim()).filter(Boolean),
+  )].slice(0, PREFETCH_LIMIT)
+  if (unique.length === 0) return
+
   const { voice } = preferredPracticeVoice()
-  for (const word of unique.slice(0, 8)) {
-    void tryHostedNeural(word, 'kokoro', voice, speakGeneration).catch(() => { /* ignore */ })
-  }
+  let index = 0
+  const workers = Array.from({ length: Math.min(PREFETCH_CONCURRENCY, unique.length) }, async () => {
+    while (index < unique.length) {
+      const i = index
+      index += 1
+      const word = unique[i]
+      // Use a generation that never cancels prefetch when user clicks another word.
+      await tryHostedNeural(word, 'kokoro', voice, speakGeneration).catch(() => null)
+    }
+  })
+  void Promise.all(workers)
+}
+
+/** Prefetch a single upcoming word (e.g. next session step). */
+export function prefetchStudioWord(word: string) {
+  const cleaned = word.replace(/\s+/g, ' ').trim()
+  if (!cleaned) return
+  warmHostedKokoro()
+  const { voice } = preferredPracticeVoice()
+  void tryHostedNeural(cleaned, 'kokoro', voice, speakGeneration).catch(() => null)
 }

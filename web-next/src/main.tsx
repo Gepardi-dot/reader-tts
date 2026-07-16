@@ -76,6 +76,11 @@ void import('@/shared/storage/dictionaryCache').then((dictionaryCache) => {
   void dictionaryCache.ensureDictionarySeed()
 })
 
+// Ping hosted Kokoro via Worker so Fly is less likely cold on first practice Play.
+void import('@/features/studio/studioVoice').then((studioVoice) => {
+  studioVoice.warmHostedKokoro()
+})
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>

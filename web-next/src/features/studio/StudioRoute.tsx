@@ -19,7 +19,7 @@ import {
   type SessionMode,
 } from './sessionPlan'
 import { StudioHeader, useStudioSummary } from './StudioHeader'
-import { prefetchStudioWords, speakStudioText } from './studioVoice'
+import { prefetchStudioWord, prefetchStudioWords, speakStudioText, warmHostedKokoro } from './studioVoice'
 import {
   formatStudyDefinition,
   isFabricatedContextSentence,
@@ -2315,6 +2315,7 @@ function PracticeScreen({
   onComplete,
   busy,
   sessionLabel,
+  nextWord,
 }: {
   step: PracticeStep
   stepIndex: number
@@ -2323,10 +2324,19 @@ function PracticeScreen({
   onComplete: (result: StepCompletePayload) => void
   busy: boolean
   sessionLabel?: string
+  /** Prefetch Kokoro audio for the following step. */
+  nextWord?: string
 }) {
   const [xpAnim, setXpAnim] = useState<string | null>(null)
   const frameHeight = usePracticeFrameHeight()
   const progress = (stepIndex + 0.15) / Math.max(1, totalSteps)
+
+  // Keep Fly warm + prefetch current & next headwords for near-instant speaker taps.
+  useEffect(() => {
+    warmHostedKokoro()
+    prefetchStudioWord(step.word.word)
+    if (nextWord) prefetchStudioWord(nextWord)
+  }, [step.id, step.word.word, nextWord])
 
   function handleComplete(payload: StepCompletePayload) {
     if (payload.correct) {
@@ -3197,6 +3207,7 @@ export function StudioRoute() {
               3,
               currentStep.word.definition,
             )}
+            nextWord={sessionPlan[stepIndex + 1]?.word.word}
             onComplete={completeStep}
             busy={submitting}
           />

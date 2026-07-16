@@ -214,12 +214,13 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   if (path === '/api/health' && request.method === 'GET') return health(env)
   if (path.startsWith('/api/auth/')) return handleAuth(request, env, path)
   if (path === '/api/providers' && request.method === 'GET') return providers(env)
-  if (path === '/api/providers/warmup' && request.method === 'POST') return json({ ok: true })
+  // Public warmup: ping hosted Kokoro so Fly stays warm before the user plays audio.
+  if (path === '/api/providers/warmup' && request.method === 'POST') return providersWarmup(request, env, ctx)
   if (path === '/api/dictionary/lookup' && request.method === 'GET') return dictionaryLookup(url, env)
 
   const user = await requireUser(request, env)
 
-  if (path === '/api/providers/test' && request.method === 'POST') return testProvider(request, env)
+  if (path === '/api/providers/test' && request.method === 'POST') return testProvider(request, env, ctx)
   if (path === '/api/telemetry/tts-summary' && request.method === 'GET') return ttsTelemetrySummary(env, user)
   if (path === '/api/telemetry' && request.method === 'POST') return recordTelemetry(request, env, user)
 
@@ -1186,7 +1187,36 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
   return json(payload)
 }
 
-async function testProvider(request: Request, env: Env) {
+/** Keep Fly Kokoro awake + optionally prime a short synth (best-effort). */
+async function providersWarmup(request: Request, env: Env, ctx: ExecutionContext) {
+  const body = await readJson<Record<string, unknown>>(request).catch(() => ({} as Record<string, unknown>))
+  const provider = stringField(body.provider) || 'kokoro'
+  const voice = stringField(body.voice)
+
+  if (provider === 'kokoro' && kokoroRemoteConfigured(env)) {
+    const base = env.KOKORO_REMOTE_URL!.trim().replace(/\/+$/, '')
+    const apiKey = env.KOKORO_REMOTE_API_KEY?.trim()
+    const headers: Record<string, string> = { Accept: 'application/json' }
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`
+      headers['X-Api-Key'] = apiKey
+    }
+    // Health ping first (cheap) — defeats Fly scale-to-zero lag on next Play.
+    ctx.waitUntil(
+      fetch(`${base}/v1/health`, { headers }).catch(() => undefined),
+    )
+  }
+
+  return json({
+    ok: true,
+    provider,
+    voice: voice || null,
+    kokoroConfigured: kokoroRemoteConfigured(env),
+    geminiConfigured: Boolean(env.GEMINI_API_KEY?.trim()),
+  })
+}
+
+async function testProvider(request: Request, env: Env, ctx: ExecutionContext) {
   const body = await readJson<Record<string, unknown>>(request)
   const provider = stringField(body.provider)
   if (provider !== 'google' && provider !== 'kokoro') {
@@ -1201,30 +1231,66 @@ async function testProvider(request: Request, env: Env) {
   // Cap length so this endpoint cannot be used as a bulk TTS sink.
   const requestedText = stringField(body.text) || stringField(body.sampleText) || stringField(body.sample_text)
   const sampleText = (requestedText || PROVIDER_PREVIEW_TEXT).slice(0, 280)
+  const voiceField = stringField(body.voice) || null
+  const modelField = stringField(body.model) || null
+  const narrationStyle = stringField(body.narration_style ?? body.narrationStyle)
+
+  // Edge-cache practice/preview WAVs so repeat words and session prefetch skip Fly.
+  const cacheDigest = await sha256Base64Url(JSON.stringify({
+    kind: 'provider-test',
+    v: 2,
+    provider,
+    voice: voiceField || '',
+    model: modelField || '',
+    text: sampleText,
+    lengthScale: safeLengthScale,
+    sentenceSilence: safeSentenceSilence,
+    narrationStyle: narrationStyle || '',
+  }))
+  const cached = await readEdgeAudioCache(`ptest:${cacheDigest}`)
+  if (
+    cached
+    && typeof cached.audioUrl === 'string'
+    && cached.audioUrl.startsWith('data:audio/')
+  ) {
+    return json({
+      provider,
+      voice: typeof cached.voice === 'string' ? cached.voice : voiceField,
+      model: typeof cached.model === 'string' ? cached.model : modelField,
+      sampleText,
+      audioUrl: cached.audioUrl,
+      cacheHit: true,
+      message: provider === 'google' ? 'Gemini preview (cached).' : 'Hosted Kokoro preview (cached).',
+    })
+  }
 
   const result = provider === 'google'
     ? await synthesizeGeminiAudio(env, {
       text: sampleText,
-      voice: stringField(body.voice) || null,
-      model: stringField(body.model) || null,
-      narrationStyle: stringField(body.narration_style ?? body.narrationStyle),
+      voice: voiceField,
+      model: modelField,
+      narrationStyle,
       lengthScale: safeLengthScale,
       sentenceSilence: safeSentenceSilence,
     })
     : await synthesizeKokoroRemote(env, {
       text: sampleText,
-      voice: stringField(body.voice) || null,
+      voice: voiceField,
       lengthScale: safeLengthScale,
     })
 
-  return json({
+  const audioUrl = `data:audio/wav;base64,${bytesToBase64(result.wav)}`
+  const payload: Record<string, JsonValue> = {
     provider,
     voice: result.voice,
     model: result.model,
     sampleText,
-    audioUrl: `data:audio/wav;base64,${bytesToBase64(result.wav)}`,
+    audioUrl,
+    cacheHit: false,
     message: provider === 'google' ? 'Gemini preview ready.' : 'Hosted Kokoro preview ready.',
-  })
+  }
+  writeEdgeAudioCache(ctx, `ptest:${cacheDigest}`, payload)
+  return json(payload)
 }
 
 function telemetryString(value: unknown, maxLength = TELEMETRY_MAX_TEXT) {
