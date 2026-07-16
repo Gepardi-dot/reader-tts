@@ -9,6 +9,7 @@
     "preview": "npm --prefix web-next run preview",
     "worker:dev": "npx wrangler dev --config cloudflare/worker/wrangler.toml --local",
     "worker:deploy": "npx wrangler deploy --config cloudflare/worker/wrangler.toml",
+    "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
     "d1:migrate:local": "npx wrangler d1 migrations apply reader_tts --local --config cloudflare/worker/wrangler.toml",
     "d1:migrate:remote": "npx wrangler d1 migrations apply reader_tts --remote --config cloudflare/worker/wrangler.toml",
     "pages:deploy": "npm run build && npx wrangler pages deploy web-next/dist --project-name reader-tts",

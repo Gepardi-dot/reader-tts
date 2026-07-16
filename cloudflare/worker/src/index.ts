@@ -42,6 +42,8 @@ interface R2Bucket {
 interface Env {
   DB: D1Database
   AUDIO_CACHE?: R2Bucket
+  /** Static SPA assets (web-next/dist) when deployed as a unified host. */
+  ASSETS?: { fetch: (request: Request) => Promise<Response> }
   APP_ORIGIN?: string
   SESSION_DAYS?: string
   GEMINI_API_KEY?: string
@@ -154,6 +156,11 @@ export default {
 
     try {
       const url = new URL(request.url)
+      // With assets + run_worker_first=["/api/*"], only API hits this script.
+      // Fallback: serve SPA from ASSETS if a non-API request still arrives.
+      if (!url.pathname.startsWith('/api')) {
+        return serveSpa(request, env)
+      }
       const response = await route(request, env, url, ctx)
       return withCors(response, request, env)
     } catch (error) {
@@ -166,26 +173,36 @@ export default {
   },
 }
 
-function primaryAppOrigin(env: Env) {
+function primaryAppOrigin(env: Env, request?: Request) {
+  // Prefer this host when the SPA is served from the same Worker (unified deploy).
+  if (request) {
+    try {
+      return new URL(request.url).origin
+    } catch { /* ignore */ }
+  }
   const configured = (env.APP_ORIGIN ?? '')
     .split(',')
     .map((item) => item.trim().replace(/\/$/, ''))
     .filter(Boolean)
-  return configured[0] || 'https://readertts.vercel.app'
+  return configured[0] || 'https://reader-tts-api.reader-tts-ari.workers.dev'
 }
 
-/** Friendly landing when someone opens the API host in a browser (not the SPA). */
-function apiLanding(env: Env, request: Request) {
-  const app = primaryAppOrigin(env)
+/** Serve the React SPA from static assets (unified Cloudflare host). */
+async function serveSpa(request: Request, env: Env): Promise<Response> {
+  if (env.ASSETS) {
+    // not_found_handling=single-page-application is set in wrangler.toml
+    return env.ASSETS.fetch(request)
+  }
+  // API-only deploy (no assets built): point browsers at the known app host.
+  const app = primaryAppOrigin(env, request)
   const accept = request.headers.get('Accept') || ''
   if (accept.includes('text/html')) {
-    // Send humans to the real app UI.
     return Response.redirect(app, 302)
   }
   return json({
     service: 'reader-tts-api',
     status: 'ok',
-    message: 'This host is the API only. Open the app URL in your browser to use the reader.',
+    message: 'API only — SPA assets not attached. Deploy with npm run deploy:cloudflare.',
     app,
     health: '/api/health',
   })
@@ -193,11 +210,6 @@ function apiLanding(env: Env, request: Request) {
 
 async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext): Promise<Response> {
   const path = normalizePath(url.pathname)
-
-  // Root / non-API paths: never demand auth (browsers often open the workers.dev URL).
-  if (path === '/' || path === '' || !path.startsWith('/api/')) {
-    return apiLanding(env, request)
-  }
 
   if (path === '/api/health' && request.method === 'GET') return health(env)
   if (path.startsWith('/api/auth/')) return handleAuth(request, env, path)

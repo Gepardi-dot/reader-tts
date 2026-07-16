@@ -2,14 +2,22 @@ name = "reader-tts-api"
 main = "src/index.ts"
 compatibility_date = "2026-06-29"
 
+# Unified host: SPA + /api on the same Worker (best latency, same-origin auth).
+# Build web-next first (see npm run deploy:cloudflare).
+[assets]
+directory = "../../web-next/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# Only /api/* hits the Worker script; everything else is static SPA assets.
+run_worker_first = ["/api/*"]
+
 [vars]
 APP_NAME = "reader-tts"
 GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 # Hosted Kokoro FastAPI (Fly). Auth key is a Worker secret: KOKORO_REMOTE_API_KEY.
 KOKORO_REMOTE_URL = "https://kokoro-reader.fly.dev"
-# Comma-separated browser origins allowed to call this API (CORS).
-# Production SPA is on Vercel; local Vite ports are included as defaults in code too.
-APP_ORIGIN = "https://readertts.vercel.app,http://localhost:5175,http://localhost:5173,http://127.0.0.1:5175"
+# Comma-separated browser origins allowed for CORS (cross-origin clients e.g. Vercel backup).
+APP_ORIGIN = "https://reader-tts-api.reader-tts-ari.workers.dev,https://readertts.vercel.app,http://localhost:5175,http://localhost:5173,http://127.0.0.1:5175"
 
 [[d1_databases]]
 binding = "DB"

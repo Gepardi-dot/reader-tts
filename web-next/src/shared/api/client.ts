@@ -21,16 +21,23 @@ async function refreshSessionToken(previousToken: string) {
   return previousToken
 }
 
-/** Cloudflare Worker API. Must stay absolute in production (Vercel static host ≠ API). */
-const PRODUCTION_API_ORIGIN = 'https://reader-tts-api.reader-tts-ari.workers.dev'
+/**
+ * API origin:
+ * - empty / "relative" → same-origin `/api` (Cloudflare unified Worker+SPA — preferred)
+ * - absolute URL → cross-origin API (e.g. Vercel UI talking to Worker)
+ */
+const FALLBACK_ABSOLUTE_API = 'https://reader-tts-api.reader-tts-ari.workers.dev'
 
 function configuredApiOrigin() {
-  const fromEnv = (import.meta.env.VITE_API_ORIGIN as string | undefined)?.trim()
-  // Production builds must never fall back to same-origin /api on Vercel —
-  // that path is the legacy Python FastAPI ("Authentication required.").
-  const configured = fromEnv
-    || (import.meta.env.PROD ? PRODUCTION_API_ORIGIN : '')
-  return configured ? configured.replace(/\/$/, '') : ''
+  const raw = import.meta.env.VITE_API_ORIGIN as string | undefined
+  if (raw === 'relative' || raw === 'same-origin') return ''
+  const fromEnv = typeof raw === 'string' ? raw.trim() : ''
+  if (fromEnv) return fromEnv.replace(/\/$/, '')
+  if (import.meta.env.DEV) return ''
+  if (import.meta.env.PROD && import.meta.env.VITE_API_MODE === 'absolute') {
+    return FALLBACK_ABSOLUTE_API
+  }
+  return ''
 }
 
 function resolveUrl(url: string) {

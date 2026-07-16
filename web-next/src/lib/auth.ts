@@ -17,16 +17,26 @@ const USER_KEY = 'reader-tts-auth-user'
 let cachedUser: AuthUser | null = readStoredUser()
 const listeners = new Set<(user: AuthUser | null) => void>()
 
-/** Cloudflare Worker API. Must stay absolute in production (Vercel static host ≠ API). */
-const PRODUCTION_API_ORIGIN = 'https://reader-tts-api.reader-tts-ari.workers.dev'
+/**
+ * API origin:
+ * - empty / "relative" → same-origin `/api` (Cloudflare unified Worker+SPA — preferred)
+ * - absolute URL → cross-origin API (e.g. Vercel UI talking to Worker)
+ */
+const FALLBACK_ABSOLUTE_API = 'https://reader-tts-api.reader-tts-ari.workers.dev'
 
 function configuredApiOrigin() {
-  const fromEnv = (import.meta.env.VITE_API_ORIGIN as string | undefined)?.trim()
-  // Production builds must never fall back to same-origin /api on Vercel —
-  // that path is the legacy Python FastAPI ("Authentication required.").
-  const configured = fromEnv
-    || (import.meta.env.PROD ? PRODUCTION_API_ORIGIN : '')
-  return configured ? configured.replace(/\/$/, '') : ''
+  const raw = import.meta.env.VITE_API_ORIGIN as string | undefined
+  if (raw === 'relative' || raw === 'same-origin') return ''
+  const fromEnv = typeof raw === 'string' ? raw.trim() : ''
+  if (fromEnv) return fromEnv.replace(/\/$/, '')
+  // Dev: Vite proxies /api → Worker
+  if (import.meta.env.DEV) return ''
+  // Production default: same-origin when SPA is hosted on the Worker;
+  // Vercel builds must set VITE_API_ORIGIN to the Worker URL explicitly.
+  if (import.meta.env.PROD && import.meta.env.VITE_API_MODE === 'absolute') {
+    return FALLBACK_ABSOLUTE_API
+  }
+  return ''
 }
 
 function resolveUrl(url: string) {
@@ -77,13 +87,18 @@ export function hasAuthToken() {
 }
 
 export class AuthApiError extends Error {
+  status: number
+  code?: 'email_taken' | 'invalid_credentials' | 'auth_required'
+
   constructor(
     message: string,
-    readonly status: number,
-    readonly code?: 'email_taken' | 'invalid_credentials' | 'auth_required',
+    status: number,
+    code?: 'email_taken' | 'invalid_credentials' | 'auth_required',
   ) {
     super(message)
     this.name = 'AuthApiError'
+    this.status = status
+    this.code = code
   }
 }
 
