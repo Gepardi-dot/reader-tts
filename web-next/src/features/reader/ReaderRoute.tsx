@@ -2801,6 +2801,57 @@ export function ReaderRoute() {
     primeBrowserSpeechVoices()
   }, [])
 
+  // Lock background scroll while Audio/Appearance sheet is open (iOS overscroll
+  // otherwise moves the book page and "deforms" the fixed panel).
+  useEffect(() => {
+    if (sheet !== 'audio' && sheet !== 'appearance') return
+
+    const html = document.documentElement
+    const body = document.body
+    const prevHtmlOverflow = html.style.overflow
+    const prevBodyOverflow = body.style.overflow
+    const prevBodyTouch = body.style.touchAction
+    const scrollY = window.scrollY
+
+    html.style.overflow = 'hidden'
+    body.style.overflow = 'hidden'
+    body.style.touchAction = 'none'
+    // Freeze position so iOS doesn't jump when overflow is restored.
+    body.style.position = 'fixed'
+    body.style.top = `-${scrollY}px`
+    body.style.left = '0'
+    body.style.right = '0'
+    body.style.width = '100%'
+
+    const allowScrollTarget = (target: EventTarget | null) => {
+      if (!(target instanceof Element)) return false
+      // Only nested scrollers may move; backdrop/page must stay still.
+      return Boolean(
+        target.closest('[data-slot="select-content"]')
+        || target.closest('[data-reader-sheet]'),
+      )
+    }
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (allowScrollTarget(e.target)) return
+      e.preventDefault()
+    }
+    document.addEventListener('touchmove', onTouchMove, { passive: false })
+
+    return () => {
+      document.removeEventListener('touchmove', onTouchMove)
+      html.style.overflow = prevHtmlOverflow
+      body.style.overflow = prevBodyOverflow
+      body.style.touchAction = prevBodyTouch
+      body.style.position = ''
+      body.style.top = ''
+      body.style.left = ''
+      body.style.right = ''
+      body.style.width = ''
+      window.scrollTo(0, scrollY)
+    }
+  }, [sheet])
+
   useEffect(() => {
     const flush = () => {
       void flushPerformanceTelemetry()
@@ -3696,15 +3747,19 @@ export function ReaderRoute() {
 
         return (
           <>
-            {/* Backdrop */}
+            {/* Backdrop — catch clicks and block background pan on mobile */}
             <div
               className="fixed inset-0 z-[200]"
-              style={{ pointerEvents: isOpen ? 'all' : 'none' }}
+              style={{
+                pointerEvents: isOpen ? 'all' : 'none',
+                touchAction: isOpen ? 'none' : undefined,
+              }}
               onClick={() => setSheet('none')}
             />
 
             {/* Panel */}
             <div
+              data-reader-sheet=""
               className="fixed z-[201] flex flex-col overflow-hidden"
               style={{
                 bottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
@@ -3720,6 +3775,7 @@ export function ReaderRoute() {
                 opacity: isOpen ? 1 : 0,
                 pointerEvents: isOpen ? 'all' : 'none',
                 transition: 'transform 220ms cubic-bezier(0.32,0.72,0,1), opacity 180ms ease',
+                overscrollBehavior: 'contain',
               }}
             >
               {/* Tab header */}
@@ -3757,7 +3813,10 @@ export function ReaderRoute() {
 
               {/* Content area */}
               {isOpen && (
-                <div className="overflow-y-auto" style={{ flex: 1 }}>
+                <div
+                  className="overflow-y-auto overscroll-y-contain"
+                  style={{ flex: 1, overscrollBehavior: 'contain', WebkitOverflowScrolling: 'touch' }}
+                >
                   <div style={{ display: sheet === 'audio' ? 'block' : 'none' }}>
                     <AudioPreviewPanel
                       key={`${effectiveTtsProvider}:${effectiveTtsVoice ?? ''}`}

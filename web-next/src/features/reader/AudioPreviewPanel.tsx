@@ -437,7 +437,7 @@ export function AudioPreviewPanel({
           })
         }}>
           <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
-          <SelectContent>
+          <SelectContent alignItemWithTrigger={false} side="bottom">
             {providerOptions.map((p) => (
               <SelectItem key={p.id} value={p.id} disabled={!p.available}>
                 {p.label}{p.available ? '' : ' (not configured)'}
@@ -468,7 +468,7 @@ export function AudioPreviewPanel({
             }}
           >
             <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
-            <SelectContent>
+            <SelectContent alignItemWithTrigger={false} side="top">
               {providerVoices.map((v) => (
                 <SelectItem key={v.id} value={v.id}>{v.label}</SelectItem>
               ))}
