@@ -9,20 +9,20 @@ export interface AudioTextChunk {
 }
 
 // Progressive chunk ramp:
-//   chunk 0 → short (~1.5–2s speech) so first synth is quick on Fly
-//   chunk 1 → medium while 0 plays
+//   chunk 0 → ~2s of speech (fast enough to start, long enough to cover next synth)
+//   chunk 1 → medium (started in parallel with 0 so the seam is usually ready)
 //   chunk 2+ → steady
-// Speech ≈ 14–18 chars/sec; ~70 chars ≈ 1.5–2s of cushion after first audio starts.
+// Speech ≈ 14–18 chars/sec. Overlap load of chunk 1 with chunk 0 to kill boundary gaps.
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
-  google: 100,
-  // Shorter = faster cold synth; follow-up fills while this plays.
-  kokoro: 70,
+  google: 110,
+  kokoro: 95,
 }
 
 /** Second slice after the first; bridges until steady-state chunks arrive. */
 export const SECOND_AUDIO_CHARS: Record<string, number> = {
   google: 200,
-  kokoro: 180,
+  // Slightly shorter mid-slice → faster synth so it lands before chunk 0 ends.
+  kokoro: 160,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {

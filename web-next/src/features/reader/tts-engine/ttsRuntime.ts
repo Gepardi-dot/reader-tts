@@ -212,8 +212,8 @@ export class TtsRuntime {
       provider: input.provider,
       voice: input.voice,
       rate: input.rate ?? this.rate,
-      // Only warm the first ~2–3s slice so Play is a cache hit; more jobs delayed first audio.
-      chunkCount: 1,
+      // Warm first + next so the chunk boundary is usually already buffered.
+      chunkCount: input.provider === 'kokoro' ? 2 : 1,
       signal: input.signal,
     })
   }
@@ -392,13 +392,6 @@ export class TtsRuntime {
       onUnderrun: (nextChunkIndex) => {
         if (generation !== this.generation) return
 
-        // Stream gap: more frames still arriving for an in-flight chunk.
-        if (this.chunks.some((chunk) => chunk.status === 'fetching') || this.loadingChunkIndexes.size > 0) {
-          this.phase = 'buffering'
-          this.emit()
-          return
-        }
-
         if (nextChunkIndex >= this.chunks.length) {
           this.stop()
           return
@@ -412,6 +405,8 @@ export class TtsRuntime {
           return
         }
 
+        // Always attach a completion handler (even if already fetching) so we
+        // resume as soon as the next buffer lands — avoids a stuck highlight.
         this.phase = 'buffering'
         this.emit()
         queuePerformanceTelemetry({
@@ -422,6 +417,7 @@ export class TtsRuntime {
             nextIndex: nextChunkIndex,
             totalChunks: this.chunks.length,
             reason: this.reason,
+            alreadyFetching: this.chunks[nextChunkIndex]?.status === 'fetching',
           },
         })
 
@@ -430,8 +426,12 @@ export class TtsRuntime {
           .then(() => {
             this.loadingChunkIndexes.delete(nextChunkIndex)
             if (generation !== this.generation) return
-            this.scheduleReadyFrom(nextChunkIndex)
+            if (this.scheduleReadyFrom(nextChunkIndex) > 0) {
+              this.phase = 'playing'
+              this.lane = 'native'
+            }
             this.refreshExpectMore(nextChunkIndex)
+            this.emit()
           })
           .catch((error) => {
             this.loadingChunkIndexes.delete(nextChunkIndex)
@@ -446,9 +446,7 @@ export class TtsRuntime {
       },
     })
 
-    // Stream frames to the clock as soon as they arrive (first Kokoro sentence
-    // should be audible without waiting for the full first chunk).
-    let firstFrameSeen = false
+    // Stream frames to the clock as soon as they arrive.
     const unsubFrames = pool.onFrame((chunkIndex, frame) => {
       if (generation !== this.generation || controller.signal.aborted) return
       if (this.scheduledBuffers.has(frame.buffer)) return
@@ -460,43 +458,62 @@ export class TtsRuntime {
         seekSeconds: 0,
         cues: frame.cues,
       })
+      // Resume after a boundary underrun as soon as the next buffer lands.
       if (this.phase === 'buffering' || this.phase === 'idle') {
         this.phase = 'playing'
         this.lane = 'native'
-        this.emit()
       }
-
-      // After first audio is heard, fill the next slice(s) sequentially so we
-      // don't starve Fly with concurrent Kokoro jobs.
-      if (!firstFrameSeen) {
-        firstFrameSeen = true
-        void pool.prefetchFrom(
-          1,
-          PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD,
-          controller.signal,
-        )
-      }
+      this.emit()
     })
     controller.signal.addEventListener('abort', unsubFrames, { once: true })
 
     pool.subscribe(() => {
       if (generation !== this.generation) return
+      // If we stalled waiting on a prefetch, append as soon as status flips.
+      if (this.phase === 'buffering') {
+        const next = this.currentIndex + 1
+        if (this.scheduleReadyFrom(next) > 0) {
+          this.phase = 'playing'
+          this.lane = 'native'
+        }
+      }
       this.emit()
     })
 
     try {
       this.clock.setExpectMore(true)
       this.loadingChunkIndexes.add(0)
-      // Critical path: ONLY the first ~2–3s slice. Competing parallel synths on
-      // Fly made Play feel stuck / endless buffering.
+
+      // Overlap: start chunk 1 while chunk 0 loads so the boundary is usually
+      // already buffered when the first highlight ends (only one ahead job).
+      if (this.chunks.length > 1) {
+        this.loadingChunkIndexes.add(1)
+        void pool.ensure(1, controller.signal, true)
+          .then(() => {
+            this.loadingChunkIndexes.delete(1)
+            if (generation !== this.generation) return
+            // Append gaplessly if first is already playing.
+            if (this.scheduleReadyFrom(1) > 0 && this.phase === 'buffering') {
+              this.phase = 'playing'
+              this.lane = 'native'
+            }
+            this.refreshExpectMore(1)
+            this.emit()
+          })
+          .catch(() => {
+            this.loadingChunkIndexes.delete(1)
+          })
+      }
+
       await pool.ensure(0, controller.signal, false)
       this.loadingChunkIndexes.delete(0)
       if (generation !== this.generation) return
 
-      // After first slice is ready (and usually already playing), fill ahead
-      // sequentially so the next 2–3s is prepared without starving Fly.
+      // Chunks 2+ load sequentially after the first two are in flight.
       const ahead = PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD
-      void pool.prefetchFrom(1, ahead, controller.signal)
+      if (this.chunks.length > 2) {
+        void pool.prefetchFrom(2, Math.max(1, ahead), controller.signal)
+      }
 
       if (this.clock.scheduledCount === 0) {
         throw new Error('Audio provider did not return playable audio.')
@@ -505,6 +522,7 @@ export class TtsRuntime {
       this.refreshExpectMore(0)
     } catch (error) {
       this.loadingChunkIndexes.delete(0)
+      this.loadingChunkIndexes.delete(1)
       if (controller.signal.aborted || generation !== this.generation) return
       this.hooks.showToast(audioErrorMessage(error))
       this.stop()
