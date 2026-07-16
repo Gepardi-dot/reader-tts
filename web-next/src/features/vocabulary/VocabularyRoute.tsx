@@ -151,6 +151,8 @@ function displayDefinition(note: VocabNote): string | null {
 }
 
 function WordCard({ note, lookingUp }: { note: VocabNote; lookingUp?: boolean }) {
+  // Hide glosses by default so browsing Words doesn't spoil Practice.
+  const [showDef, setShowDef] = useState(false)
   const def = displayDefinition(note)
   const phonetic = note.extra && note.extra.startsWith('/') ? note.extra : null
   const state = noteState(note)
@@ -158,18 +160,29 @@ function WordCard({ note, lookingUp }: { note: VocabNote; lookingUp?: boolean })
   const book = note.sourceBookTitle ?? note.topic ?? null
 
   return (
-    <div style={{
-      background: '#fbfdfe',
-      border: '1px solid #e4ecf5',
-      borderRadius: 14,
-      padding: '18px 18px 16px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 12,
-      cursor: 'default',
-      boxShadow: '0 1px 2px rgba(15,23,42,0.03)',
-      transition: 'box-shadow 0.15s, border-color 0.15s',
-    }}
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => { if (def) setShowDef((v) => !v) }}
+      onKeyDown={(e) => {
+        if ((e.key === 'Enter' || e.key === ' ') && def) {
+          e.preventDefault()
+          setShowDef((v) => !v)
+        }
+      }}
+      title={def ? (showDef ? 'Hide definition' : 'Show definition') : undefined}
+      style={{
+        background: '#fbfdfe',
+        border: '1px solid #e4ecf5',
+        borderRadius: 14,
+        padding: '18px 18px 16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        cursor: def ? 'pointer' : 'default',
+        boxShadow: '0 1px 2px rgba(15,23,42,0.03)',
+        transition: 'box-shadow 0.15s, border-color 0.15s',
+      }}
       onMouseEnter={(e) => {
         const el = e.currentTarget as HTMLDivElement
         el.style.boxShadow = '0 2px 10px rgba(37,99,235,0.07)'
@@ -194,11 +207,23 @@ function WordCard({ note, lookingUp }: { note: VocabNote; lookingUp?: boolean })
         <StageRing state={state} due={due} />
       </div>
 
-      {/* Definition — always reserve space so Practice-ready cards are obvious */}
+      {/* Definition hidden until tap — keeps Practice from being spoiled */}
       {def ? (
-        <p style={{ fontSize: 13.5, color: '#374151', lineHeight: 1.6, margin: 0 }} className="line-clamp-3">
-          {def}
-        </p>
+        showDef ? (
+          <p style={{ fontSize: 13.5, color: '#374151', lineHeight: 1.6, margin: 0 }} className="line-clamp-4">
+            {def}
+          </p>
+        ) : (
+          <p style={{ fontSize: 12.5, color: '#6b7280', lineHeight: 1.5, margin: 0 }}>
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '4px 10px', borderRadius: 99,
+              background: 'rgba(37,99,235,0.08)', color: '#2563eb', fontWeight: 600, fontSize: 12,
+            }}>
+              Ready · tap to show definition
+            </span>
+          </p>
+        )
       ) : lookingUp ? (
         <p style={{ fontSize: 12.5, color: '#9ca3af', lineHeight: 1.5, margin: 0, fontStyle: 'italic' }}>
           Looking up definition…
@@ -217,6 +242,7 @@ function WordCard({ note, lookingUp }: { note: VocabNote; lookingUp?: boolean })
             <Link
               to={`/book/${note.sourceBookId}`}
               title={note.sourceBookTitle}
+              onClick={(e) => e.stopPropagation()}
               style={{ fontSize: 12, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160, textAlign: 'right', textDecoration: 'none', flexShrink: 1, minWidth: 0 }}
               onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = '#374151' }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = '#9ca3af' }}
@@ -271,13 +297,16 @@ function WordRow({
       {expanded && (
         <div className="px-4 pb-3 space-y-1">
           {def ? (
-            <p className="text-[13px] text-[#9b9a97] leading-[1.6]">{def}</p>
+            <p className="text-[13px] text-[#374151] leading-[1.6]">{def}</p>
           ) : lookingUp ? (
             <p className="text-[12.5px] text-[#9b9a97] italic">Looking up definition…</p>
           ) : (
             <p className="text-[12.5px] text-amber-600">No definition yet</p>
           )}
           {note.topic && <p className="text-[11px] text-[#9b9a97]/60">{note.topic}</p>}
+          {def && (
+            <p className="text-[11px] text-[#9b9a97]">Hidden by default on cards so Practice stays fair.</p>
+          )}
         </div>
       )}
     </div>
