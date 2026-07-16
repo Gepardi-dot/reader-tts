@@ -2191,6 +2191,15 @@ function tokenizeForMatch(value: string) {
     .filter((token) => token.length > 2)
 }
 
+function normalizeForCompare(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/['']/g, "'")
+    .replace(/[^a-z0-9\s'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 function overlapScore(learner: string, target: string) {
   const learnerTokens = new Set(tokenizeForMatch(learner))
   const targetTokens = tokenizeForMatch(target)
@@ -2202,18 +2211,69 @@ function overlapScore(learner: string, target: string) {
   return hits / targetTokens.length
 }
 
+/** Token recall in both directions (learner→target and target→learner). */
+function symmetricOverlap(learner: string, target: string) {
+  const a = overlapScore(learner, target)
+  const b = overlapScore(target, learner)
+  return Math.max(a, b, (a + b) / 2)
+}
+
 function heuristicVerdict(learner: string, target: string): {
   verdict: 'correct' | 'partial' | 'incorrect'
   score: number
 } {
-  const score = overlapScore(learner, target)
-  if (score >= 0.55 || learner.toLowerCase().includes(target.toLowerCase().slice(0, Math.min(12, target.length)))) {
-    return { verdict: 'correct', score }
+  const a = normalizeForCompare(learner)
+  const b = normalizeForCompare(target)
+  if (!a) return { verdict: 'incorrect', score: 0 }
+  if (!b) return { verdict: a.length > 6 ? 'partial' : 'incorrect', score: 0.3 }
+
+  // Exact / near-exact (punctuation & case ignored) — "throughout the world" ≈ "Throughout the world."
+  if (a === b) return { verdict: 'correct', score: 1 }
+  if (a.includes(b) || b.includes(a)) {
+    // Avoid accepting a single short word that merely appears inside a longer gloss
+    // unless the shorter side is most of the longer one.
+    const shorter = a.length <= b.length ? a : b
+    const longer = a.length <= b.length ? b : a
+    if (shorter.length >= 8 || shorter.split(' ').length >= 2) {
+      return { verdict: 'correct', score: Math.min(1, shorter.length / Math.max(1, longer.length) + 0.35) }
+    }
   }
-  if (score >= 0.25 || learner.trim().split(/\s+/).length >= 4) {
+
+  const score = symmetricOverlap(learner, target)
+  if (score >= 0.5) return { verdict: 'correct', score }
+  if (score >= 0.28) return { verdict: 'partial', score }
+  // Very short paraphrases with shared content words
+  if (score >= 0.2 && tokenizeForMatch(learner).length >= 2) {
     return { verdict: 'partial', score }
   }
   return { verdict: 'incorrect', score }
+}
+
+/**
+ * Gloss the learner must match for definition / free-recall coach.
+ * Never use the headword alone as the target (that marks real definitions as wrong).
+ */
+function definitionTargetForCoach(
+  row: Record<string, unknown>,
+  card: ReturnType<typeof serializeCard>,
+  clientHint?: string,
+): string {
+  const headword = String(card.productionTarget || card.cue || row.front || '').trim()
+  const candidates = [
+    clientHint,
+    row.back == null ? null : String(row.back),
+    card.explanation,
+    row.explanation == null ? null : String(row.explanation),
+    // card.answer is the definition on basic cards; on reverse cards it is the word — skip if so.
+    card.answer && card.answer.trim().toLowerCase() !== headword.toLowerCase() ? card.answer : null,
+  ]
+  for (const raw of candidates) {
+    const value = (raw ?? '').trim()
+    if (!value) continue
+    if (value.toLowerCase() === headword.toLowerCase()) continue
+    return value
+  }
+  return ''
 }
 
 function safeJsonObject(value: unknown) {
@@ -2315,7 +2375,57 @@ async function cardCoach(request: Request, env: Env, user: User, cardId: string)
   const card = serializeCard(row)
   const body = await readJson<Record<string, unknown>>(request)
   const learner = stringField(body.learnerResponse) || stringField(body.user_input) || ''
-  const target = String(card.answer || row.back || row.explanation || card.cue)
+  const step = stringField(body.step) || 'answer'
+  const task = stringField(body.task) || stringField(body.coachTask) || 'definition'
+  const headword = String(card.productionTarget || card.cue || row.front || '').trim()
+
+  // Sentence / usage practice: accept if the learner used the headword.
+  if (task === 'usage' || task === 'sentence' || step === 'usage') {
+    const lower = learner.toLowerCase()
+    const hw = headword.toLowerCase()
+    const stem = hw.slice(0, Math.max(3, Math.min(5, hw.length)))
+    const usesWord = Boolean(hw) && (lower.includes(hw) || (stem.length >= 3 && lower.includes(stem)))
+    const longEnough = learner.trim().split(/\s+/).filter(Boolean).length >= 4
+    const verdict = usesWord && longEnough ? 'correct' : usesWord ? 'partial' : 'incorrect'
+    return json({
+      provider: 'local-heuristic',
+      verdict: verdict === 'partial' ? 'close' : verdict,
+      feedbackTitle: verdict === 'correct' ? 'Nice work' : verdict === 'partial' ? 'Close' : 'Not quite',
+      feedbackBody: verdict === 'correct'
+        ? `Good use of “${headword}”.`
+        : !usesWord
+          ? `Include the word “${headword}” in your sentence.`
+          : 'Add a few more words so the sentence is complete.',
+      correction: headword,
+      nextPrompt: verdict === 'correct' ? null : `Write one sentence that uses “${headword}”.`,
+      suggestedRating: verdict === 'correct' ? 'good' : verdict === 'partial' ? 'hard' : 'again',
+      canRate: true,
+      turnCount: Number(body.turnIndex ?? 1) || 1,
+      score: verdict === 'correct' ? 1 : verdict === 'partial' ? 0.5 : 0,
+    })
+  }
+
+  // Free-recall / write-the-meaning: score against the definition, never the headword alone.
+  const expectedHint = stringField(body.expectedAnswer)
+    || stringField(body.expected_answer)
+    || stringField(body.definition)
+  const target = definitionTargetForCoach(row, card, expectedHint)
+
+  if (!target) {
+    return json({
+      provider: 'local-heuristic',
+      verdict: 'correct',
+      feedbackTitle: 'Saved',
+      feedbackBody: 'No dictionary gloss is stored for this card yet, so we accepted your answer.',
+      correction: learner,
+      nextPrompt: null,
+      suggestedRating: 'hard',
+      canRate: true,
+      turnCount: Number(body.turnIndex ?? 1) || 1,
+      score: 1,
+    })
+  }
+
   const { verdict, score } = heuristicVerdict(learner, target)
   const suggestedRating = verdict === 'correct' ? 'good' : verdict === 'partial' ? 'hard' : 'again'
   return json({
@@ -2327,12 +2437,14 @@ async function cardCoach(request: Request, env: Env, user: User, cardId: string)
         ? 'Close'
         : 'Not quite',
     feedbackBody: verdict === 'correct'
-      ? `That matches the idea of “${target}”.`
+      ? `That matches the meaning: “${target}”.`
       : verdict === 'partial'
-        ? `You’re partly there. Aim for: “${target}”.`
-        : `Remember: “${target}”.`,
+        ? `You’re partly there. A solid gloss is: “${target}”.`
+        : `The definition is: “${target}”.`,
     correction: target,
-    nextPrompt: `Try using “${card.productionTarget || card.cue}” in a fresh sentence.`,
+    nextPrompt: verdict === 'correct'
+      ? null
+      : `Restate the meaning in your own words (hint: ${target}).`,
     suggestedRating,
     canRate: true,
     turnCount: Number(body.turnIndex ?? 1) || 1,

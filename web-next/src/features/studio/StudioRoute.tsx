@@ -105,6 +105,11 @@ async function coachCard(cardId: string, body: {
   turnIndex: number
   learnerResponse: string
   history: CoachHistoryItem[]
+  /** definition = free-recall meaning; usage = sentence with the word */
+  task?: 'definition' | 'usage'
+  /** Gloss shown on the card — coach must score against this, not the headword. */
+  expectedAnswer?: string
+  definition?: string
 }): Promise<CoachResponse> {
   return api.post<CoachResponse>(`/api/vocabulary/cards/${cardId}/coach`, body)
 }
@@ -1838,6 +1843,7 @@ function WriteSentenceCoached({ word, onComplete }: { word: PracticeWord; onComp
         turnIndex,
         learnerResponse: text,
         history,
+        task: 'usage',
       })
       setCoach(result)
       setHistory((h) => [
@@ -1963,6 +1969,9 @@ function ExerciseWriteDefinition({ word, onComplete }: { word: PracticeWord; onC
         turnIndex,
         learnerResponse: text,
         history,
+        task: 'definition',
+        expectedAnswer: word.definition,
+        definition: word.definition,
       })
       setCoach(result)
       setHistory((h) => [
