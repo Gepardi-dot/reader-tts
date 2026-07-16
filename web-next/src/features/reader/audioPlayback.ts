@@ -8,21 +8,20 @@ export interface AudioTextChunk {
   text: string
 }
 
-// Progressive chunk ramp for fast first-audio without starving follow-ups:
-//   chunk 0 → short (~sentence) for instant Play
-//   chunk 1 → medium while 0 plays
-//   chunk 2+ → steady size for fewer round-trips
-// Hosted Kokoro/Gemini: start after chunk 0 only; prefetch 1+ in parallel.
+// Progressive chunk ramp — sized so first audio is ~2–3s of speech (not a
+// micro-slice), then mid/steady keep the pipeline full without stacking too
+// many concurrent Fly Kokoro jobs (which made first audio *slower*).
+//
+// Speech is roughly ~14–18 chars/sec; ~110 chars ≈ 2.5–3s of audio cushion.
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
-  google: 100,
-  // ~one short sentence — enough for natural start, small enough for fast synth.
-  kokoro: 56,
+  google: 120,
+  kokoro: 110,
 }
 
 /** Second slice after the first; bridges until steady-state chunks arrive. */
 export const SECOND_AUDIO_CHARS: Record<string, number> = {
-  google: 180,
-  kokoro: 150,
+  google: 200,
+  kokoro: 200,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {
@@ -53,10 +52,10 @@ export const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 }
 
 // Rolling window of chunks we keep in flight ahead of the cursor while playing.
+// Keep this modest: hosted Kokoro is one machine — parallel storms delay first audio.
 export const PREFETCH_AHEAD_TARGET: Record<string, number> = {
   google: 1,
-  // Hosted Kokoro: keep 2–3 ahead so the short first slice never underruns.
-  kokoro: 3,
+  kokoro: 2,
 }
 
 /** Char budget for the Nth chunk in the progressive ramp (0-based). */

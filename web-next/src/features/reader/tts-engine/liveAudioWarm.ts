@@ -22,7 +22,7 @@ export interface WarmLiveAudioParams {
   voice: string | null
   /** UI playback rate — baked into Kokoro server length_scale for cache key match. */
   rate?: number
-  /** How many leading chunks to warm (1–3). More = better ahead coverage after refresh. */
+  /** How many leading chunks to warm (1–2). Keep low so Fly prioritizes first audio. */
   chunkCount?: number
   signal?: AbortSignal
 }
@@ -39,7 +39,7 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
     provider,
     voice,
     rate = 1,
-    chunkCount = 2,
+    chunkCount = 1,
     signal,
   } = params
 
@@ -53,7 +53,7 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
     provider,
     presynthGrid: null,
     kokoroModelReady: true,
-  }).slice(0, Math.max(1, Math.min(3, chunkCount)))
+  }).slice(0, Math.max(1, Math.min(2, chunkCount)))
 
   if (!chunks.length) return
 
@@ -61,9 +61,9 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
     ? pacingForPlaybackRate('kokoro', rate)
     : pacingFor(provider)
 
-  // Parallel warm: first short slice is critical for Play; siblings fill the
-  // progressive ramp so the ear never waits on a cold second synth.
-  await Promise.all(chunks.map(async (chunk) => {
+  // Sequential warm: first slice only is critical for Play. A second job starts
+  // after the first finishes so we don't queue-starve Fly Kokoro.
+  for (const chunk of chunks) {
     if (signal?.aborted) return
     const payload: LiveAudioPayload = {
       provider,
@@ -82,6 +82,7 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
       await requestLiveAudio(bookId, payload)
     } catch {
       // Warm is best-effort; Play will surface real errors.
+      return
     }
-  }))
+  }
 }

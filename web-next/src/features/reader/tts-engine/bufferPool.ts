@@ -138,8 +138,8 @@ export class BufferPool {
 
   /**
    * Prefetch chunks starting at `index` for `target` count.
-   * Hosted paths benefit from parallel kick-off (default); on-device serial
-   * loaders still dedupe via `ensure` inflight maps.
+   * Default is sequential so hosted Kokoro isn't flooded (parallel synths made
+   * first-audio slower). Pass `parallel: true` only for light dual-fetch cases.
    */
   prefetchFrom(
     index: number,
@@ -150,7 +150,7 @@ export class BufferPool {
     if (signal.aborted) return Promise.resolve()
     const start = Math.max(0, index)
     const stop = Math.min(this.chunks.length - 1, start + Math.max(0, target) - 1)
-    const parallel = options?.parallel !== false
+    const parallel = options?.parallel === true
 
     const run = async () => {
       if (parallel) {

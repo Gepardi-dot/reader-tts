@@ -212,8 +212,8 @@ export class TtsRuntime {
       provider: input.provider,
       voice: input.voice,
       rate: input.rate ?? this.rate,
-      // Kokoro: warm a few chunks ahead so refresh + scroll still hit IDB/edge.
-      chunkCount: input.provider === 'kokoro' ? 3 : 1,
+      // Only warm the first ~2–3s slice so Play is a cache hit; more jobs delayed first audio.
+      chunkCount: 1,
       signal: input.signal,
     })
   }
@@ -466,15 +466,14 @@ export class TtsRuntime {
         this.emit()
       }
 
-      // Kick follow-up synth after first audible frame so loading isn't a
-      // multi-second silent wait for the whole first chunk.
+      // After first audio is heard, fill the next slice(s) sequentially so we
+      // don't starve Fly with concurrent Kokoro jobs.
       if (!firstFrameSeen) {
         firstFrameSeen = true
         void pool.prefetchFrom(
           1,
           PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD,
           controller.signal,
-          { parallel: true },
         )
       }
     })
@@ -488,17 +487,16 @@ export class TtsRuntime {
     try {
       this.clock.setExpectMore(true)
       this.loadingChunkIndexes.add(0)
-      // Parallel: load the short first slice + progressive follow-ups together.
-      // Play starts as soon as chunk 0 has a frame; mid/steady chunks fill behind.
-      const ahead = PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD
-      void pool.prefetchFrom(1, ahead, controller.signal, { parallel: true })
+      // Critical path: ONLY the first ~2–3s slice. Competing parallel synths on
+      // Fly made Play feel stuck / endless buffering.
       await pool.ensure(0, controller.signal, false)
       this.loadingChunkIndexes.delete(0)
       if (generation !== this.generation) return
 
-      if (!firstFrameSeen) {
-        void pool.prefetchFrom(1, ahead, controller.signal, { parallel: true })
-      }
+      // After first slice is ready (and usually already playing), fill ahead
+      // sequentially so the next 2–3s is prepared without starving Fly.
+      const ahead = PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD
+      void pool.prefetchFrom(1, ahead, controller.signal)
 
       if (this.clock.scheduledCount === 0) {
         throw new Error('Audio provider did not return playable audio.')

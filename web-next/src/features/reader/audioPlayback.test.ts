@@ -109,10 +109,12 @@ describe('audio playback chunking', () => {
     expect(Math.max(...chunks.slice(1).map((chunk) => chunk.text.length))).toBeLessThanOrEqual(420)
   })
 
-  it('sizes hosted Kokoro with a progressive ramp (short → mid → steady)', () => {
-    expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThanOrEqual(70)
+  it('sizes hosted Kokoro with a progressive ramp (~2–3s first → mid → steady)', () => {
+    // First slice targets ~2–3s of speech (~100–120 chars), not a micro-clip.
+    expect(FIRST_AUDIO_CHARS.kokoro).toBeGreaterThanOrEqual(90)
+    expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThanOrEqual(140)
     expect(SECOND_AUDIO_CHARS.kokoro).toBeGreaterThan(FIRST_AUDIO_CHARS.kokoro)
-    expect(SECOND_AUDIO_CHARS.kokoro).toBeLessThan(CHUNK_CHARS.kokoro)
+    expect(SECOND_AUDIO_CHARS.kokoro).toBeLessThanOrEqual(CHUNK_CHARS.kokoro)
     expect(CHUNK_CHARS.kokoro).toBeGreaterThanOrEqual(200)
     expect(CHUNK_CHARS.kokoro).toBeLessThanOrEqual(320)
     expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThan(CHUNK_CHARS.kokoro)
@@ -132,9 +134,9 @@ describe('audio playback chunking', () => {
       SECOND_AUDIO_CHARS.kokoro,
     )
     expect(chunks.length).toBeGreaterThanOrEqual(2)
-    expect(chunks[0].text.length).toBeLessThanOrEqual(FIRST_AUDIO_CHARS.kokoro + 90)
+    expect(chunks[0].text.length).toBeLessThanOrEqual(FIRST_AUDIO_CHARS.kokoro + 100)
     if (chunks.length > 1) {
-      expect(chunks[1].text.length).toBeLessThanOrEqual(SECOND_AUDIO_CHARS.kokoro + 140)
+      expect(chunks[1].text.length).toBeLessThanOrEqual(SECOND_AUDIO_CHARS.kokoro + 160)
     }
   })
 
