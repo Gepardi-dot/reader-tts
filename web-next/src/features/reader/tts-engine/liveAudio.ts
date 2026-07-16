@@ -278,26 +278,43 @@ export async function playableAudioUrl(url: string, signal?: AbortSignal) {
 
 export function audioErrorMessage(error: unknown) {
   const raw = error instanceof Error ? error.message : String(error)
-  const detail = raw.match(/"detail"\s*:\s*"([^"]+)"/)?.[1]
-  const message = detail ?? raw
+  // Prefer API JSON detail, including nested 502: {"detail":"..."} strings.
+  const detail = raw.match(/"detail"\s*:\s*"((?:\\.|[^"\\])*)"/)?.[1]
+    ?.replace(/\\"/g, '"')
+    ?.replace(/\\n/g, ' ')
+  const message = (detail ?? raw).trim()
 
   if (/Authentication required|Unauthorized|Session expired/i.test(message)) {
     return 'Your session expired. Sign in again, then try audio playback.'
   }
   if (/not configured|configured yet/i.test(message)) {
-    return message
+    return message.length < 180 ? message : 'Hosted voice is not configured on the server.'
+  }
+  // Hosted Kokoro (Fly) — check BEFORE generic "kokoro" so we don't claim on-device.
+  if (/Hosted Kokoro timed out|timed out.*Fly|Fly may be stopped/i.test(message)) {
+    return 'Reading voice timed out. Wait a few seconds and try Play again (server may be waking up).'
+  }
+  if (/Hosted Kokoro unreachable|Hosted Kokoro failed|kokoro-remote|KOKORO_REMOTE/i.test(message)) {
+    return 'Reading voice server is unavailable. Try again in a moment, or switch to Gemini in Audio settings.'
   }
   if (/429|RESOURCE_EXHAUSTED|quota|rate limit|cooling down/i.test(message)) {
-    return 'Gemini TTS hit the free-tier rate limit. Browser speech will continue; try Gemini again shortly.'
+    if (/kokoro/i.test(message)) {
+      return 'Kokoro is busy. Wait a few seconds and try Play again.'
+    }
+    return 'Gemini TTS hit the free-tier rate limit. Try again shortly, or use Kokoro.'
   }
-  if (/preparing|model is not ready|voice model/i.test(message)) {
-    return 'The on-device voice is still preparing. Try again in a moment.'
+  if (/preparing|model is not ready|voice model|still downloading/i.test(message)) {
+    return 'The voice model is still preparing. Try again in a moment.'
   }
-  if (/kokoro|on-device|synthesis failed|synthesis timed out|could not generate/i.test(message)) {
-    return 'The on-device voice could not generate audio. Try another Kokoro voice or retry after preparation finishes.'
+  // True on-device path only (legacy kokoro-local / worker download).
+  if (/on-device|kokoro-local|Kokoro is still downloading|local Kokoro/i.test(message)) {
+    return 'On-device Kokoro could not generate audio. Use hosted Kokoro (default) or try again after the model finishes loading.'
+  }
+  if (/synthesis failed|synthesis timed out|could not generate/i.test(message)) {
+    return 'Could not generate audio for this passage. Try again or pick another voice in Audio settings.'
   }
   if (/Audio provider did not return playable audio/i.test(message)) {
-    return 'The selected voice did not return playable audio. Try another voice or start playback again.'
+    return 'The selected voice did not return playable audio. Try again or switch voice in Audio settings.'
   }
   if (/text does not match|range/i.test(message)) {
     return 'Could not match this passage to the book text. Move slightly and try again.'
@@ -305,5 +322,10 @@ export function audioErrorMessage(error: unknown) {
   if (/Failed to fetch|NetworkError|fetch/i.test(message)) {
     return 'Could not reach the audio service. Check the connection and try again.'
   }
-  return 'Could not start audio. Check the selected voice provider and try again.'
+  // Strip noisy status prefixes: "502: Hosted Kokoro..."
+  const cleaned = message.replace(/^\d{3}:\s*/, '')
+  if (cleaned.length > 0 && cleaned.length < 160 && !/^\s*\{/.test(cleaned)) {
+    return cleaned
+  }
+  return 'Could not start audio. Check the selected voice in Audio settings and try again.'
 }

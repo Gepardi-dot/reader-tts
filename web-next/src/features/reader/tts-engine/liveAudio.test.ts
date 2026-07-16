@@ -60,8 +60,23 @@ describe('live audio quota backoff', () => {
   })
 
   it('surfaces quota errors as browser-fallback guidance', () => {
+    expect(audioErrorMessage(new Error(
+      '502: Hosted Kokoro timed out (Fly may be stopped or cold). Restart: fly machines list',
+    ))).toMatch(/timed out|waking up/i)
+
+    expect(audioErrorMessage(new Error(
+      '502: {"detail":"Hosted Kokoro failed (502): connection refused"}',
+    ))).toMatch(/unavailable|server/i)
+
+    expect(audioErrorMessage(new Error(
+      'Kokoro is still downloading. Wait for the voice to finish preparing, then tap again.',
+    ))).toMatch(/on-device|preparing|hosted Kokoro/i)
+
+    // Must NOT mislabel hosted failures as on-device.
+    expect(audioErrorMessage(new Error('Hosted Kokoro unreachable: timeout'))).not.toMatch(/on-device/i)
+
     expect(audioErrorMessage(new Error('429: RESOURCE_EXHAUSTED quota exceeded'))).toBe(
-      'Gemini TTS hit the free-tier rate limit. Browser speech will continue; try Gemini again shortly.',
+      'Gemini TTS hit the free-tier rate limit. Try again shortly, or use Kokoro.',
     )
   })
 
