@@ -2500,7 +2500,7 @@ interface AudioHandle {
   stop: () => void
 }
 
-function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, colors, handle, onOpenSheet, statusText }: {
+function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, colors, handle, onOpenSheet, statusText, followPaused, onResumeFollow }: {
   phase:        AudioPhase
   curIdx:       number
   totalChunks:  number
@@ -2511,6 +2511,9 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
   handle:       AudioHandle | null
   onOpenSheet:  () => void
   statusText?:  string | null
+  /** User scrolled away — auto-scroll to the spoken line is paused. */
+  followPaused?: boolean
+  onResumeFollow?: () => void
 }) {
   const isBuffering = phase === 'buffering'
   const isPlaying   = phase === 'playing'
@@ -2519,7 +2522,11 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
     : isPlaying
       ? 'Pause audio'
       : 'Resume audio'
-  const headline = isBuffering && statusText ? statusText : 'Now playing'
+  const headline = isBuffering && statusText
+    ? statusText
+    : followPaused
+      ? 'Playing (scroll free)'
+      : 'Now playing'
 
   const progressPct = totalChunks > 1
     ? Math.round(((curIdx + (isPlaying ? 1 : 0)) / totalChunks) * 100)
@@ -2623,6 +2630,21 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
         </div>
       </div>
 
+      {followPaused && onResumeFollow && (
+        <button
+          type="button"
+          onClick={onResumeFollow}
+          className="shrink-0 rounded-md px-2 py-1 text-[10px] font-semibold transition-opacity hover:opacity-90"
+          style={{
+            background: 'rgba(35, 131, 226, 0.14)',
+            color: '#2383e2',
+          }}
+          title="Keep the page scrolled to the line being read"
+        >
+          Follow
+        </button>
+      )}
+
       {/* Right: close */}
       <button
         onClick={() => handle?.stop()}
@@ -2682,6 +2704,11 @@ export function ReaderRoute() {
   const scrolledToOffsetRef   = useRef(false)
   const activeAudioCueKeyRef    = useRef<string | null>(null)
   const activeAudioCueRangeRef  = useRef<{ start: number; end: number } | null>(null)
+  /** True while we programmatically scroll to keep the cue in view — ignore for pause detection. */
+  const programmaticScrollRef   = useRef(false)
+  /** User scrolled away during playback — stop yanking the viewport back to the highlight. */
+  const audioFollowPausedRef    = useRef(false)
+  const [audioFollowPaused, setAudioFollowPaused] = useState(false)
   const presynthGridRef         = useRef<Array<{ start: number; end: number }> | null>(null)
   const readerTextRef         = useRef<HTMLDivElement | null>(null)
   const panelSnapshotRef      = useRef<SecondaryPanel | null>(null)
@@ -2742,7 +2769,7 @@ export function ReaderRoute() {
     wordAudioCurIdx,
     wordAudioTotal,
     wordAudioStatusText,
-    playWord,
+    playWord: playWordRaw,
     toggleWordAudio,
     stopWordAudio,
     isAudioActive,
@@ -2758,6 +2785,16 @@ export function ReaderRoute() {
     clearAudioFollow,
     showToast,
   })
+  // New Play always re-enables auto-follow so starting from a tap is natural.
+  const playWord = useCallback(async (
+    word: string,
+    startOffset: number,
+    reason?: 'voice-switch',
+  ) => {
+    audioFollowPausedRef.current = false
+    setAudioFollowPaused(false)
+    return playWordRaw(word, startOffset, reason)
+  }, [playWordRaw])
   const hasReaderText = Boolean(payload?.text)
 
   useEffect(() => {
@@ -3060,11 +3097,13 @@ export function ReaderRoute() {
       setScrollPct(pct)
       const activeCueRange = activeAudioCueRangeRef.current
       if (activeCueRange) {
-        showAudioFollow(
-          activeCueRange.start,
-          activeCueRange.end,
-          isAudioActive(),
-        )
+        // Never pass follow=true here — that used to re-center the page on every
+        // user scroll while audio played, making the reader feel stuck.
+        showAudioFollow(activeCueRange.start, activeCueRange.end, false)
+        if (!programmaticScrollRef.current && isAudioActive() && !audioFollowPausedRef.current) {
+          audioFollowPausedRef.current = true
+          setAudioFollowPaused(true)
+        }
       }
       const goingDown = y > lastScrollY.current && y > 60
       setBarVisible(!goingDown)
@@ -3297,6 +3336,15 @@ export function ReaderRoute() {
     activeAudioCueKeyRef.current = null
     activeAudioCueRangeRef.current = null
     setAudioFollowRects([])
+    audioFollowPausedRef.current = false
+    setAudioFollowPaused(false)
+  }
+
+  function resumeAudioFollow() {
+    audioFollowPausedRef.current = false
+    setAudioFollowPaused(false)
+    const range = activeAudioCueRangeRef.current
+    if (range) showAudioFollow(range.start, range.end, true)
   }
 
   function showAudioFollow(startOffset: number, endOffset: number, follow: boolean) {
@@ -3321,7 +3369,8 @@ export function ReaderRoute() {
     const rects = selectionRectsFromRange(range, fallbackRect)
     setAudioFollowRects(rects)
 
-    if (!follow || rects.length === 0) return
+    // Respect user scroll: highlight still updates, viewport stays put.
+    if (!follow || audioFollowPausedRef.current || rects.length === 0) return
 
     const top = Math.min(...rects.map((rect) => rect.top))
     const bottom = Math.max(...rects.map((rect) => rect.top + rect.height))
@@ -3334,7 +3383,12 @@ export function ReaderRoute() {
     const delta = centerY - targetY
     if (Math.abs(delta) < 12) return
 
-    window.scrollBy({ top: delta, behavior: 'smooth' })
+    programmaticScrollRef.current = true
+    // Instant scroll avoids fighting the user's finger/wheel with smooth animation.
+    window.scrollBy({ top: delta, behavior: 'auto' })
+    window.setTimeout(() => {
+      programmaticScrollRef.current = false
+    }, 80)
   }
 
   function syncAudioFollowCue(chunk: TtsAudioChunk, currentTime: number, follow: boolean) {
@@ -3356,7 +3410,7 @@ export function ReaderRoute() {
     if (activeAudioCueKeyRef.current === nextKey) return
 
     activeAudioCueKeyRef.current = nextKey
-    showAudioFollow(startOffset, endOffset, follow)
+    showAudioFollow(startOffset, endOffset, follow && !audioFollowPausedRef.current)
   }
   // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -3762,6 +3816,8 @@ export function ReaderRoute() {
             colors={colors}
             handle={activePlayBarHandle}
             onOpenSheet={() => setSheet('audio')}
+            followPaused={audioFollowPaused}
+            onResumeFollow={resumeAudioFollow}
           />
         )}
       </AnimatePresence>
