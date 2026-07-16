@@ -39,15 +39,6 @@ export function VoiceOnboardingRoute() {
     [],
   )
 
-  useEffect(() => {
-    // Warm Fly while they browse voices so Continue + first Play feel instant.
-    warmHostedKokoro()
-    return () => {
-      previewGen.current += 1
-      stopPreviewAudio()
-    }
-  }, [])
-
   function stopPreviewAudio() {
     const audio = audioRef.current
     if (audio) {
@@ -59,6 +50,15 @@ export function VoiceOnboardingRoute() {
       audioRef.current = null
     }
   }
+
+  useEffect(() => {
+    // Warm Fly while they browse voices so Continue + first Play feel instant.
+    warmHostedKokoro()
+    return () => {
+      previewGen.current += 1
+      stopPreviewAudio()
+    }
+  }, [])
 
   async function playPreview(voice: KokoroVoiceOption) {
     const gen = ++previewGen.current
