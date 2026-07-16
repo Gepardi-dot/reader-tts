@@ -314,6 +314,66 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/**
+ * Render a book passage with every occurrence of the study word highlighted
+ * so learners can spot it in context at a glance.
+ */
+function HighlightedPassage({
+  text,
+  word,
+  style,
+  quote = true,
+}: {
+  text: string
+  word: string
+  style?: CSSProperties
+  quote?: boolean
+}) {
+  const head = word.trim()
+  const parts: ReactNode[] = []
+  if (!head) {
+    parts.push(text)
+  } else {
+    try {
+      const re = new RegExp(`(${escapeRegExp(head)})`, 'gi')
+      const chunks = text.split(re)
+      chunks.forEach((chunk, i) => {
+        if (!chunk) return
+        if (chunk.toLowerCase() === head.toLowerCase()) {
+          parts.push(
+            <mark
+              key={`h-${i}`}
+              style={{
+                background: 'linear-gradient(180deg, #fde68a 0%, #fbbf24 100%)',
+                color: C.text,
+                fontWeight: 700,
+                fontStyle: 'normal',
+                padding: '0 3px',
+                borderRadius: 4,
+                boxShadow: '0 0 0 1px rgba(245, 158, 11, 0.35)',
+              }}
+            >
+              {chunk}
+            </mark>,
+          )
+        } else {
+          parts.push(<span key={`t-${i}`}>{chunk}</span>)
+        }
+      })
+    } catch {
+      parts.push(text)
+    }
+  }
+
+  return (
+    <div style={style}>
+      {quote ? '“' : null}
+      {parts}
+      {quote ? '”' : null}
+    </div>
+  )
+}
+
 function speak(text: string) {
   void speakStudioText(text)
 }
@@ -903,9 +963,12 @@ function ExerciseMCQ({
           background: 'rgba(0,0,0,0.03)',
           borderLeft: `3px solid ${C.gold}`,
           borderRadius: '0 10px 10px 0',
-          fontSize: 12.5, lineHeight: 1.4, color: C.mutedHi, fontStyle: 'italic',
         }}>
-          “{bookContext.length > 120 ? `${bookContext.slice(0, 117)}…` : bookContext}”
+          <HighlightedPassage
+            text={bookContext.length > 120 ? `${bookContext.slice(0, 117)}…` : bookContext}
+            word={word.word}
+            style={{ fontSize: 12.5, lineHeight: 1.45, color: C.mutedHi, fontStyle: 'italic', fontFamily: FONT.display }}
+          />
         </div>
       )}
 
@@ -1465,7 +1528,11 @@ function ExerciseReverseRecall({ word, onComplete }: { word: PracticeWord; onCom
             {word.sentence && !isFabricatedContextSentence(word.sentence, word.word, word.definition) && (
               <div style={{ background: 'rgba(0,0,0,0.03)', borderLeft: `3px solid ${C.gold}`, padding: '10px 14px' }}>
                 <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{word.book}</div>
-                <div style={{ color: C.text, fontSize: 14, lineHeight: 1.6, fontFamily: FONT.display, fontStyle: 'italic' }}>"{word.sentence}"</div>
+                <HighlightedPassage
+                  text={word.sentence}
+                  word={word.word}
+                  style={{ color: C.text, fontSize: 14, lineHeight: 1.65, fontFamily: FONT.display, fontStyle: 'italic' }}
+                />
               </div>
             )}
           </div>
@@ -1543,7 +1610,11 @@ function ExerciseRecall({ word, onComplete }: { word: PracticeWord; onComplete: 
           {word.sentence && !isFabricatedContextSentence(word.sentence, word.word, word.definition) && (
             <div style={{ background: 'rgba(0,0,0,0.03)', borderLeft: `3px solid ${C.gold}`, padding: '10px 14px' }}>
               <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{word.book}</div>
-              <div style={{ color: C.text, fontSize: 14, lineHeight: 1.6, fontFamily: FONT.display, fontStyle: 'italic' }}>"{word.sentence}"</div>
+              <HighlightedPassage
+                text={word.sentence}
+                word={word.word}
+                style={{ color: C.text, fontSize: 14, lineHeight: 1.65, fontFamily: FONT.display, fontStyle: 'italic' }}
+              />
             </div>
           )}
           {word.mnemonic && (
