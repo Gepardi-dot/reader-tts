@@ -484,36 +484,15 @@ export class TtsRuntime {
       this.clock.setExpectMore(true)
       this.loadingChunkIndexes.add(0)
 
-      // Overlap: start chunk 1 while chunk 0 loads so the boundary is usually
-      // already buffered when the first highlight ends (only one ahead job).
-      if (this.chunks.length > 1) {
-        this.loadingChunkIndexes.add(1)
-        void pool.ensure(1, controller.signal, true)
-          .then(() => {
-            this.loadingChunkIndexes.delete(1)
-            if (generation !== this.generation) return
-            // Append gaplessly if first is already playing.
-            if (this.scheduleReadyFrom(1) > 0 && this.phase === 'buffering') {
-              this.phase = 'playing'
-              this.lane = 'native'
-            }
-            this.refreshExpectMore(1)
-            this.emit()
-          })
-          .catch(() => {
-            this.loadingChunkIndexes.delete(1)
-          })
-      }
-
+      // Sequential first: Fly Kokoro is single-CPU; dual synths used to freeze
+      // the process (health timed out → "reading voice timed out").
       await pool.ensure(0, controller.signal, false)
       this.loadingChunkIndexes.delete(0)
       if (generation !== this.generation) return
 
-      // Chunks 2+ load sequentially after the first two are in flight.
+      // As soon as first audio is playable, queue the next slice(s) one-by-one.
       const ahead = PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD
-      if (this.chunks.length > 2) {
-        void pool.prefetchFrom(2, Math.max(1, ahead), controller.signal)
-      }
+      void pool.prefetchFrom(1, ahead, controller.signal)
 
       if (this.clock.scheduledCount === 0) {
         throw new Error('Audio provider did not return playable audio.')
@@ -522,7 +501,6 @@ export class TtsRuntime {
       this.refreshExpectMore(0)
     } catch (error) {
       this.loadingChunkIndexes.delete(0)
-      this.loadingChunkIndexes.delete(1)
       if (controller.signal.aborted || generation !== this.generation) return
       this.hooks.showToast(audioErrorMessage(error))
       this.stop()

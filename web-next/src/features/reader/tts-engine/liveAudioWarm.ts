@@ -61,9 +61,9 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
     ? pacingForPlaybackRate('kokoro', rate)
     : pacingFor(provider)
 
-  // Parallel warm of first two slices — cuts boundary silence when user hits Play
-  // after the book has been open for a moment.
-  await Promise.all(chunks.map(async (chunk) => {
+  // Sequential warm — hosted Kokoro queues one job at a time; parallel warm
+  // only lengthens the first hit when the machine is already busy.
+  for (const chunk of chunks) {
     if (signal?.aborted) return
     const payload: LiveAudioPayload = {
       provider,
@@ -82,6 +82,7 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
       await requestLiveAudio(bookId, payload)
     } catch {
       // Warm is best-effort; Play will surface real errors.
+      return
     }
-  }))
+  }
 }
