@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
   "installCommand": "npm --prefix web-next ci --legacy-peer-deps",
-  "buildCommand": "VITE_API_ORIGIN=https://reader-tts-api.reader-tts-ari.workers.dev VITE_API_MODE=absolute npm --prefix web-next run build && node scripts/assert-vercel-api-origin.mjs",
+  "buildCommand": "VITE_API_ORIGIN=https://reader-tts-api.reader-tts-ari.workers.dev VITE_API_MODE=absolute npm --prefix web-next run build:vercel",
   "outputDirectory": "web-next/dist",
   "rewrites": [
     {

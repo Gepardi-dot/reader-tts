@@ -36,7 +36,9 @@ npm run dev
 
 `VITE_API_ORIGIN=https://reader-tts-api.reader-tts-ari.workers.dev VITE_API_MODE=absolute`
 
-then runs `scripts/assert-vercel-api-origin.mjs` so a relative-only bundle cannot ship.
+via `npm --prefix web-next run build:vercel`, which runs
+`web-next/scripts/assert-vercel-api-origin.mjs` so a relative-only bundle cannot ship
+(note: root `scripts/` is `.vercelignore`d — the assert must live under `web-next/`).
 
 The SPA also **runtime-guards** any `*.vercel.app` host: even if a bad relative bundle is served, auth/API calls force the Worker URL (`web-next/src/shared/api/apiOrigin.ts`). Prefer the unified Workers URL for day-to-day use.
 

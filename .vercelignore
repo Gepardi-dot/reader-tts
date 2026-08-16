@@ -25,6 +25,8 @@ dictionary/open-wordnet/*
 web/test-results/
 web-rewrite/test-results/
 web-next/test-results/
+# Keep web-next/scripts/ (assert-vercel-api-origin.mjs) — required by build:vercel
+# Root scripts/ is ignored below (oracle, deploy helpers, etc.).
 test-results/
 *.log
 *.err.log
