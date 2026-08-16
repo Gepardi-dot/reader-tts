@@ -1,6 +1,8 @@
 import { createBrowserRouter, Navigate, redirect } from 'react-router-dom'
 import { getStoredUser, restoreSession } from '@/lib/auth'
 import { needsVoiceOnboarding } from '@/features/reader/voiceOnboarding'
+import { lazyRoute } from '@/app/chunkLoad'
+import { RouteError } from '@/app/RouteError'
 
 const hydrateFallbackElement = (
   <div className="flex min-h-[240px] items-center justify-center px-4 text-sm text-muted-foreground">
@@ -33,57 +35,105 @@ async function requireAuthWithVoice() {
 export const router = createBrowserRouter([
   {
     path: '/login',
-    lazy: () => import('@/features/auth/LoginRoute').then((mod) => ({ Component: mod.LoginRoute })),
+    lazy: () =>
+      lazyRoute(() =>
+        import('@/features/auth/LoginRoute').then((mod) => ({ Component: mod.LoginRoute })),
+      ),
+    errorElement: <RouteError />,
     hydrateFallbackElement,
   },
   {
     path: '/onboarding/voice',
-    lazy: () => import('@/features/auth/VoiceOnboardingRoute').then((mod) => ({
-      Component: mod.VoiceOnboardingRoute,
-    })),
+    lazy: () =>
+      lazyRoute(() =>
+        import('@/features/auth/VoiceOnboardingRoute').then((mod) => ({
+          Component: mod.VoiceOnboardingRoute,
+        })),
+      ),
     loader: requireAuth,
+    errorElement: <RouteError />,
     hydrateFallbackElement,
   },
   {
     path: '/',
-    lazy: () => import('./AppShell').then((mod) => ({ Component: mod.AppShell })),
+    lazy: () =>
+      lazyRoute(() => import('./AppShell').then((mod) => ({ Component: mod.AppShell }))),
     loader: requireAuthWithVoice,
+    errorElement: <RouteError />,
     hydrateFallbackElement,
     children: [
       { index: true, element: <Navigate to="/library" replace /> },
       {
         path: 'library',
-        lazy: () => import('@/features/library/LibraryRoute').then((mod) => ({ Component: mod.LibraryRoute })),
+        lazy: () =>
+          lazyRoute(() =>
+            import('@/features/library/LibraryRoute').then((mod) => ({
+              Component: mod.LibraryRoute,
+            })),
+          ),
+        errorElement: <RouteError />,
         hydrateFallbackElement,
       },
       {
         path: 'notes',
-        lazy: () => import('@/features/notes/NotesRoute').then((mod) => ({ Component: mod.NotesRoute })),
+        lazy: () =>
+          lazyRoute(() =>
+            import('@/features/notes/NotesRoute').then((mod) => ({ Component: mod.NotesRoute })),
+          ),
+        errorElement: <RouteError />,
         hydrateFallbackElement,
       },
       {
         path: 'vocabulary',
-        lazy: () => import('@/features/vocabulary/VocabularyRoute').then((mod) => ({ Component: mod.VocabularyRoute })),
+        lazy: () =>
+          lazyRoute(() =>
+            import('@/features/vocabulary/VocabularyRoute').then((mod) => ({
+              Component: mod.VocabularyRoute,
+            })),
+          ),
+        errorElement: <RouteError />,
         hydrateFallbackElement,
       },
       {
         path: 'studio',
-        lazy: () => import('@/features/studio/StudioRoute').then((mod) => ({ Component: mod.StudioRoute })),
+        lazy: () =>
+          lazyRoute(() =>
+            import('@/features/studio/StudioRoute').then((mod) => ({ Component: mod.StudioRoute })),
+          ),
+        errorElement: <RouteError />,
         hydrateFallbackElement,
       },
       {
         path: 'progress',
-        lazy: () => import('@/features/progress/ProgressRoute').then((mod) => ({ Component: mod.ProgressRoute })),
+        lazy: () =>
+          lazyRoute(() =>
+            import('@/features/progress/ProgressRoute').then((mod) => ({
+              Component: mod.ProgressRoute,
+            })),
+          ),
+        errorElement: <RouteError />,
         hydrateFallbackElement,
       },
       {
         path: 'audio',
-        lazy: () => import('@/features/reader/AudioSettingsRoute').then((mod) => ({ Component: mod.AudioSettingsRoute })),
+        lazy: () =>
+          lazyRoute(() =>
+            import('@/features/reader/AudioSettingsRoute').then((mod) => ({
+              Component: mod.AudioSettingsRoute,
+            })),
+          ),
+        errorElement: <RouteError />,
         hydrateFallbackElement,
       },
       {
         path: 'upload',
-        lazy: () => import('@/features/library/UploadRoute').then((mod) => ({ Component: mod.UploadRoute })),
+        lazy: () =>
+          lazyRoute(() =>
+            import('@/features/library/UploadRoute').then((mod) => ({
+              Component: mod.UploadRoute,
+            })),
+          ),
+        errorElement: <RouteError />,
         hydrateFallbackElement,
       },
     ],
@@ -91,8 +141,12 @@ export const router = createBrowserRouter([
   // Reader is outside AppShell but still requires auth + voice onboarding
   {
     path: '/book/:bookId',
-    lazy: () => import('@/features/reader/ReaderRoute').then((mod) => ({ Component: mod.ReaderRoute })),
+    lazy: () =>
+      lazyRoute(() =>
+        import('@/features/reader/ReaderRoute').then((mod) => ({ Component: mod.ReaderRoute })),
+      ),
     loader: requireAuthWithVoice,
+    errorElement: <RouteError />,
     hydrateFallbackElement,
   },
 ])

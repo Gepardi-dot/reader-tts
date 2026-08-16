@@ -57,6 +57,13 @@ subscribeAuth((user) => applyAuthUser(user?.id ?? ''))
 // stuck on a cache-first index.html from a previous deploy (broke login).
 registerServiceWorkerWithUpdate()
 
+// Strip one-shot deploy recovery query params without a full navigation loop.
+if (typeof window !== 'undefined' && window.location.search.includes('_chunk=')) {
+  const url = new URL(window.location.href)
+  url.searchParams.delete('_chunk')
+  window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+}
+
 // Cross-origin isolation is required for SharedArrayBuffer (multi-threaded ONNX
 // WASM). If headers are misconfigured we'll silently fall back to single-thread —
 // log so a regression is visible in DevTools.
