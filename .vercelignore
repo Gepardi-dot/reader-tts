@@ -1,12 +1,16 @@
+# Patterns use a leading `/` for repo-root only. Without it, gitignore-style
+# matching applies in EVERY directory (e.g. `scripts/` also dropped
+# `web-next/scripts/assert-vercel-api-origin.mjs` and broke Vercel builds).
+
 # Node modules
-web/node_modules/
-web-rewrite/node_modules/
-web-next/node_modules/
+/web/node_modules/
+/web-rewrite/node_modules/
+/web-next/node_modules/
 
 # Build outputs (built on Vercel, not uploaded)
-web/dist/
-web-rewrite/dist/
-web-next/dist/
+/web/dist/
+/web-rewrite/dist/
+/web-next/dist/
 /public/
 
 # Local data / virtual envs
@@ -16,18 +20,16 @@ web-next/dist/
 .venv-qwen3-tts/
 
 # Large local-only assets
-voices/neutts/*
-dictionary/offline/*
-dictionary/extracted/*
-dictionary/open-wordnet/*
+/voices/neutts/*
+/dictionary/offline/*
+/dictionary/extracted/*
+/dictionary/open-wordnet/*
 
 # Dev / test artifacts
-web/test-results/
-web-rewrite/test-results/
-web-next/test-results/
-# Keep web-next/scripts/ (assert-vercel-api-origin.mjs) — required by build:vercel
-# Root scripts/ is ignored below (oracle, deploy helpers, etc.).
-test-results/
+/web/test-results/
+/web-rewrite/test-results/
+/web-next/test-results/
+/test-results/
 *.log
 *.err.log
 __pycache__/
@@ -47,30 +49,36 @@ __pycache__/
 !web-next/.env.production
 
 # Legacy Python FastAPI — API is Cloudflare Worker now (do not ship as Vercel function)
-app.py
-server/
-requirements.txt
-vercel_install.py
-vercel_build.py
-pdf_to_audio.py
-scripts/
-supabase/
-cloudflare/
+/app.py
+/server/
+/requirements.txt
+/vercel_install.py
+/vercel_build.py
+/pdf_to_audio.py
+# Root-only helpers (oracle, deploy wrappers). Do NOT use bare `scripts/` —
+# that also ignores web-next/scripts/ needed by build:vercel.
+/scripts/
+/supabase/
+/cloudflare/
 Dockerfile*
 fly.*.toml
 railway.*.toml
-convert-book.ps1
-start-*.cmd
-start-*.ps1
-web-rewrite/
-web/
-dictionary/
-docs/
-tmp-*.txt
-tmp-*.json
-tmp-*.js
-tmp-*.spec.js
-tmp-*.png
-tmp-*.har
+/convert-book.ps1
+/start-*.cmd
+/start-*.ps1
+/web-rewrite/
+/web/
+/dictionary/
+/docs/
+/tmp-*.txt
+/tmp-*.json
+/tmp-*.js
+/tmp-*.spec.js
+/tmp-*.png
+/tmp-*.har
 *.png
 *.har
+
+# Explicit keep (belt-and-suspenders if a broader pattern is added later)
+!/web-next/scripts/
+!/web-next/scripts/**
