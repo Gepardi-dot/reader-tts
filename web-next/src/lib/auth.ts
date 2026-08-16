@@ -17,6 +17,8 @@ interface AuthPayload {
 
 const TOKEN_KEY = 'reader-tts-auth-token'
 const USER_KEY = 'reader-tts-auth-user'
+/** Survives clearAuth so the login form can prefill after a forced sign-out. */
+const LAST_EMAIL_KEY = 'reader-tts-last-email'
 
 let cachedUser: AuthUser | null = readStoredUser()
 const listeners = new Set<(user: AuthUser | null) => void>()
@@ -32,7 +34,12 @@ function readStoredUser(): AuthUser | null {
   if (typeof window === 'undefined') return null
   try {
     const raw = window.localStorage.getItem(USER_KEY)
-    return raw ? JSON.parse(raw) as AuthUser : null
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<AuthUser>
+    if (typeof parsed?.id === 'string' && typeof parsed?.email === 'string') {
+      return { id: parsed.id, email: parsed.email }
+    }
+    return null
   } catch {
     return null
   }
@@ -42,17 +49,46 @@ function notify() {
   for (const listener of listeners) listener(cachedUser)
 }
 
+function isAuthPayload(value: unknown): value is AuthPayload {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Partial<AuthPayload>
+  return (
+    typeof v.token === 'string'
+    && v.token.length > 0
+    && !!v.user
+    && typeof v.user.id === 'string'
+    && typeof v.user.email === 'string'
+  )
+}
+
 function persistAuth(payload: AuthPayload) {
   cachedUser = payload.user
   window.localStorage.setItem(TOKEN_KEY, payload.token)
   window.localStorage.setItem(USER_KEY, JSON.stringify(payload.user))
+  window.localStorage.setItem(LAST_EMAIL_KEY, payload.user.email)
   setCachedToken(payload.token)
   notify()
   return payload.user
 }
 
+/** Normalize credentials the same way the Worker does (trim + lower email). */
+export function normalizeEmail(email: string) {
+  return email.trim().toLowerCase()
+}
+
+export function getLastUsedEmail() {
+  if (typeof window === 'undefined') return ''
+  try {
+    return window.localStorage.getItem(LAST_EMAIL_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export function subscribeAuth(listener: (user: AuthUser | null) => void) {
   listeners.add(listener)
+  // Immediately sync subscriber with current user (prefetch / shell).
+  listener(cachedUser)
   return () => {
     listeners.delete(listener)
   }
@@ -132,55 +168,79 @@ async function authFetch(path: string, init: RequestInit): Promise<Response> {
   }
 }
 
+async function parseAuthPayload(res: Response): Promise<AuthPayload> {
+  let body: unknown
+  try {
+    body = await res.json()
+  } catch {
+    throw new AuthApiError('Auth service returned an invalid response.', res.status || 500)
+  }
+  if (!isAuthPayload(body)) {
+    throw new AuthApiError('Auth service returned an invalid response.', res.status || 500)
+  }
+  return body
+}
+
 export async function signIn(email: string, password: string) {
   // Drop any stale token first so a half-broken previous session cannot
   // interfere with the new login response or follow-up /session calls.
-  clearAuth()
+  clearAuth({ keepLastEmail: true })
   const res = await authFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email: normalizeEmail(email), password }),
   })
   if (!res.ok) throw classifyAuthError(res.status, await errorMessage(res))
-  return persistAuth(await res.json() as AuthPayload)
+  return persistAuth(await parseAuthPayload(res))
 }
 
 export async function signUp(email: string, password: string) {
-  clearAuth()
+  clearAuth({ keepLastEmail: true })
   const res = await authFetch('/api/auth/signup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email: normalizeEmail(email), password }),
   })
   if (!res.ok) throw classifyAuthError(res.status, await errorMessage(res))
-  return persistAuth(await res.json() as AuthPayload)
+  return persistAuth(await parseAuthPayload(res))
 }
 
 export async function restoreSession() {
   const token = getStoredAuthToken()
   if (!token) {
-    clearAuth()
+    clearAuth({ keepLastEmail: true })
     return null
   }
   setCachedToken(token)
   let res: Response
   try {
-    res = await fetch(resolveUrl('/api/auth/session'), {
+    res = await authFetch('/api/auth/session', {
       headers: { Authorization: `Bearer ${token}` },
     })
   } catch {
-    // Network/CORS failure: treat as logged out so the router can send users to /login
-    // with a recoverable state instead of hanging on "Loading…".
-    clearAuth()
+    // Transient network/CORS failure: keep the token so a brief offline blip
+    // does not force a full re-login. Router still treats null as logged out.
     return null
   }
   if (!res.ok) {
-    clearAuth()
+    // 401/403 etc. — token is dead; clear it.
+    clearAuth({ keepLastEmail: true })
     return null
   }
-  const payload = await res.json() as { user: AuthUser }
+  let payload: { user?: AuthUser }
+  try {
+    payload = await res.json() as { user?: AuthUser }
+  } catch {
+    clearAuth({ keepLastEmail: true })
+    return null
+  }
+  if (!payload.user?.id || !payload.user?.email) {
+    clearAuth({ keepLastEmail: true })
+    return null
+  }
   cachedUser = payload.user
   window.localStorage.setItem(USER_KEY, JSON.stringify(payload.user))
+  window.localStorage.setItem(LAST_EMAIL_KEY, payload.user.email)
   notify()
   return payload.user
 }
@@ -188,20 +248,29 @@ export async function restoreSession() {
 export async function signOut() {
   const token = getStoredAuthToken()
   if (token) {
-    await fetch(resolveUrl('/api/auth/logout'), {
+    await authFetch('/api/auth/logout', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
     }).catch(() => undefined)
   }
-  clearAuth()
+  clearAuth({ keepLastEmail: true })
 }
 
-export function clearAuth() {
+export function clearAuth(options?: { keepLastEmail?: boolean }) {
+  const keepLastEmail = options?.keepLastEmail === true
+  const lastEmail = keepLastEmail
+    ? (cachedUser?.email || getLastUsedEmail())
+    : ''
   cachedUser = null
   setCachedToken('')
   if (typeof window !== 'undefined') {
     window.localStorage.removeItem(TOKEN_KEY)
     window.localStorage.removeItem(USER_KEY)
+    if (keepLastEmail && lastEmail) {
+      window.localStorage.setItem(LAST_EMAIL_KEY, lastEmail)
+    } else if (!keepLastEmail) {
+      window.localStorage.removeItem(LAST_EMAIL_KEY)
+    }
   }
   notify()
 }

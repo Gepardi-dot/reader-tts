@@ -1,6 +1,14 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AuthApiError, clearAuth, getStoredUser, signIn, signUp } from '@/lib/auth'
+import {
+  AuthApiError,
+  clearAuth,
+  getLastUsedEmail,
+  getStoredUser,
+  normalizeEmail,
+  signIn,
+  signUp,
+} from '@/lib/auth'
 import { recoverStuckClient } from '@/lib/clientRecovery'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,15 +24,14 @@ type Mode = 'signin' | 'signup'
 function initialLoginEmail(): string {
   if (typeof window === 'undefined') return ''
   try {
-    const previous = getStoredUser()
-    const email = previous?.email ?? ''
-    clearAuth()
+    const previous = getStoredUser()?.email || getLastUsedEmail()
+    clearAuth({ keepLastEmail: true })
     if (window.location.search.includes('_recovered=')) {
       const url = new URL(window.location.href)
       url.searchParams.delete('_recovered')
       window.history.replaceState({}, '', url.pathname + url.search)
     }
-    return email
+    return previous
   } catch {
     return ''
   }
@@ -45,29 +52,34 @@ export function LoginRoute() {
     e.preventDefault()
     setError(null)
     setEmailTaken(false)
+    setShowRecover(false)
     setLoading(true)
+    const cleanEmail = normalizeEmail(email)
+    setEmail(cleanEmail)
     try {
       if (mode === 'signin') {
-        const user = await signIn(email, password)
-        // Existing accounts without a saved voice go pick one (prefetch/cache need it).
+        const user = await signIn(cleanEmail, password)
         const { needsVoiceOnboarding } = await import('@/features/reader/voiceOnboarding')
         navigate(
           needsVoiceOnboarding(user.id) ? '/onboarding/voice' : '/library',
           { replace: true },
         )
       } else {
-        await signUp(email, password)
-        // New accounts always choose a Kokoro voice before the library.
+        await signUp(cleanEmail, password)
         navigate('/onboarding/voice', { replace: true })
       }
     } catch (err: unknown) {
       if (err instanceof AuthApiError && err.code === 'email_taken') {
         setEmailTaken(true)
         setError(err.message)
+      } else if (err instanceof AuthApiError && err.code === 'invalid_credentials') {
+        // Wrong password — do not push the cache-recovery UI
+        setError(err.message)
       } else if (err instanceof AuthApiError && err.code === 'api_unreachable') {
         setShowRecover(true)
         setError(err.message)
       } else {
+        // Unexpected failures may still be a stuck shell / network issue
         setShowRecover(true)
         setError(err instanceof Error ? err.message : 'Something went wrong.')
       }
@@ -91,6 +103,7 @@ export function LoginRoute() {
     setMode(next)
     setError(null)
     setEmailTaken(false)
+    setShowRecover(false)
   }
 
   return (

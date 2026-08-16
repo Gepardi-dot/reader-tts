@@ -33,3 +33,11 @@ describe('FALLBACK_ABSOLUTE_API', () => {
     expect(FALLBACK_ABSOLUTE_API).toMatch(/^https:\/\/reader-tts-api\./)
   })
 })
+
+describe('looksLikeMissingApi edge cases', () => {
+  it('treats empty 405 as missing API but not a real JSON 401', () => {
+    expect(looksLikeMissingApi(405, '')).toBe(true)
+    expect(looksLikeMissingApi(401, '{"detail":"Invalid email or password."}')).toBe(false)
+    expect(looksLikeMissingApi(500, 'Internal error')).toBe(false)
+  })
+})

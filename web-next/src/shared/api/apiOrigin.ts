@@ -32,20 +32,30 @@ function envApiOrigin(): string {
   return ''
 }
 
+/** Hostname is fixed for the lifetime of the page — cache after first resolve. */
+let cachedOrigin: string | undefined
+
 /**
  * Base origin for API calls (no trailing slash), or '' for same-origin `/api`.
  */
 export function configuredApiOrigin(): string {
+  if (cachedOrigin !== undefined) return cachedOrigin
+
   // Prefer an explicit absolute env URL when present.
   const fromEnv = envApiOrigin()
-  if (fromEnv.startsWith('http')) return fromEnv
+  if (fromEnv.startsWith('http')) {
+    cachedOrigin = fromEnv
+    return cachedOrigin
+  }
 
   // SPA on Vercel (or other static host): never relative — force Worker URL.
   if (typeof window !== 'undefined' && isStaticFrontendHost()) {
-    return FALLBACK_ABSOLUTE_API
+    cachedOrigin = FALLBACK_ABSOLUTE_API
+    return cachedOrigin
   }
 
-  return fromEnv
+  cachedOrigin = fromEnv
+  return cachedOrigin
 }
 
 export function resolveApiUrl(url: string): string {
