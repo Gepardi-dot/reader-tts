@@ -87,30 +87,46 @@ export async function requestBlob(
   return res.blob()
 }
 
+export {
+  bookAcceptAttribute as BOOK_ACCEPT_LIST,
+  bookFormatsHelpText,
+  isSupportedBookFile,
+  unsupportedBookMessage,
+} from '@/shared/books/bookFormats'
+
+/** Value for <input accept>. Kept as a string for existing imports. */
 export const BOOK_ACCEPT = [
   '.pdf',
+  '.epub',
+  '.docx',
+  '.odt',
+  '.rtf',
+  '.fb2',
   '.txt',
+  '.text',
   '.md',
   '.markdown',
   '.html',
   '.htm',
   '.xhtml',
+  '.csv',
+  '.tsv',
+  '.json',
+  '.rst',
+  '.org',
+  '.log',
+  'application/pdf',
+  'application/epub+zip',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.oasis.opendocument.text',
+  'application/rtf',
+  'text/plain',
+  'text/markdown',
+  'text/html',
+  'text/csv',
+  'application/json',
 ].join(',')
 
-const BOOK_CONTENT_TYPES: Record<string, string> = {
-  pdf: 'application/pdf',
-  txt: 'text/plain',
-  md: 'text/markdown',
-  markdown: 'text/markdown',
-  html: 'text/html',
-  htm: 'text/html',
-  xhtml: 'application/xhtml+xml',
-}
-
-export function isSupportedBookFile(file: File) {
-  const extension = file.name.split('.').pop()?.toLowerCase() ?? ''
-  return extension in BOOK_CONTENT_TYPES
-}
 
 interface Book {
   id: string

@@ -4,7 +4,14 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Upload, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { AuthError, BOOK_ACCEPT, isSupportedBookFile, uploadBook } from '@/shared/api/client'
+import {
+  AuthError,
+  BOOK_ACCEPT,
+  bookFormatsHelpText,
+  isSupportedBookFile,
+  unsupportedBookMessage,
+  uploadBook,
+} from '@/shared/api/client'
 import { signOut } from '@/lib/auth'
 import {
   getModelStatus,
@@ -75,7 +82,7 @@ export function UploadRoute() {
       setFile(dropped)
       setError('')
     } else {
-      setError('Unsupported format. Upload PDF, TXT, Markdown, or HTML.')
+      setError(unsupportedBookMessage())
     }
   }
 
@@ -111,7 +118,7 @@ export function UploadRoute() {
             <Upload size={40} className="text-muted-foreground/60" />
             <div className="text-center">
               <p className="font-medium text-foreground">Drop a book here</p>
-              <p className="text-sm text-muted-foreground mt-1">PDF, TXT, Markdown, or HTML</p>
+              <p className="text-sm text-muted-foreground mt-1">{bookFormatsHelpText()}</p>
             </div>
           </>
         )}
@@ -133,7 +140,7 @@ export function UploadRoute() {
             setError('')
           } else {
             setFile(null)
-            setError('Unsupported format. Upload PDF, TXT, Markdown, or HTML.')
+            setError(unsupportedBookMessage())
           }
         }}
       />
