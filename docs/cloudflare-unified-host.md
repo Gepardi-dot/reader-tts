@@ -54,6 +54,15 @@ ignores `web-next/scripts/` and breaks the Vercel build.
 Caching the SPA shell previously pinned returning browsers to a stale `index.html`
 and broke login after deploys. Hashed assets use normal HTTP `Cache-Control: immutable`.
 
+**Enforced automatically** (build fails if violated):
+
+```bash
+npm --prefix web-next run assert:sw-policy
+# also runs on every npm run build / build:vercel and in GitHub CI
+```
+
+See `web-next/scripts/assert-sw-policy.mjs`.
+
 The SPA also **runtime-guards** any `*.vercel.app` host: even if a bad relative bundle is served, auth/API calls force the Worker URL (`web-next/src/shared/api/apiOrigin.ts`). Prefer the unified Workers URL for day-to-day use.
 
 **Do not** put `VITE_API_ORIGIN=relative` in `web-next/.env.production` — that used to break Vercel login (same-origin `/api` → 405, no useful error).

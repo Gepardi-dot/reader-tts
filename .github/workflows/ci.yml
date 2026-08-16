@@ -47,6 +47,15 @@ jobs:
         run: npm run lint
         working-directory: web-next
 
+      # Guardrail: SW must never cache HTML/assets/API (broke returning logins).
+      - name: Assert service-worker policy
+        run: npm run assert:sw-policy
+        working-directory: web-next
+
       - name: Type-check + build
         run: npm run build
+        working-directory: web-next
+
+      - name: Assert SW policy in dist
+        run: node scripts/assert-sw-policy.mjs --dist
         working-directory: web-next
