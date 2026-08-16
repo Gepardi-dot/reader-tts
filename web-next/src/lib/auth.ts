@@ -133,6 +133,9 @@ async function authFetch(path: string, init: RequestInit): Promise<Response> {
 }
 
 export async function signIn(email: string, password: string) {
+  // Drop any stale token first so a half-broken previous session cannot
+  // interfere with the new login response or follow-up /session calls.
+  clearAuth()
   const res = await authFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -143,6 +146,7 @@ export async function signIn(email: string, password: string) {
 }
 
 export async function signUp(email: string, password: string) {
+  clearAuth()
   const res = await authFetch('/api/auth/signup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

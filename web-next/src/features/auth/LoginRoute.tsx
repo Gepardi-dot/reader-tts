@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AuthApiError, signIn, signUp } from '@/lib/auth'
+import { AuthApiError, clearAuth, getStoredUser, signIn, signUp } from '@/lib/auth'
+import { recoverStuckClient } from '@/lib/clientRecovery'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -15,6 +16,22 @@ export function LoginRoute() {
   const [error, setError] = useState<string | null>(null)
   const [emailTaken, setEmailTaken] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [recovering, setRecovering] = useState(false)
+  const [showRecover, setShowRecover] = useState(false)
+
+  // Prefill email from a previous session user record; clear dead tokens so
+  // login always starts clean (old SW shells often left half-valid storage).
+  useEffect(() => {
+    const previous = getStoredUser()
+    if (previous?.email) setEmail(previous.email)
+    clearAuth()
+    // Drop ?_recovered= from the address bar after a recovery reload
+    if (typeof window !== 'undefined' && window.location.search.includes('_recovered=')) {
+      const url = new URL(window.location.href)
+      url.searchParams.delete('_recovered')
+      window.history.replaceState({}, '', url.pathname + url.search)
+    }
+  }, [])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -39,11 +56,26 @@ export function LoginRoute() {
       if (err instanceof AuthApiError && err.code === 'email_taken') {
         setEmailTaken(true)
         setError(err.message)
+      } else if (err instanceof AuthApiError && err.code === 'api_unreachable') {
+        setShowRecover(true)
+        setError(err.message)
       } else {
+        setShowRecover(true)
         setError(err instanceof Error ? err.message : 'Something went wrong.')
       }
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function handleRecover() {
+    setRecovering(true)
+    setError('Clearing old cached app data and reloading…')
+    try {
+      await recoverStuckClient({ reload: true })
+    } catch {
+      setRecovering(false)
+      setError('Could not clear cache automatically. Hard-refresh (Ctrl+Shift+R) or use a private window.')
     }
   }
 
@@ -105,10 +137,21 @@ export function LoginRoute() {
                   Go to Sign in
                 </Button>
               )}
+              {showRecover && !emailTaken && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full"
+                  disabled={recovering}
+                  onClick={() => void handleRecover()}
+                >
+                  {recovering ? 'Fixing…' : 'Fix stuck browser (clear cache & reload)'}
+                </Button>
+              )}
             </div>
           )}
 
-          <Button type="submit" className="w-full" disabled={loading}>
+          <Button type="submit" className="w-full" disabled={loading || recovering}>
             {loading ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}
           </Button>
         </form>
@@ -130,6 +173,18 @@ export function LoginRoute() {
               {' '}— your books stay with that login.
             </>
           )}
+        </p>
+
+        <p className="text-center text-xs text-muted-foreground">
+          Signed in here before and it stopped working?{' '}
+          <button
+            type="button"
+            className="underline hover:text-foreground"
+            disabled={recovering}
+            onClick={() => void handleRecover()}
+          >
+            Clear old cache & reload
+          </button>
         </p>
       </div>
     </div>

@@ -5,6 +5,7 @@ import { RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { subscribeAuth } from '@/lib/auth'
+import { registerServiceWorkerWithUpdate } from '@/lib/clientRecovery'
 import { router } from './app/router'
 
 const queryClient = new QueryClient({
@@ -52,11 +53,9 @@ function applyAuthUser(nextUserId: string) {
 
 subscribeAuth((user) => applyAuthUser(user?.id ?? ''))
 
-if (import.meta.env.PROD && 'serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {})
-  })
-}
+// Register SW with update + one-time shell-cache purge so old browsers are not
+// stuck on a cache-first index.html from a previous deploy (broke login).
+registerServiceWorkerWithUpdate()
 
 // Cross-origin isolation is required for SharedArrayBuffer (multi-threaded ONNX
 // WASM). If headers are misconfigured we'll silently fall back to single-thread —
