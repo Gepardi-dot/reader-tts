@@ -314,6 +314,26 @@ function withCors(response: Response, request: Request, env: Env) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 
+function isAllowedBrowserOrigin(origin: string, allowed: Set<string>) {
+  if (allowed.has(origin)) return true
+  try {
+    const { protocol, hostname } = new URL(origin)
+    if (protocol !== 'https:' && protocol !== 'http:') return false
+    // Any Vercel deployment / preview (static SPA talking to this Worker).
+    if (hostname === 'readertts.vercel.app' || hostname.endsWith('.vercel.app')) return true
+    // Local Vite dev servers on common ports.
+    if (
+      (hostname === 'localhost' || hostname === '127.0.0.1')
+      && ['5173', '5174', '5175', '4173'].includes(new URL(origin).port || '80')
+    ) {
+      return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
 function corsHeaders(request: Request, env: Env) {
   const headers = new Headers()
   const origin = request.headers.get('Origin')
@@ -324,6 +344,7 @@ function corsHeaders(request: Request, env: Env) {
   // Always allow the production Vercel app + local Vite ports, even if APP_ORIGIN is unset.
   const defaults = [
     'https://readertts.vercel.app',
+    'https://reader-tts-api.reader-tts-ari.workers.dev',
     'http://localhost:5175',
     'http://localhost:5173',
     'http://localhost:5174',
@@ -331,7 +352,9 @@ function corsHeaders(request: Request, env: Env) {
     'http://127.0.0.1:5173',
   ]
   const allowed = new Set([...configured, ...defaults])
-  const allowOrigin = origin && allowed.has(origin)
+  // Reflect a concrete allowed Origin (required for credentialed/cross-origin browser fetches).
+  // Never fall back to a *different* origin — that causes silent CORS failures on previews.
+  const allowOrigin = origin && isAllowedBrowserOrigin(origin, allowed)
     ? origin
     : (configured[0] || defaults[0])
   headers.set('Access-Control-Allow-Origin', allowOrigin)

@@ -1754,12 +1754,8 @@ async function streamSSE(
   signal: AbortSignal,
 ): Promise<void> {
   const { getStoredAuthToken } = await import('@/lib/auth')
-  // Match shared API client: relative /api on unified Cloudflare; absolute when env sets it.
-  const raw = import.meta.env.VITE_API_ORIGIN as string | undefined
-  const base = (raw === 'relative' || raw === 'same-origin')
-    ? ''
-    : (typeof raw === 'string' ? raw.trim().replace(/\/$/, '') : '')
-  const target = url.startsWith('http') ? url : `${base}${url}`
+  const { resolveApiUrl } = await import('@/shared/api/apiOrigin')
+  const target = resolveApiUrl(url)
 
   async function fire(token: string) {
     return fetch(target, {

@@ -1,4 +1,8 @@
 import { setCachedToken } from '@/shared/api/authToken'
+import {
+  looksLikeMissingApi,
+  resolveApiUrl,
+} from '@/shared/api/apiOrigin'
 
 export interface AuthUser {
   id: string
@@ -17,30 +21,11 @@ const USER_KEY = 'reader-tts-auth-user'
 let cachedUser: AuthUser | null = readStoredUser()
 const listeners = new Set<(user: AuthUser | null) => void>()
 
-/**
- * API origin:
- * - empty / "relative" → same-origin `/api` (Cloudflare unified Worker+SPA — preferred)
- * - absolute URL → cross-origin API (e.g. Vercel UI talking to Worker)
- */
-const FALLBACK_ABSOLUTE_API = 'https://reader-tts-api.reader-tts-ari.workers.dev'
-
-function configuredApiOrigin() {
-  const raw = import.meta.env.VITE_API_ORIGIN as string | undefined
-  if (raw === 'relative' || raw === 'same-origin') return ''
-  const fromEnv = typeof raw === 'string' ? raw.trim() : ''
-  if (fromEnv) return fromEnv.replace(/\/$/, '')
-  // Dev: Vite proxies /api → Worker
-  if (import.meta.env.DEV) return ''
-  // Production default: same-origin when SPA is hosted on the Worker;
-  // Vercel builds must set VITE_API_ORIGIN to the Worker URL explicitly.
-  if (import.meta.env.PROD && import.meta.env.VITE_API_MODE === 'absolute') {
-    return FALLBACK_ABSOLUTE_API
-  }
-  return ''
-}
+const API_UNREACHABLE_MESSAGE =
+  'Could not reach the auth service. Check your connection, hard-refresh, and try again. If this keeps happening, open https://readertts.vercel.app (not a Vercel preview SSO URL).'
 
 function resolveUrl(url: string) {
-  return url.startsWith('http') ? url : `${configuredApiOrigin()}${url}`
+  return resolveApiUrl(url)
 }
 
 function readStoredUser(): AuthUser | null {
@@ -88,12 +73,12 @@ export function hasAuthToken() {
 
 export class AuthApiError extends Error {
   status: number
-  code?: 'email_taken' | 'invalid_credentials' | 'auth_required'
+  code?: 'email_taken' | 'invalid_credentials' | 'auth_required' | 'api_unreachable'
 
   constructor(
     message: string,
     status: number,
-    code?: 'email_taken' | 'invalid_credentials' | 'auth_required',
+    code?: 'email_taken' | 'invalid_credentials' | 'auth_required' | 'api_unreachable',
   ) {
     super(message)
     this.name = 'AuthApiError'
@@ -121,6 +106,13 @@ function classifyAuthError(status: number, message: string): AuthApiError {
       'invalid_credentials',
     )
   }
+  if (
+    status === 0
+    || looksLikeMissingApi(status, message)
+    || /failed to fetch|networkerror|load failed|cors/i.test(lower)
+  ) {
+    return new AuthApiError(API_UNREACHABLE_MESSAGE, status || 0, 'api_unreachable')
+  }
   if (/authentication required/i.test(lower)) {
     return new AuthApiError(
       'Could not reach the auth service. Hard-refresh the page and try again. Use Sign in if you already have an account.',
@@ -131,8 +123,17 @@ function classifyAuthError(status: number, message: string): AuthApiError {
   return new AuthApiError(message || 'Something went wrong.', status || 500)
 }
 
+async function authFetch(path: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(resolveUrl(path), init)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to fetch'
+    throw classifyAuthError(0, message)
+  }
+}
+
 export async function signIn(email: string, password: string) {
-  const res = await fetch(resolveUrl('/api/auth/login'), {
+  const res = await authFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
@@ -142,7 +143,7 @@ export async function signIn(email: string, password: string) {
 }
 
 export async function signUp(email: string, password: string) {
-  const res = await fetch(resolveUrl('/api/auth/signup'), {
+  const res = await authFetch('/api/auth/signup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
@@ -158,9 +159,17 @@ export async function restoreSession() {
     return null
   }
   setCachedToken(token)
-  const res = await fetch(resolveUrl('/api/auth/session'), {
-    headers: { Authorization: `Bearer ${token}` },
-  })
+  let res: Response
+  try {
+    res = await fetch(resolveUrl('/api/auth/session'), {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+  } catch {
+    // Network/CORS failure: treat as logged out so the router can send users to /login
+    // with a recoverable state instead of hanging on "Loading…".
+    clearAuth()
+    return null
+  }
   if (!res.ok) {
     clearAuth()
     return null
