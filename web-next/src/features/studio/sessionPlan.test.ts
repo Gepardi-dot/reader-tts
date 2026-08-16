@@ -385,29 +385,38 @@ describe('pickExerciseForWordContent', () => {
     'mcq', 'cloze', 'recall', 'listening', 'reverse-recall', 'write-definition', 'mnemonic',
   ]
 
-  it('prefers cloze when a book sentence is available for new cards', () => {
-    // Bias is probabilistic; force rng into cloze band by sampling many times.
+  it('schedules type-the-word (cloze) when a usable definition exists', () => {
     let cloze = 0
     for (let i = 0; i < 40; i++) {
       const kind = pickExerciseForWordContent(
         'new',
         available,
-        { hasUsableDefinition: true, hasBookSentence: true },
-        () => 0.5,
+        { hasUsableDefinition: true, hasBookSentence: false },
+        () => (i % 10) / 10,
       )
       if (kind === 'cloze') cloze += 1
     }
     expect(cloze).toBeGreaterThan(0)
   })
 
-  it('avoids definition MCQ when no usable definition', () => {
+  it('falls back to mnemonic when no usable definition', () => {
     const kind = pickExerciseForWordContent(
       'new',
       available,
       { hasUsableDefinition: false, hasBookSentence: true },
       () => 0.1,
     )
-    expect(kind).toBe('cloze')
+    expect(kind).toBe('mnemonic')
+  })
+
+  it('does not require a book sentence for cloze', () => {
+    const kind = pickExerciseForWordContent(
+      'learning',
+      available,
+      { hasUsableDefinition: true, hasBookSentence: false },
+      () => 0.05,
+    )
+    expect(['cloze', 'recall', 'listening']).toContain(kind)
   })
 })
 

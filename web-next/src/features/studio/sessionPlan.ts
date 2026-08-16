@@ -19,17 +19,20 @@ export type ExerciseKind =
 
 export type Rating = 'again' | 'hard' | 'good' | 'easy'
 
+// cloze = "type the word from the definition" (active recall production).
+// Book-passage blanks are not used — they don't teach the saved headword.
 const STAGE_WEIGHTS: Record<CardStage, Partial<Record<ExerciseKind, number>>> = {
-  new: { mcq: 0.6, cloze: 0.4 },
-  learning: { cloze: 0.3, recall: 0.5, listening: 0.2 },
+  new: { mcq: 0.55, cloze: 0.35, listening: 0.1 },
+  learning: { cloze: 0.4, recall: 0.35, listening: 0.25 },
   review: {
-    recall: 0.3,
-    'reverse-recall': 0.25,
-    'write-sentence': 0.2,
-    'write-definition': 0.15,
+    cloze: 0.25,
+    recall: 0.2,
+    'reverse-recall': 0.2,
+    'write-sentence': 0.15,
+    'write-definition': 0.1,
     listening: 0.1,
   },
-  relearning: { mcq: 0.5, cloze: 0.3, mnemonic: 0.2 },
+  relearning: { mcq: 0.45, cloze: 0.35, mnemonic: 0.2 },
 }
 
 const HARD_EXERCISES: ReadonlySet<ExerciseKind> = new Set([
@@ -137,9 +140,9 @@ export interface WordPracticeMeta {
 
 /**
  * Prefer practical exercises given what we know about the card:
- * - good book sentence → cloze (context from reading)
- * - usable definition → mcq / reverse-recall / recall
- * - thin data → simpler types only
+ * - usable definition → type-the-word (cloze), mcq, reverse-recall, recall
+ * - thin data → mnemonic only (no fake book blanks)
+ * Book passages are optional enrichment after answers, not the drill itself.
  */
 export function pickExerciseForWordContent(
   stage: CardStage,
@@ -149,38 +152,37 @@ export function pickExerciseForWordContent(
 ): ExerciseKind {
   const base = { ...STAGE_WEIGHTS[stage] }
 
-  if (meta.hasBookSentence) {
-    base.cloze = (base.cloze ?? 0) + 0.35
-    base.listening = (base.listening ?? 0) + 0.1
-  } else {
-    delete base.cloze
-  }
-
   if (!meta.hasUsableDefinition) {
     delete base.mcq
     delete base.listening
     delete base['reverse-recall']
     delete base['write-definition']
     delete base.recall
-    // Fall back to cloze (if sentence) or mnemonic
-    if (meta.hasBookSentence) base.cloze = 1
-    else base.mnemonic = 1
+    delete base.cloze
+    base.mnemonic = 1
+  } else {
+    // Definition production (type the headword) is the core practical drill.
+    base.cloze = (base.cloze ?? 0) + 0.2
   }
 
-  // New words: avoid free production until they know the gloss.
+  // New words: recognition + type-from-definition first; no free production yet.
   if (stage === 'new') {
     delete base['write-sentence']
     delete base['write-definition']
     delete base['reverse-recall']
   }
 
+  // hasBookSentence kept for API compat; no longer drives exercise choice.
+  void meta.hasBookSentence
+
   const weighted = available
     .map((kind) => [kind, base[kind] ?? 0] as const)
     .filter(([, w]) => w > 0)
 
   if (weighted.length === 0) {
-    if (meta.hasBookSentence && available.includes('cloze')) return 'cloze'
+    if (meta.hasUsableDefinition && available.includes('cloze')) return 'cloze'
     if (meta.hasUsableDefinition && available.includes('mcq')) return 'mcq'
+    if (available.includes('mnemonic')) return 'mnemonic'
     return available.includes('recall') ? 'recall' : (available[0] ?? 'mcq')
   }
 
@@ -260,7 +262,8 @@ export function prioritizeWordsForMode<W extends PlanInputWord>(
 }
 
 // Adaptive re-queueing: append a remedial step on the same word.
-// Failed Reverse Recall → MCQ; failed Write Definition → Cloze; otherwise → MCQ.
+// Failed Reverse Recall → MCQ; failed Write Definition → type-the-word (cloze);
+// failed type-the-word → MCQ recognition; otherwise → MCQ.
 // Caller tracks how many remedial steps have been appended; we cap at maxAppended.
 export function buildRemedialStep<W extends PlanInputWord>(
   failed: PlanStep<W>,
@@ -272,6 +275,7 @@ export function buildRemedialStep<W extends PlanInputWord>(
   let remedial: ExerciseKind
   if (failed.exercise === 'reverse-recall') remedial = 'mcq'
   else if (failed.exercise === 'write-definition') remedial = 'cloze'
+  else if (failed.exercise === 'cloze') remedial = 'mcq'
   else remedial = 'mcq'
   if (!available.includes(remedial)) return null
   return {

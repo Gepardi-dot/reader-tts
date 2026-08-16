@@ -491,7 +491,7 @@ function buildSessionPlan(words: PracticeWord[]): PracticeStep[] {
 
 const EXERCISE_LABEL: Record<ExerciseType, string> = {
   mcq: 'Definition pick',
-  cloze: 'Fill the blank',
+  cloze: 'Type the word',
   mnemonic: 'Memory hook',
   recall: 'Self-check',
   'write-sentence': 'Use in a sentence',
@@ -1237,79 +1237,140 @@ function ExerciseListening({
   )
 }
 
+function normalizeTypedWord(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[’']/g, "'")
+}
+
+/** Active recall: read the definition → type the saved headword. */
 function ExerciseCloze({ word, onComplete }: { word: PracticeWord; onComplete: (result: StepCompletePayload) => void }) {
   const [input, setInput] = useState('')
   const [submitted, setSubmitted] = useState(false)
+  const [showHint, setShowHint] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => { inputRef.current?.focus() }, [])
 
-  // Never run cloze on the old shared template / dictionary dump.
-  const passageOk = isRealBookSentence(word.sentence, word.word, word.definition)
-  if (!passageOk) {
+  const usableDef = isUsableDefinition(word.definition, word.word)
+  if (!usableDef) {
     return (
       <ExerciseBody
         footer={
           <Btn onClick={() => onComplete({ correct: true, rating: 'hard' })} style={{ width: '100%', padding: '12px 16px' }}>
-            Skip — no book passage yet
+            Skip — definition still loading
           </Btn>
         }
       >
-        <ExerciseHeader title="Context Cloze" subtitle="Needs a real sentence from your reading" />
+        <ExerciseHeader title="Type the word" subtitle="Needs a clear definition first" />
         <div style={{
           marginTop: 14, padding: '14px 16px', borderRadius: 12,
           background: `${C.amber}12`, border: `1px solid ${C.amber}40`,
           color: C.amber, fontSize: 13.5, lineHeight: 1.5,
         }}>
-          This card doesn’t have a real book sentence yet (only a placeholder). Save the word again from the reader to capture context, or skip for now.
-          {isUsableDefinition(word.definition, word.word) && (
-            <div style={{ marginTop: 10, color: C.text, fontStyle: 'italic' }}>
-              <strong style={{ fontStyle: 'normal' }}>{word.word}</strong>
-              {': '}
-              {word.definition}
-            </div>
-          )}
+          This card doesn’t have a solid definition yet. Open Words and fill definitions, then practice again.
         </div>
       </ExerciseBody>
     )
   }
 
-  const correct = input.trim().toLowerCase() === word.word.toLowerCase()
-  const pattern = new RegExp(escapeRegExp(word.word), 'i')
-  const match = word.sentence.match(pattern)
-  const before = match ? word.sentence.slice(0, match.index) : ''
-  const after = match ? word.sentence.slice((match.index ?? 0) + match[0].length) : word.sentence
+  const target = normalizeTypedWord(word.word)
+  const typed = normalizeTypedWord(input)
+  const correct = typed === target
+  // Soft accept common plural / -ed / -ing slips as partial credit (still counts correct).
+  const almost =
+    !correct
+    && typed.length >= 3
+    && (target.startsWith(typed) || typed.startsWith(target) || target.includes(typed) || typed.includes(target))
+    && Math.abs(target.length - typed.length) <= 2
+
+  const letterCount = word.word.replace(/[^a-zA-Z]/g, '').length
+  const firstLetter = word.word.match(/[\p{L}]/u)?.[0] ?? word.word[0] ?? '?'
+  const bookLine = isRealBookSentence(word.sentence, word.word, word.definition)
+    ? word.sentence.trim()
+    : null
 
   return (
     <ExerciseBody
       footer={!submitted ? (
         <Btn onClick={() => setSubmitted(true)} disabled={!input.trim()} style={{ width: '100%', padding: '12px 16px' }}>Check</Btn>
       ) : (
-        <Btn onClick={() => onComplete({ correct, typedResponse: input })} style={{ width: '100%', padding: '12px 16px' }}>Continue</Btn>
+        <Btn
+          onClick={() => onComplete({
+            correct: correct || almost,
+            typedResponse: input,
+            hintsUsed: showHint ? 1 : 0,
+            attempts: 1,
+          })}
+          style={{ width: '100%', padding: '12px 16px' }}
+        >
+          Continue
+        </Btn>
       )}
     >
-      <ExerciseHeader title="Context Cloze" subtitle="Fill the word from the book passage" />
-      <div style={{ background: 'rgba(0,0,0,0.03)', border: `1px solid rgba(0,0,0,0.07)`, borderLeft: `3px solid ${C.gold}`, borderRadius: '0 12px 12px 0', padding: '14px 16px', marginTop: 14, marginBottom: 16 }}>
-        <div style={{ color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>
-          {word.book}{word.chapter ? ` · ${word.chapter}` : ''}
+      <ExerciseHeader title="Type the word" subtitle="Read the meaning, then produce the spelling" />
+
+      {/* Definition prompt — the actual learning signal */}
+      <div style={{
+        marginTop: 14,
+        marginBottom: 14,
+        padding: '16px 16px',
+        borderRadius: 14,
+        background: 'rgba(37,99,235,0.06)',
+        border: '1px solid rgba(37,99,235,0.16)',
+      }}>
+        <div style={{
+          fontSize: 10.5, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase',
+          color: C.blue, marginBottom: 8,
+        }}>
+          Meaning
         </div>
-        <div style={{ color: C.cream, fontSize: 16, lineHeight: 1.7, fontFamily: FONT.display, fontStyle: 'italic' }}>
-          "{before || 'The word '}
-          <span
+        <div style={{
+          color: C.text, fontSize: 16.5, lineHeight: 1.55, fontFamily: FONT.display, fontWeight: 500,
+        }}>
+          {word.definition}
+        </div>
+        {word.book && (
+          <div style={{ marginTop: 10, fontSize: 11.5, color: C.muted }}>
+            from <em>{word.book}</em>
+          </div>
+        )}
+      </div>
+
+      {/* Spelling scaffold (letter count always; first letter on hint) */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+        marginBottom: 10, flexWrap: 'wrap',
+      }}>
+        <div style={{ fontSize: 12.5, color: C.mutedHi, fontFamily: FONT.mono }}>
+          {letterCount} letter{letterCount === 1 ? '' : 's'}
+          {showHint ? (
+            <span style={{ marginLeft: 10, color: C.gold, fontWeight: 700 }}>
+              starts with “{firstLetter.toUpperCase()}”
+            </span>
+          ) : null}
+        </div>
+        {!submitted && !showHint && (
+          <button
+            type="button"
+            onClick={() => setShowHint(true)}
             style={{
-              display: 'inline-block',
-              minWidth: 100,
-              padding: '1px 8px',
-              margin: '0 2px',
-              borderBottom: `2px solid ${submitted ? (correct ? C.green : C.red) : C.gold}`,
-              color: submitted ? (correct ? C.green : C.red) : C.gold,
-              fontStyle: 'normal',
+              border: `1px solid ${C.border}`,
+              background: C.cardHi,
+              color: C.mutedHi,
+              borderRadius: 99,
+              padding: '5px 12px',
+              fontSize: 12,
               fontWeight: 600,
+              cursor: 'pointer',
+              fontFamily: FONT.ui,
             }}
           >
-            {submitted ? word.word : input || '\u00A0'}
-          </span>
-          {after}"
-        </div>
+            Hint
+          </button>
+        )}
       </div>
 
       {!submitted ? (
@@ -1317,6 +1378,10 @@ function ExerciseCloze({ word, onComplete }: { word: PracticeWord; onComplete: (
           ref={inputRef}
           type="text"
           value={input}
+          autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && input.trim()) setSubmitted(true) }}
           placeholder="Type the word"
@@ -1324,19 +1389,63 @@ function ExerciseCloze({ word, onComplete }: { word: PracticeWord; onComplete: (
             width: '100%',
             boxSizing: 'border-box',
             background: C.cardHi,
-            border: `1px solid ${C.borderHi}`,
+            border: `1.5px solid ${C.borderHi}`,
             borderRadius: 12,
             padding: '14px 16px',
             color: C.text,
-            fontSize: 15,
-            fontFamily: FONT.ui,
+            fontSize: 17,
+            fontFamily: FONT.display,
+            fontWeight: 600,
+            letterSpacing: '0.02em',
             outline: 'none',
             marginBottom: 4,
           }}
         />
       ) : (
-        <div style={{ padding: '12px 14px', background: `${correct ? C.green : C.red}14`, border: `1px solid ${correct ? C.green : C.red}33`, borderRadius: 10, color: correct ? C.green : C.red, fontSize: 13, fontFamily: FONT.ui, fontWeight: 600, marginBottom: 4 }}>
-          {correct ? 'Exactly right' : `The word was "${word.word}"`}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{
+            padding: '12px 14px',
+            background: `${correct || almost ? C.green : C.red}14`,
+            border: `1px solid ${correct || almost ? C.green : C.red}33`,
+            borderRadius: 10,
+            color: correct || almost ? C.green : C.red,
+            fontSize: 13.5,
+            fontFamily: FONT.ui,
+            fontWeight: 600,
+          }}>
+            {correct
+              ? 'Exactly right'
+              : almost
+                ? `Close enough — the word is “${word.word}”`
+                : `The word is “${word.word}”`}
+            {word.phonetic ? (
+              <span style={{ marginLeft: 8, fontFamily: FONT.mono, fontSize: 12, fontWeight: 500, color: C.mutedHi }}>
+                {word.phonetic}
+              </span>
+            ) : null}
+          </div>
+          {/* Optional book line as post-answer reinforcement only */}
+          {bookLine && (
+            <div style={{
+              padding: '12px 14px',
+              borderRadius: 10,
+              background: 'rgba(0,0,0,0.03)',
+              border: '1px solid rgba(0,0,0,0.06)',
+              borderLeft: `3px solid ${C.gold}`,
+            }}>
+              <div style={{
+                fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase',
+                color: C.muted, marginBottom: 6,
+              }}>
+                In your book
+              </div>
+              <div style={{
+                fontSize: 13.5, lineHeight: 1.55, color: C.mutedHi, fontFamily: FONT.display, fontStyle: 'italic',
+              }}>
+                “{bookLine.length > 220 ? `${bookLine.slice(0, 220)}…` : bookLine}”
+              </div>
+            </div>
+          )}
         </div>
       )}
     </ExerciseBody>
@@ -2206,7 +2315,7 @@ function Dashboard({
         </div>
         <div style={{ color: C.mutedHi, fontSize: 13, marginTop: 4 }}>
           {ready > 0
-            ? `${ready} card${ready === 1 ? '' : 's'} ready · definitions, cloze, and recall from your books`
+            ? `${ready} card${ready === 1 ? '' : 's'} ready · type the word, pick meanings, and recall`
             : 'Nothing due right now — come back after saving more words or when cards mature.'}
         </div>
       </div>
@@ -2398,10 +2507,9 @@ function PracticeScreen({
 
       {/* Word hero */}
       {step.exercise === 'cloze' ? (
-        <div style={{ textAlign: 'center', paddingBottom: 12, flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-            <span style={{ fontSize: 13, color: C.mutedHi, fontStyle: 'italic' }}>Fill the blank from the passage</span>
-          </div>
+        <div style={{ textAlign: 'center', paddingBottom: 10, flexShrink: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: C.mutedHi }}>Type the word</div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>From the definition — spelling is hidden</div>
         </div>
       ) : isListening ? (
         <div style={{ textAlign: 'center', paddingBottom: 10, flexShrink: 0 }}>

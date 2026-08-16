@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Layers, LayoutGrid, AlignLeft, ChevronDown, ChevronUp } from 'lucide-react'
+import { Layers, LayoutGrid, AlignLeft, ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
 import { api } from '@/shared/api/client'
 import {
   formatStudyDefinition,
@@ -61,19 +61,41 @@ interface DeckDashboard {
   }
 }
 
-const DUE_COLOR = '#fbc12a'
+// Universal SRS stage colors (same family as Duolingo / Anki / common vocab apps):
+// new = blue, learning = amber, review = green, relearning = red.
+// Due is urgency (orange), not a stage — kept distinct from learning amber.
+const DUE_COLOR = '#ea580c'
 
 const STAGE_STYLE: Record<CardState, { pill: string; text: string; ring: string }> = {
-  new:        { pill: '#eff6ff', text: '#2563eb', ring: '#2563eb' },
-  learning:   { pill: '#fff7e0', text: '#fbc12a', ring: '#fbc12a' },
-  review:     { pill: '#f0fdf4', text: '#16a34a', ring: '#16a34a' },
-  relearning: { pill: '#fff1f2', text: '#dc2626', ring: '#f43f5e' },
+  new:        { pill: '#eff6ff', text: '#2563eb', ring: '#3b82f6' },
+  learning:   { pill: '#fffbeb', text: '#d97706', ring: '#f59e0b' },
+  review:     { pill: '#f0fdf4', text: '#15803d', ring: '#22c55e' },
+  relearning: { pill: '#fff1f2', text: '#dc2626', ring: '#ef4444' },
 }
 
-function ringFill(state: CardState, due: boolean): number {
-  if (state === 'new') return -1           // -1 = no ring
-  if (state === 'learning' || state === 'relearning') return 0.65
-  if (state === 'review') return due ? 0.92 : 0   // outline only when not due
+const RING_TRACK = '#e5e7eb'
+const RING_SIZE = 30
+const RING_STROKE = 2.75
+const RING_R = (RING_SIZE / 2) - RING_STROKE
+
+/**
+ * Progress arc = mastery stage, not "due".
+ * new → small start · learning → mid · relearning → low-mid · review → high/full from interval
+ */
+function ringFill(
+  state: CardState,
+  scheduledDays: number,
+  reps: number,
+): number {
+  if (state === 'new') return 0.15
+  if (state === 'learning') return 0.42
+  if (state === 'relearning') return 0.28
+  // review: interval length maps to mastery (1d → ~55%, 21d+ → full)
+  if (state === 'review') {
+    const fromInterval = Math.min(1, 0.55 + Math.max(0, scheduledDays) / 40)
+    const fromReps = Math.min(1, 0.5 + Math.max(0, reps) * 0.08)
+    return Math.max(fromInterval, fromReps)
+  }
   return 0
 }
 
@@ -81,7 +103,8 @@ function noteState(note: VocabNote): CardState {
   const card = note.cards?.[0]
   if (!card) return 'new'
   const s = card.state
-  return s === 'relearning' ? 'learning' : s
+  if (s === 'new' || s === 'learning' || s === 'review' || s === 'relearning') return s
+  return 'new'
 }
 
 function isDue(note: VocabNote): boolean {
@@ -90,36 +113,63 @@ function isDue(note: VocabNote): boolean {
   return new Date(card.dueAt) <= new Date()
 }
 
-function StageRing({ state, due }: { state: CardState; due: boolean }) {
-  const fill = ringFill(state, due)
+function StageRing({
+  state,
+  due,
+  scheduledDays = 0,
+  reps = 0,
+}: {
+  state: CardState
+  due: boolean
+  scheduledDays?: number
+  reps?: number
+}) {
+  const fill = ringFill(state, scheduledDays, reps)
   const color = STAGE_STYLE[state].ring
+  const cx = RING_SIZE / 2
+  const circ = 2 * Math.PI * RING_R
+  const dash = Math.max(0, Math.min(1, fill)) * circ
 
-  // NEW state: no ring, just DUE badge if due
-  if (fill === -1) {
-    return due ? (
-      <span style={{ fontSize: 10, fontWeight: 800, color: DUE_COLOR, letterSpacing: '0.06em', marginTop: 2, flexShrink: 0 }}>DUE</span>
-    ) : null
-  }
-
-  const r = 18
-  const circ = 2 * Math.PI * r
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-      <svg width={44} height={44} style={{ transform: 'rotate(-90deg)' }}>
-        <circle cx={22} cy={22} r={r} fill="none" stroke="#e9e9e7" strokeWidth={3.5} />
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, flexShrink: 0 }}>
+      <svg
+        width={RING_SIZE}
+        height={RING_SIZE}
+        viewBox={`0 0 ${RING_SIZE} ${RING_SIZE}`}
+        style={{ transform: 'rotate(-90deg)' }}
+        aria-hidden
+      >
+        <circle
+          cx={cx}
+          cy={cx}
+          r={RING_R}
+          fill="none"
+          stroke={RING_TRACK}
+          strokeWidth={RING_STROKE}
+        />
         {fill > 0 && (
           <circle
-            cx={22} cy={22} r={r}
+            cx={cx}
+            cy={cx}
+            r={RING_R}
             fill="none"
             stroke={color}
-            strokeWidth={3.5}
-            strokeDasharray={`${fill * circ} ${circ}`}
+            strokeWidth={RING_STROKE}
+            strokeDasharray={`${dash} ${circ}`}
             strokeLinecap="round"
           />
         )}
       </svg>
       {due && (
-        <span style={{ fontSize: 10, fontWeight: 800, color: DUE_COLOR, letterSpacing: '0.06em', lineHeight: 1 }}>DUE</span>
+        <span style={{
+          fontSize: 9,
+          fontWeight: 800,
+          color: DUE_COLOR,
+          letterSpacing: '0.06em',
+          lineHeight: 1,
+        }}>
+          DUE
+        </span>
       )}
     </div>
   )
@@ -127,7 +177,7 @@ function StageRing({ state, due }: { state: CardState; due: boolean }) {
 
 function StagePill({ state }: { state: CardState }) {
   const s = STAGE_STYLE[state]
-  const label = state === 'relearning' ? 'LEARNING' : state.toUpperCase()
+  const label = state === 'relearning' ? 'RELEARN' : state.toUpperCase()
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center',
@@ -150,13 +200,24 @@ function displayDefinition(note: VocabNote): string | null {
   return null
 }
 
-function WordCard({ note, lookingUp }: { note: VocabNote; lookingUp?: boolean }) {
+function WordCard({
+  note,
+  lookingUp,
+  onDelete,
+  deleting,
+}: {
+  note: VocabNote
+  lookingUp?: boolean
+  onDelete: (note: VocabNote) => void
+  deleting?: boolean
+}) {
   // Hide glosses by default so browsing Words doesn't spoil Practice.
   const [showDef, setShowDef] = useState(false)
   const def = displayDefinition(note)
   const phonetic = note.extra && note.extra.startsWith('/') ? note.extra : null
   const state = noteState(note)
   const due = isDue(note)
+  const card = note.cards?.[0]
   const book = note.sourceBookTitle ?? note.topic ?? null
 
   return (
@@ -204,7 +265,12 @@ function WordCard({ note, lookingUp }: { note: VocabNote; lookingUp?: boolean })
             <p style={{ fontSize: 12, color: '#6b7280', fontFamily: '"SF Mono", "JetBrains Mono", Consolas, monospace', marginTop: 4, lineHeight: 1 }}>{phonetic}</p>
           )}
         </div>
-        <StageRing state={state} due={due} />
+        <StageRing
+          state={state}
+          due={due}
+          scheduledDays={card?.scheduledDays ?? 0}
+          reps={card?.reps ?? 0}
+        />
       </div>
 
       {/* Definition hidden until tap — keeps Practice from being spoiled */}
@@ -234,27 +300,65 @@ function WordCard({ note, lookingUp }: { note: VocabNote; lookingUp?: boolean })
         </p>
       )}
 
-      {/* Bottom row: stage pill + book */}
+      {/* Bottom row: stage pill + book + delete */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 0, minWidth: 0 }}>
         <StagePill state={state} />
-        {book && (
-          note.sourceBookId && note.sourceBookTitle ? (
-            <Link
-              to={`/book/${note.sourceBookId}`}
-              title={note.sourceBookTitle}
-              onClick={(e) => e.stopPropagation()}
-              style={{ fontSize: 12, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160, textAlign: 'right', textDecoration: 'none', flexShrink: 1, minWidth: 0 }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = '#374151' }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = '#9ca3af' }}
-            >
-              {book}
-            </Link>
-          ) : (
-            <span title={book} style={{ fontSize: 12, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160, textAlign: 'right', flexShrink: 1, minWidth: 0 }}>
-              {book}
-            </span>
-          )
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1, justifyContent: 'flex-end' }}>
+          {book && (
+            note.sourceBookId && note.sourceBookTitle ? (
+              <Link
+                to={`/book/${note.sourceBookId}`}
+                title={note.sourceBookTitle}
+                onClick={(e) => e.stopPropagation()}
+                style={{ fontSize: 12, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120, textAlign: 'right', textDecoration: 'none', flexShrink: 1, minWidth: 0 }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = '#374151' }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = '#9ca3af' }}
+              >
+                {book}
+              </Link>
+            ) : (
+              <span title={book} style={{ fontSize: 12, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120, textAlign: 'right', flexShrink: 1, minWidth: 0 }}>
+                {book}
+              </span>
+            )
+          )}
+          <button
+            type="button"
+            aria-label={`Delete ${note.front}`}
+            disabled={deleting}
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              onDelete(note)
+            }}
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 8,
+              border: 'none',
+              background: 'transparent',
+              color: '#9ca3af',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: deleting ? 'wait' : 'pointer',
+              flexShrink: 0,
+              opacity: deleting ? 0.5 : 1,
+            }}
+            onMouseEnter={(e) => {
+              const el = e.currentTarget
+              el.style.color = '#dc2626'
+              el.style.background = '#fef2f2'
+            }}
+            onMouseLeave={(e) => {
+              const el = e.currentTarget
+              el.style.color = '#9ca3af'
+              el.style.background = 'transparent'
+            }}
+          >
+            <Trash2 size={15} strokeWidth={2} />
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -266,12 +370,16 @@ function WordRow({
   onToggle,
   isLast,
   lookingUp,
+  onDelete,
+  deleting,
 }: {
   note: VocabNote
   expanded: boolean
   onToggle: () => void
   isLast: boolean
   lookingUp?: boolean
+  onDelete: (note: VocabNote) => void
+  deleting?: boolean
 }) {
   const def = displayDefinition(note)
   const state = noteState(note)
@@ -279,21 +387,36 @@ function WordRow({
     <div
       style={{ borderBottom: isLast ? 'none' : '1px solid #e9e9e7', background: expanded ? '#fafaf9' : '#fff' }}
     >
-      <button
-        onClick={onToggle}
-        className="w-full px-4 py-3 flex items-center gap-2.5 cursor-pointer border-0 bg-transparent text-left"
-      >
-        <span style={{ fontFamily: 'Lora, Georgia, serif', fontSize: 14, fontWeight: 600, color: '#37352f', minWidth: 130 }}>
-          {note.front}
-        </span>
-        <StagePill state={state} />
-        <div className="ml-auto flex items-center gap-2 shrink-0">
-          {note.sourceBookTitle && (
-            <span className="text-[11px] text-[#9b9a97] max-w-[140px] truncate hidden sm:block">{note.sourceBookTitle}</span>
-          )}
-          {expanded ? <ChevronUp size={13} className="text-muted-foreground" /> : <ChevronDown size={13} className="text-muted-foreground" />}
-        </div>
-      </button>
+      <div className="flex items-center gap-1 pr-2">
+        <button
+          onClick={onToggle}
+          className="flex-1 min-w-0 px-4 py-3 flex items-center gap-2.5 cursor-pointer border-0 bg-transparent text-left"
+        >
+          <span style={{ fontFamily: 'Lora, Georgia, serif', fontSize: 14, fontWeight: 600, color: '#37352f', minWidth: 100 }}>
+            {note.front}
+          </span>
+          <StagePill state={state} />
+          <div className="ml-auto flex items-center gap-2 shrink-0">
+            {note.sourceBookTitle && (
+              <span className="text-[11px] text-[#9b9a97] max-w-[140px] truncate hidden sm:block">{note.sourceBookTitle}</span>
+            )}
+            {expanded ? <ChevronUp size={13} className="text-muted-foreground" /> : <ChevronDown size={13} className="text-muted-foreground" />}
+          </div>
+        </button>
+        <button
+          type="button"
+          aria-label={`Delete ${note.front}`}
+          disabled={deleting}
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            onDelete(note)
+          }}
+          className="w-8 h-8 shrink-0 rounded-lg flex items-center justify-center border-0 cursor-pointer transition-colors text-[#9b9a97] hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+        >
+          <Trash2 size={15} strokeWidth={2} />
+        </button>
+      </div>
       {expanded && (
         <div className="px-4 pb-3 space-y-1">
           {def ? (
@@ -303,7 +426,7 @@ function WordRow({
           ) : (
             <p className="text-[12.5px] text-amber-600">No definition yet</p>
           )}
-          {note.topic && <p className="text-[11px] text-[#9b9a97]/60">{note.topic}</p>}
+          {note.topic && <p className="text-[11px] text-[#9b9a97]">· {note.topic}</p>}
           {def && (
             <p className="text-[11px] text-[#9b9a97]">Hidden by default on cards so Practice stays fair.</p>
           )}
@@ -348,6 +471,34 @@ export function VocabularyRoute() {
     queryFn: () => api.get<DeckDashboard>(`/api/vocabulary/decks/${deck!.id}`),
     enabled: Boolean(deck?.id),
   })
+
+  const deleteMutation = useMutation({
+    mutationFn: (note: VocabNote) => api.delete(`/api/vocabulary/notes/${note.id}`),
+    onSuccess: (_data, note) => {
+      if (deck?.id) {
+        queryClient.setQueryData<DeckDashboard>(['deck-dashboard', deck.id], (prev) => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            notes: prev.notes.filter((n) => n.id !== note.id),
+            deck: {
+              ...prev.deck,
+              noteCount: Math.max(0, (prev.deck.noteCount ?? prev.notes.length) - 1),
+              cardCount: Math.max(0, (prev.deck.cardCount ?? prev.notes.length) - 1),
+            },
+          }
+        })
+      }
+      void queryClient.invalidateQueries({ queryKey: ['deck-dashboard', deck?.id] })
+      void queryClient.invalidateQueries({ queryKey: ['decks'] })
+      setExpanded((cur) => (cur === note.id ? null : cur))
+    },
+  })
+
+  function handleDelete(note: VocabNote) {
+    if (!window.confirm(`Delete “${note.front}” from your vocabulary?`)) return
+    deleteMutation.mutate(note)
+  }
 
   // Backfill missing definitions via Worker dictionary API (COEP-safe).
   // Only mark "done" after success or a hard miss — transient failures can retry.
@@ -523,7 +674,7 @@ export function VocabularyRoute() {
     if (search && !w.front.toLowerCase().includes(search.toLowerCase())) return false
     if (stageFilter !== 'all') {
       const s = noteState(w)
-      if (stageFilter === 'learning' && s !== 'learning') return false
+      if (stageFilter === 'learning' && s !== 'learning' && s !== 'relearning') return false
       if (stageFilter === 'new' && s !== 'new') return false
       if (stageFilter === 'review' && s !== 'review') return false
     }
@@ -651,7 +802,13 @@ export function VocabularyRoute() {
         ) : layout === 'grid' ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 items-start">
             {filtered.map((w) => (
-              <WordCard key={w.id} note={w} lookingUp={lookingUpIds.has(w.id)} />
+              <WordCard
+                key={w.id}
+                note={w}
+                lookingUp={lookingUpIds.has(w.id)}
+                onDelete={handleDelete}
+                deleting={deleteMutation.isPending && deleteMutation.variables?.id === w.id}
+              />
             ))}
           </div>
         ) : (
@@ -664,6 +821,8 @@ export function VocabularyRoute() {
                 expanded={expanded === w.id}
                 onToggle={() => setExpanded(expanded === w.id ? null : w.id)}
                 isLast={i === filtered.length - 1}
+                onDelete={handleDelete}
+                deleting={deleteMutation.isPending && deleteMutation.variables?.id === w.id}
               />
             ))}
           </div>

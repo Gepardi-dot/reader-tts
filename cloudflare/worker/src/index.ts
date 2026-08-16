@@ -258,6 +258,11 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
     return updateMnemonic(request, env, user, decodeURIComponent(noteMnemonicMatch[1]))
   }
 
+  const noteDeleteMatch = path.match(/^\/api\/vocabulary\/notes\/([^/]+)$/)
+  if (noteDeleteMatch && request.method === 'DELETE') {
+    return deleteVocabularyNote(env, user, decodeURIComponent(noteDeleteMatch[1]))
+  }
+
   const cardMatch = path.match(/^\/api\/vocabulary\/cards\/([^/]+)(?:\/(.*))?$/)
   if (cardMatch) {
     const cardId = decodeURIComponent(cardMatch[1])
@@ -2444,6 +2449,19 @@ async function updateMnemonic(request: Request, env: Env, user: User, noteId: st
     .bind(mnemonic, new Date().toISOString(), noteId, user.id)
     .run()
   return json(await getNote(env, user, noteId))
+}
+
+async function deleteVocabularyNote(env: Env, user: User, noteId: string) {
+  const note = await env.DB.prepare('SELECT id FROM vocabulary_notes WHERE id = ? AND user_id = ?')
+    .bind(noteId, user.id)
+    .first<{ id: string }>()
+  if (!note) throw new ApiError(404, 'Note not found.')
+  // Delete cards first so orphan rows are cleaned even if FK cascade is off.
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM vocabulary_cards WHERE note_id = ? AND user_id = ?').bind(noteId, user.id),
+    env.DB.prepare('DELETE FROM vocabulary_notes WHERE id = ? AND user_id = ?').bind(noteId, user.id),
+  ])
+  return json({ ok: true })
 }
 
 async function practiceSession(request: Request | null, env: Env, user: User, deckId: string) {

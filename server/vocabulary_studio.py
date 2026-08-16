@@ -2138,6 +2138,19 @@ class VocabularyStudioService:
                 "deck": self._deck_summary(conn, deck_row, now),
             }
 
+    def delete_note(self, note_id: str) -> dict[str, Any]:
+        with self.connection() as conn:
+            note_row = conn.execute(
+                "select id from notes where id = ? and user_id = ?",
+                (note_id, self.user_id),
+            ).fetchone()
+            if note_row is None:
+                raise HTTPException(status_code=404, detail="Note not found.")
+            conn.execute("delete from cards where note_id = ? and user_id = ?", (note_id, self.user_id))
+            conn.execute("delete from notes where id = ? and user_id = ?", (note_id, self.user_id))
+            conn.commit()
+        return {"ok": True}
+
     def update_note_mnemonic(self, note_id: str, request: NoteMnemonicUpdateRequest) -> dict[str, Any]:
         now = _utc_now()
         mnemonic = _normalize_line(request.mnemonic)
@@ -3517,6 +3530,10 @@ def create_vocabulary_router(service: VocabularyStudioService) -> APIRouter:
     @router.patch("/notes/{note_id}/mnemonic")
     def update_note_mnemonic(note_id: str, request: NoteMnemonicUpdateRequest) -> dict[str, Any]:
         return service.update_note_mnemonic(note_id, request)
+
+    @router.delete("/notes/{note_id}")
+    def delete_note(note_id: str) -> dict[str, Any]:
+        return service.delete_note(note_id)
 
     @router.post("/notes/{note_id}/refresh-definition")
     def refresh_note_definition(note_id: str) -> dict[str, Any]:

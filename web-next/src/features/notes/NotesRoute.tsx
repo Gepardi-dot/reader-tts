@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
-import { useQuery, useQueries } from '@tanstack/react-query'
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { FileText, LayoutGrid, List, GitBranch } from 'lucide-react'
+import { FileText, LayoutGrid, List, GitBranch, Trash2 } from 'lucide-react'
 import { api } from '@/shared/api/client'
 
 interface Book {
@@ -55,55 +55,115 @@ function timeAgo(iso: string) {
   return m < 12 ? `${m}mo ago` : `${Math.floor(m / 12)}y ago`
 }
 
-function NoteList({ entry, index }: { entry: Entry; index: number }) {
+function DeleteNoteButton({
+  onDelete,
+  pending,
+}: {
+  onDelete: () => void
+  pending?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      aria-label="Delete note"
+      disabled={pending}
+      onClick={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        onDelete()
+      }}
+      className="ml-auto shrink-0 w-8 h-8 rounded-lg flex items-center justify-center border-0 cursor-pointer transition-colors text-[#9b9a97] hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+    >
+      <Trash2 size={15} strokeWidth={2} />
+    </button>
+  )
+}
+
+function NoteList({
+  entry,
+  index,
+  onDelete,
+  deleting,
+}: {
+  entry: Entry
+  index: number
+  onDelete: (entry: Entry) => void
+  deleting?: boolean
+}) {
   const { strip, bg } = CMAP[entry.color]
   return (
-    <Link
-      to={`/book/${entry.book.id}?offset=${entry.start}`}
+    <div
       className="flex rounded-[10px] overflow-hidden border border-[#e9e9e7] bg-white hover:shadow-sm transition-shadow"
       style={{ animationDelay: `${index * 35}ms` }}
     >
       <div className="w-1 shrink-0" style={{ background: strip }} />
-      <div className="flex-1 px-3.5 py-2.5" style={{ background: bg }}>
-        <div className="text-[11px] font-medium text-[#9b9a97] mb-1.5">{entry.book.title}</div>
-        <p className="text-[13.5px] leading-[1.65] text-[#37352f] italic" style={{ fontFamily: 'Lora, Georgia, serif' }}>
-          "{entry.text}"
-        </p>
-        {entry.note && (
-          <p className="mt-2 pl-2.5 border-l-2 border-[#e9e9e7] text-[12px] text-[#9b9a97] leading-snug">
-            {entry.note}
+      <div className="flex-1 px-3.5 py-2.5 min-w-0" style={{ background: bg }}>
+        <Link to={`/book/${entry.book.id}?offset=${entry.start}`} className="block no-underline">
+          <div className="text-[11px] font-medium text-[#9b9a97] mb-1.5">{entry.book.title}</div>
+          <p className="text-[13.5px] leading-[1.65] text-[#37352f] italic" style={{ fontFamily: 'Lora, Georgia, serif' }}>
+            "{entry.text}"
           </p>
-        )}
-        <div className="mt-2 text-[10.5px] font-medium text-[#9b9a97]">{timeAgo(entry.createdAt)}</div>
+          {entry.note && (
+            <p className="mt-2 pl-2.5 border-l-2 border-[#e9e9e7] text-[12px] text-[#9b9a97] leading-snug">
+              {entry.note}
+            </p>
+          )}
+        </Link>
+        <div className="mt-2 flex items-center gap-2">
+          <span className="text-[10.5px] font-medium text-[#9b9a97]">{timeAgo(entry.createdAt)}</span>
+          <DeleteNoteButton onDelete={() => onDelete(entry)} pending={deleting} />
+        </div>
       </div>
-    </Link>
+    </div>
   )
 }
 
-function NoteGrid({ entry, index }: { entry: Entry; index: number }) {
+function NoteGrid({
+  entry,
+  index,
+  onDelete,
+  deleting,
+}: {
+  entry: Entry
+  index: number
+  onDelete: (entry: Entry) => void
+  deleting?: boolean
+}) {
   const { strip, bg } = CMAP[entry.color]
   return (
-    <Link
-      to={`/book/${entry.book.id}?offset=${entry.start}`}
+    <div
       className="mb-3 inline-block w-full break-inside-avoid rounded-[10px] overflow-hidden border border-[#e9e9e7] bg-white hover:shadow-md transition-shadow"
       style={{ animationDelay: `${index * 35}ms` }}
     >
       <div className="h-1" style={{ background: strip }} />
       <div className="p-3.5" style={{ background: bg }}>
-        <div className="text-[10.5px] font-medium text-[#9b9a97] mb-1.5">{entry.book.title}</div>
-        <p className="text-[13px] leading-[1.6] text-[#37352f] italic" style={{ fontFamily: 'Lora, Georgia, serif' }}>
-          "{entry.text}"
-        </p>
-        {entry.note && (
-          <p className="mt-1.5 text-[11.5px] text-[#9b9a97] leading-[1.45]">{entry.note}</p>
-        )}
-        <div className="mt-2.5 text-[10px] text-[#9b9a97]">{timeAgo(entry.createdAt)}</div>
+        <Link to={`/book/${entry.book.id}?offset=${entry.start}`} className="block no-underline">
+          <div className="text-[10.5px] font-medium text-[#9b9a97] mb-1.5">{entry.book.title}</div>
+          <p className="text-[13px] leading-[1.6] text-[#37352f] italic" style={{ fontFamily: 'Lora, Georgia, serif' }}>
+            "{entry.text}"
+          </p>
+          {entry.note && (
+            <p className="mt-1.5 text-[11.5px] text-[#9b9a97] leading-[1.45]">{entry.note}</p>
+          )}
+        </Link>
+        <div className="mt-2.5 flex items-center gap-2">
+          <span className="text-[10px] text-[#9b9a97]">{timeAgo(entry.createdAt)}</span>
+          <DeleteNoteButton onDelete={() => onDelete(entry)} pending={deleting} />
+        </div>
       </div>
-    </Link>
+    </div>
   )
 }
 
-function NoteTimeline({ entries }: { entries: Entry[] }) {
+function NoteTimeline({
+  entries,
+  onDelete,
+  deletingId,
+}: {
+  entries: Entry[]
+  onDelete: (entry: Entry) => void
+  deletingId?: string | null
+}) {
   return (
     <div className="relative pl-6">
       <div className="absolute left-[7px] top-2 bottom-2 w-px bg-[#e9e9e7]" />
@@ -115,25 +175,30 @@ function NoteTimeline({ entries }: { entries: Entry[] }) {
               className="absolute -left-[22px] top-3.5 w-3.5 h-3.5 rounded-full border-2 border-white"
               style={{ background: strip, boxShadow: `0 0 0 1.5px ${strip}` }}
             />
-            <Link
-              to={`/book/${entry.book.id}?offset=${entry.start}`}
-              className="block rounded-[10px] overflow-hidden border border-[#e9e9e7] bg-white hover:shadow-sm transition-shadow"
-            >
+            <div className="rounded-[10px] overflow-hidden border border-[#e9e9e7] bg-white hover:shadow-sm transition-shadow">
               <div className="p-3.5" style={{ background: bg }}>
-                <div className="flex justify-between items-center mb-1.5">
-                  <span className="text-[11px] font-medium text-[#9b9a97]">{entry.book.title}</span>
-                  <span className="text-[10px] text-[#9b9a97]">{timeAgo(entry.createdAt)}</span>
-                </div>
-                <p className="text-[13.5px] leading-[1.65] text-[#37352f] italic" style={{ fontFamily: 'Lora, Georgia, serif' }}>
-                  "{entry.text}"
-                </p>
-                {entry.note && (
-                  <p className="mt-2 pl-2.5 border-l-2 border-[#e9e9e7] text-[12px] text-[#9b9a97] leading-snug">
-                    {entry.note}
+                <Link to={`/book/${entry.book.id}?offset=${entry.start}`} className="block no-underline">
+                  <div className="flex justify-between items-center mb-1.5">
+                    <span className="text-[11px] font-medium text-[#9b9a97]">{entry.book.title}</span>
+                    <span className="text-[10px] text-[#9b9a97]">{timeAgo(entry.createdAt)}</span>
+                  </div>
+                  <p className="text-[13.5px] leading-[1.65] text-[#37352f] italic" style={{ fontFamily: 'Lora, Georgia, serif' }}>
+                    "{entry.text}"
                   </p>
-                )}
+                  {entry.note && (
+                    <p className="mt-2 pl-2.5 border-l-2 border-[#e9e9e7] text-[12px] text-[#9b9a97] leading-snug">
+                      {entry.note}
+                    </p>
+                  )}
+                </Link>
+                <div className="mt-2 flex items-center justify-end">
+                  <DeleteNoteButton
+                    onDelete={() => onDelete(entry)}
+                    pending={deletingId === entry.id}
+                  />
+                </div>
               </div>
-            </Link>
+            </div>
           </div>
         )
       })}
@@ -159,6 +224,7 @@ export function NotesRoute() {
   const [colorFilter, setColorFilter] = useState<ColorKey | null>(null)
   const [kind, setKind] = useState<'all' | 'annotation'>('all')
   const [layout, setLayout] = useState<Layout>('grid')
+  const queryClient = useQueryClient()
 
   const { data: booksRaw, isLoading: booksLoading } = useQuery({
     queryKey: ['books'],
@@ -183,6 +249,24 @@ export function NotesRoute() {
       enabled: books.length > 0,
     })),
   })
+
+  const deleteMutation = useMutation({
+    mutationFn: (entry: Entry) =>
+      api.delete(`/api/books/${entry.book.id}/highlights/${entry.id}`),
+    onSuccess: (_data, entry) => {
+      queryClient.setQueryData<Highlight[]>(['highlights', entry.book.id], (prev) =>
+        (prev ?? []).filter((h) => h.id !== entry.id),
+      )
+      void queryClient.invalidateQueries({ queryKey: ['highlights', entry.book.id] })
+      void queryClient.invalidateQueries({ queryKey: ['books'] })
+    },
+  })
+
+  function handleDelete(entry: Entry) {
+    const snippet = entry.text.length > 60 ? `${entry.text.slice(0, 60)}…` : entry.text
+    if (!window.confirm(`Delete this note?\n\n"${snippet}"`)) return
+    deleteMutation.mutate(entry)
+  }
 
   const isLoading = booksLoading || (books.length > 0 && highlightQueries.some((q) => q.isLoading || q.isFetching && !q.data))
 
@@ -210,6 +294,8 @@ export function NotesRoute() {
     }
     return true
   }), [entries, colorFilter, kind, search])
+
+  const deletingId = deleteMutation.isPending ? deleteMutation.variables?.id ?? null : null
 
   return (
     <div className="min-h-svh bg-background pb-24 md:pb-6">
@@ -304,13 +390,29 @@ export function NotesRoute() {
           </div>
         ) : layout === 'grid' ? (
           <div className="columns-1 sm:columns-2 gap-3">
-            {filtered.map((e, i) => <NoteGrid key={e.id} entry={e} index={i} />)}
+            {filtered.map((e, i) => (
+              <NoteGrid
+                key={e.id}
+                entry={e}
+                index={i}
+                onDelete={handleDelete}
+                deleting={deletingId === e.id}
+              />
+            ))}
           </div>
         ) : layout === 'timeline' ? (
-          <NoteTimeline entries={filtered} />
+          <NoteTimeline entries={filtered} onDelete={handleDelete} deletingId={deletingId} />
         ) : (
           <div className="space-y-2.5">
-            {filtered.map((e, i) => <NoteList key={e.id} entry={e} index={i} />)}
+            {filtered.map((e, i) => (
+              <NoteList
+                key={e.id}
+                entry={e}
+                index={i}
+                onDelete={handleDelete}
+                deleting={deletingId === e.id}
+              />
+            ))}
           </div>
         )}
       </div>
