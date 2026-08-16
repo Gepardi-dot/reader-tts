@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AuthApiError, clearAuth, getStoredUser, signIn, signUp } from '@/lib/auth'
 import { recoverStuckClient } from '@/lib/clientRecovery'
@@ -8,30 +8,38 @@ import { Label } from '@/components/ui/label'
 
 type Mode = 'signin' | 'signup'
 
+/**
+ * Prefill email from a previous session, then clear dead tokens so login
+ * always starts clean. Runs during state init (not useEffect) so eslint
+ * react-hooks/set-state-in-effect stays happy and CI lint passes.
+ */
+function initialLoginEmail(): string {
+  if (typeof window === 'undefined') return ''
+  try {
+    const previous = getStoredUser()
+    const email = previous?.email ?? ''
+    clearAuth()
+    if (window.location.search.includes('_recovered=')) {
+      const url = new URL(window.location.href)
+      url.searchParams.delete('_recovered')
+      window.history.replaceState({}, '', url.pathname + url.search)
+    }
+    return email
+  } catch {
+    return ''
+  }
+}
+
 export function LoginRoute() {
   const navigate = useNavigate()
   const [mode, setMode] = useState<Mode>('signin')
-  const [email, setEmail] = useState('')
+  const [email, setEmail] = useState(initialLoginEmail)
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [emailTaken, setEmailTaken] = useState(false)
   const [loading, setLoading] = useState(false)
   const [recovering, setRecovering] = useState(false)
   const [showRecover, setShowRecover] = useState(false)
-
-  // Prefill email from a previous session user record; clear dead tokens so
-  // login always starts clean (old SW shells often left half-valid storage).
-  useEffect(() => {
-    const previous = getStoredUser()
-    if (previous?.email) setEmail(previous.email)
-    clearAuth()
-    // Drop ?_recovered= from the address bar after a recovery reload
-    if (typeof window !== 'undefined' && window.location.search.includes('_recovered=')) {
-      const url = new URL(window.location.href)
-      url.searchParams.delete('_recovered')
-      window.history.replaceState({}, '', url.pathname + url.search)
-    }
-  }, [])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
