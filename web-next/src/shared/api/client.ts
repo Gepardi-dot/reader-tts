@@ -142,6 +142,24 @@ interface Book {
 
 interface UploadBookOptions {
   onProgress?: (progress: BookExtractionProgress) => void
+  /**
+   * When true (default), every upload is normalized through the built-in
+   * any-format → EPUB pipeline, then text is saved for reading/TTS.
+   * Set false only for tests that need the raw extractor.
+   */
+  convertToEpub?: boolean
+  /** If true, trigger a browser download of the generated .epub */
+  downloadEpub?: boolean
+}
+
+export interface UploadBookResult {
+  book: Book
+  epub?: {
+    fileName: string
+    chapterCount: number
+    /** Present when convertToEpub ran; not kept after download helper uses it */
+    blob?: Blob
+  }
 }
 
 export const api = {
@@ -155,13 +173,53 @@ export const api = {
     request<T>(url, { method: 'PATCH', body: JSON.stringify(body) }),
 }
 
-export async function uploadBook(file: File, title?: string | null, options: UploadBookOptions = {}) {
-  const { extractBookText } = await import('@/shared/books/extractBookText')
-  const payload = await extractBookText(file, { title, onProgress: options.onProgress })
+/**
+ * Import a book: convert any supported format → EPUB → save text to the API.
+ * Reading/TTS still uses extracted plain text (fast path).
+ */
+export async function uploadBook(
+  file: File,
+  title?: string | null,
+  options: UploadBookOptions = {},
+): Promise<UploadBookResult> {
+  const convert = options.convertToEpub !== false
+
+  let payload: {
+    title: string
+    fileName: string
+    text: string
+    pageCount: number
+    sourceFormat: string
+  }
+  let epubMeta: UploadBookResult['epub']
+
+  if (convert) {
+    const { convertFileToEpub } = await import('@/shared/books/convertToEpub')
+    const { downloadBlob } = await import('@/shared/books/epubBuilder')
+    const result = await convertFileToEpub(file, {
+      title,
+      onProgress: options.onProgress,
+    })
+    payload = result.book
+    epubMeta = {
+      fileName: result.epub.fileName,
+      chapterCount: result.epub.chapterCount,
+      blob: result.epub.blob,
+    }
+    if (options.downloadEpub) {
+      downloadBlob(result.epub.blob, result.epub.fileName)
+    }
+  } else {
+    const { extractBookText } = await import('@/shared/books/extractBookText')
+    payload = await extractBookText(file, { title, onProgress: options.onProgress })
+  }
+
   options.onProgress?.({ phase: 'uploading', progress: 100, message: 'Saving book...' })
 
-  return request<Book>('/api/books', {
+  const book = await request<Book>('/api/books', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
+
+  return { book, epub: epubMeta }
 }

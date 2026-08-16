@@ -13,7 +13,7 @@ import {
 } from '@/shared/books/textConverters'
 
 export interface BookExtractionProgress {
-  phase: 'reading' | 'extracting' | 'uploading'
+  phase: 'reading' | 'extracting' | 'converting' | 'uploading'
   progress: number
   message: string
 }

@@ -26,6 +26,8 @@ export function UploadRoute() {
   const [progressMessage, setProgressMessage] = useState('')
   const [progressValue, setProgressValue] = useState(0)
   const [drag, setDrag] = useState(false)
+  const [downloadEpub, setDownloadEpub] = useState(true)
+  const [lastEpubNote, setLastEpubNote] = useState('')
   const [modelState, setModelState] = useState<ModelState>(() => getModelStatus())
   const inputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
@@ -37,15 +39,25 @@ export function UploadRoute() {
     if (!file) return
     setUploading(true)
     setError('')
-    setProgressMessage('Preparing book...')
+    setLastEpubNote('')
+    setProgressMessage('Converting to EPUB...')
     setProgressValue(0)
     try {
-      const book = await uploadBook(file, null, {
+      const { book, epub } = await uploadBook(file, null, {
+        convertToEpub: true,
+        downloadEpub,
         onProgress: (progress) => {
           setProgressMessage(progress.message)
           setProgressValue(progress.progress)
         },
       })
+      if (epub) {
+        setLastEpubNote(
+          downloadEpub
+            ? `Converted to ${epub.fileName} (${epub.chapterCount} chapters) and downloaded.`
+            : `Normalized as EPUB (${epub.chapterCount} chapters) for reading.`,
+        )
+      }
       queryClient.setQueryData<unknown[]>(['books'], (current) => {
         const items = Array.isArray(current) ? current : []
         return [book, ...items.filter((item) => {
@@ -81,6 +93,7 @@ export function UploadRoute() {
     if (isSupportedBookFile(dropped)) {
       setFile(dropped)
       setError('')
+      setLastEpubNote('')
     } else {
       setError(unsupportedBookMessage())
     }
@@ -88,7 +101,11 @@ export function UploadRoute() {
 
   return (
     <div className="p-6 max-w-lg mx-auto pt-12">
-      <h1 className="text-xl font-semibold text-foreground mb-6">Upload a book</h1>
+      <h1 className="text-xl font-semibold text-foreground mb-2">Upload a book</h1>
+      <p className="text-sm text-muted-foreground mb-6">
+        Any supported file is converted to <span className="font-medium text-foreground">EPUB</span> in
+        your browser, then opened for reading and TTS.
+      </p>
 
       {/* Drop zone */}
       <button
@@ -109,7 +126,7 @@ export function UploadRoute() {
             <div className="text-center">
               <p className="font-medium text-foreground">{file.name}</p>
               <p className="text-sm text-muted-foreground mt-1">
-                {(file.size / 1024 / 1024).toFixed(1)} MB
+                {(file.size / 1024 / 1024).toFixed(1)} MB · will convert to EPUB
               </p>
             </div>
           </>
@@ -138,6 +155,7 @@ export function UploadRoute() {
           if (isSupportedBookFile(selected)) {
             setFile(selected)
             setError('')
+            setLastEpubNote('')
           } else {
             setFile(null)
             setError(unsupportedBookMessage())
@@ -145,7 +163,24 @@ export function UploadRoute() {
         }}
       />
 
+      <label className="mt-4 flex items-start gap-2 text-sm text-muted-foreground cursor-pointer select-none">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={downloadEpub}
+          onChange={(e) => setDownloadEpub(e.target.checked)}
+          disabled={uploading}
+        />
+        <span>
+          Also download the converted <span className="text-foreground">.epub</span> file
+          (portable copy for other readers)
+        </span>
+      </label>
+
       {error && <p className="text-sm text-destructive mt-3">{error}</p>}
+      {lastEpubNote && !error && (
+        <p className="text-sm text-muted-foreground mt-3">{lastEpubNote}</p>
+      )}
 
       <div className="mt-4 flex gap-3">
         <Button
@@ -153,10 +188,10 @@ export function UploadRoute() {
           disabled={!file || uploading}
           onClick={handleUpload}
         >
-          {uploading ? progressMessage || 'Uploading...' : 'Upload'}
+          {uploading ? progressMessage || 'Converting…' : 'Convert to EPUB & open'}
         </Button>
         {file && (
-          <Button variant="outline" onClick={() => setFile(null)}>
+          <Button variant="outline" onClick={() => setFile(null)} disabled={uploading}>
             Clear
           </Button>
         )}
