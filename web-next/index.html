@@ -4,7 +4,30 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>web-next</title>
+    <title>Storybook Reader</title>
+    <!--
+      Inline, runs before the app module. Deletes legacy service-worker shell
+      caches that used to pin index.html and break login. Safe no-op on clean browsers.
+    -->
+    <script>
+      (function () {
+        try {
+          if (!('caches' in window)) return
+          // Permanent: never keep app-shell caches (they broke returning logins).
+          // Only Kokoro models + cover thumbs may stay in Cache Storage.
+          caches.keys().then(function (keys) {
+            return Promise.all(
+              keys.map(function (k) {
+                if (k.indexOf('kokoro-model-') === 0 || k.indexOf('book-covers-') === 0) {
+                  return null
+                }
+                return caches.delete(k)
+              }),
+            )
+          }).catch(function () {})
+        } catch (e) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

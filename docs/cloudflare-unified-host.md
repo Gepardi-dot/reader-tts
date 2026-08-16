@@ -42,6 +42,18 @@ via `npm --prefix web-next run build:vercel`, which runs
 `.vercelignore` must use **`/scripts/`** (root only). A bare `scripts/` pattern also
 ignores `web-next/scripts/` and breaks the Vercel build.
 
+## Service worker policy (do not regress)
+
+`web-next/public/sw.js` may **only** intercept cross-origin model/cover hosts
+(Hugging Face, Open Library, etc.). It must **never** cache or handle:
+
+- HTML / navigations
+- `/assets/*` app JS/CSS
+- `/api/*`
+
+Caching the SPA shell previously pinned returning browsers to a stale `index.html`
+and broke login after deploys. Hashed assets use normal HTTP `Cache-Control: immutable`.
+
 The SPA also **runtime-guards** any `*.vercel.app` host: even if a bad relative bundle is served, auth/API calls force the Worker URL (`web-next/src/shared/api/apiOrigin.ts`). Prefer the unified Workers URL for day-to-day use.
 
 **Do not** put `VITE_API_ORIGIN=relative` in `web-next/.env.production` — that used to break Vercel login (same-origin `/api` → 405, no useful error).

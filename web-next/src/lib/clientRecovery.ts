@@ -1,15 +1,35 @@
 /**
- * Repair browsers stuck on a stale service-worker shell or broken auth state.
- * Common after Vercel deploys when an old SW cache-first'd index.html.
+ * Client recovery + service worker registration.
+ *
+ * Permanent policy (must match public/sw.js):
+ * - SW may cache cross-origin models/covers only
+ * - SW must never control HTML / JS / /api (same-origin)
+ * - On protocol upgrade, purge legacy shell caches once and reload
  */
 
 import { clearAuth } from '@/lib/auth'
 
-export async function clearServiceWorkerCaches(): Promise<void> {
-  if (typeof caches !== 'undefined') {
-    const keys = await caches.keys()
-    await Promise.all(keys.map((key) => caches.delete(key)))
-  }
+/** Bump when SW policy changes; triggers one automatic migration reload. */
+export const CLIENT_SW_PROTOCOL = 'models-covers-only-v1'
+
+const PROTOCOL_KEY = 'reader-tts-sw-protocol'
+const MODEL_CACHE_PREFIXES = ['kokoro-model-', 'book-covers-']
+
+export async function clearServiceWorkerCaches(options?: {
+  /** Keep large model/cover caches (default true). */
+  keepModels?: boolean
+}): Promise<void> {
+  if (typeof caches === 'undefined') return
+  const keepModels = options?.keepModels !== false
+  const keys = await caches.keys()
+  await Promise.all(
+    keys.map((key) => {
+      if (keepModels && MODEL_CACHE_PREFIXES.some((p) => key.startsWith(p))) {
+        return Promise.resolve(false)
+      }
+      return caches.delete(key)
+    }),
+  )
 }
 
 export async function unregisterServiceWorkers(): Promise<void> {
@@ -19,8 +39,8 @@ export async function unregisterServiceWorkers(): Promise<void> {
 }
 
 /**
- * Wipe auth + SW caches and hard-reload so the next load fetches a fresh
- * index.html and production JS (absolute Worker API origin).
+ * Full repair: auth + non-model caches + unregister SW + hard reload.
+ * Used by the login "Fix stuck browser" control.
  */
 export async function recoverStuckClient(options?: { reload?: boolean }): Promise<void> {
   const shouldReload = options?.reload !== false
@@ -28,14 +48,17 @@ export async function recoverStuckClient(options?: { reload?: boolean }): Promis
     clearAuth()
   } catch { /* ignore */ }
   try {
-    // Drop offline query cache that may hold 401'd book lists
     window.localStorage.removeItem('storybook-qcache-v1')
   } catch { /* ignore */ }
   try {
-    await clearServiceWorkerCaches()
+    // Full cache wipe including models — user asked for a clean slate
+    await clearServiceWorkerCaches({ keepModels: false })
   } catch { /* ignore */ }
   try {
     await unregisterServiceWorkers()
+  } catch { /* ignore */ }
+  try {
+    window.localStorage.setItem(PROTOCOL_KEY, CLIENT_SW_PROTOCOL)
   } catch { /* ignore */ }
   if (shouldReload && typeof window !== 'undefined') {
     const url = new URL(window.location.href)
@@ -44,55 +67,106 @@ export async function recoverStuckClient(options?: { reload?: boolean }): Promis
   }
 }
 
-/** One-shot flag so we don't loop reload on every visit. */
-const RECOVERY_BUMP_KEY = 'reader-tts-sw-shell-v3'
+/**
+ * One-time migration when CLIENT_SW_PROTOCOL changes: drop legacy shell
+ * caches that used to pin index.html, then reload once.
+ */
+async function migrateClientProtocolIfNeeded(): Promise<boolean> {
+  let previous = ''
+  try {
+    previous = window.localStorage.getItem(PROTOCOL_KEY) || ''
+  } catch {
+    previous = ''
+  }
+  if (previous === CLIENT_SW_PROTOCOL) return false
+
+  try {
+    // Always purge non-model caches (storybook-shell-*, providers, etc.)
+    await clearServiceWorkerCaches({ keepModels: true })
+  } catch { /* ignore */ }
+
+  try {
+    window.localStorage.setItem(PROTOCOL_KEY, CLIENT_SW_PROTOCOL)
+  } catch { /* ignore */ }
+
+  // First-ever visitor: no previous protocol — still purge shells but skip
+  // forced reload (nothing to recover).
+  if (!previous) return false
+
+  // Returning client from an older SW policy — force a clean document load.
+  return true
+}
 
 /**
- * After deploy, force old SWs to update. If a new worker activates, reload once
- * so the browser drops the previous HTML/JS shell.
+ * Register SW for model/cover caching only. Updates aggressively; reloads when
+ * a new worker takes control so open tabs leave a stale document.
  */
 export function registerServiceWorkerWithUpdate(): void {
   if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return
 
-  window.addEventListener('load', () => {
-    void (async () => {
-      try {
-        // First visit after shell-v3: purge ancient shell-v1 HTML caches once.
-        if (!window.localStorage.getItem(RECOVERY_BUMP_KEY)) {
-          window.localStorage.setItem(RECOVERY_BUMP_KEY, '1')
-          const keys = await caches.keys()
-          const stale = keys.filter((k) => k.startsWith('storybook-shell-') && k !== 'storybook-shell-v3')
-          if (stale.length > 0) {
-            await Promise.all(stale.map((k) => caches.delete(k)))
-          }
+  // Run migration ASAP (not only after load) so shell caches die before
+  // the SPA continues using a broken environment.
+  void (async () => {
+    try {
+      const needsReload = await migrateClientProtocolIfNeeded()
+      if (needsReload) {
+        const url = new URL(window.location.href)
+        // Avoid loop if something sets protocol but reload fails halfway
+        if (!url.searchParams.has('_sw_migrated')) {
+          url.searchParams.set('_sw_migrated', '1')
+          window.location.replace(url.toString())
+          return
         }
-
-        const reg = await navigator.serviceWorker.register('/sw.js')
-        await reg.update().catch(() => undefined)
-
-        // New worker waiting → activate immediately
-        if (reg.waiting) {
-          reg.waiting.postMessage({ type: 'SKIP_WAITING' })
-        }
-        reg.addEventListener('updatefound', () => {
-          const worker = reg.installing
-          if (!worker) return
-          worker.addEventListener('statechange', () => {
-            if (worker.state === 'installed' && navigator.serviceWorker.controller) {
-              worker.postMessage({ type: 'SKIP_WAITING' })
-            }
-          })
-        })
-
-        let refreshing = false
-        navigator.serviceWorker.addEventListener('controllerchange', () => {
-          if (refreshing) return
-          refreshing = true
-          window.location.reload()
-        })
-      } catch {
-        // SW optional — auth must still work without it
       }
-    })()
-  })
+      // Clean migration query flag
+      if (window.location.search.includes('_sw_migrated=')) {
+        const url = new URL(window.location.href)
+        url.searchParams.delete('_sw_migrated')
+        url.searchParams.delete('_recovered')
+        window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+      }
+    } catch { /* ignore */ }
+
+    window.addEventListener('load', () => {
+      void (async () => {
+        try {
+          const reg = await navigator.serviceWorker.register('/sw.js', {
+            // Default scope: entire origin, but fetch handler ignores same-origin.
+            updateViaCache: 'none',
+          })
+          await reg.update().catch(() => undefined)
+
+          if (reg.waiting) {
+            reg.waiting.postMessage({ type: 'SKIP_WAITING' })
+            reg.waiting.postMessage({ type: 'PURGE_NON_MODEL_CACHES' })
+          }
+
+          reg.addEventListener('updatefound', () => {
+            const worker = reg.installing
+            if (!worker) return
+            worker.addEventListener('statechange', () => {
+              if (worker.state === 'installed' && navigator.serviceWorker.controller) {
+                worker.postMessage({ type: 'SKIP_WAITING' })
+                worker.postMessage({ type: 'PURGE_NON_MODEL_CACHES' })
+              }
+            })
+          })
+
+          let refreshing = false
+          navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (refreshing) return
+            refreshing = true
+            window.location.reload()
+          })
+
+          // Periodic update checks (tab left open across deploys)
+          window.setInterval(() => {
+            reg.update().catch(() => undefined)
+          }, 60 * 60 * 1000)
+        } catch {
+          // SW is optional — auth and reading must work without it
+        }
+      })()
+    })
+  })()
 }
