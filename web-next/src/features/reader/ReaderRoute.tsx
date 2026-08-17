@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, memo, type ReactNode } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo, type ReactNode } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -7,7 +7,7 @@ import {
   Play, Pause,
   Minus, Plus, AlignLeft, AlignCenter, AlignJustify,
   Copy, BookMarked, Globe, BookOpen, Mic, NotebookPen, Sparkles, Search,
-  ChevronLeft, ChevronRight, ChevronDown,
+  ChevronLeft, ChevronRight, ChevronDown, Rows3,
 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { api, AuthError } from '@/shared/api/client'
@@ -68,6 +68,16 @@ import {
   type TtsAudioChunk,
 } from './tts-engine/useTtsSessionController'
 import { expandToReadingPhrase } from './readingPhrase'
+import {
+  clampPageIndex,
+  normalizeReaderLayout,
+  pageBreaksFromLineBoxes,
+  pageIndexForOffset,
+  pageIndexForY,
+  type ReaderLayout,
+  type ReaderLineBox,
+  type ReaderPageBreak,
+} from './readerLayout'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -107,6 +117,7 @@ interface Appearance {
   width: 'narrow' | 'balanced' | 'wide'
   align: 'left' | 'center' | 'justify'
   theme: 'paper' | 'white' | 'dark'
+  layout: ReaderLayout
 }
 
 interface SelectionRect {
@@ -144,12 +155,16 @@ const DEFAULT_APPEARANCE: Appearance = {
   fontSize: 17, lineHeight: 1.85,
   font: 'serif', bionic: false, width: 'balanced',
   align: 'justify', theme: 'paper',
+  layout: 'continuous',
 }
+
+const READER_HEADER_HEIGHT = 52
+const PAGED_BOTTOM_RESERVE = 24
 
 const WIDTH_PX  = { narrow: 520, balanced: 660, wide: 820 }
 const THEMES    = {
   paper: { bg: '#fbf8f4', text: '#1c1c1e', bar: 'rgba(251,248,244,0.92)', playback: 'rgba(168, 176, 226, 0.58)' },
-  white: { bg: '#ffffff', text: '#1c1c1e', bar: 'rgba(255,255,255,0.92)', playback: 'rgba(168, 176, 226, 0.55)' },
+  white: { bg: '#efe4cf', text: '#2a241c', bar: 'rgba(239,228,207,0.94)', playback: 'rgba(176, 148, 96, 0.28)' },
   dark:  { bg: '#1a1a18', text: '#e8e6e1', bar: 'rgba(26,26,24,0.92)',   playback: 'rgba(130, 148, 228, 0.34)' },
 }
 
@@ -236,7 +251,13 @@ function aiErrorMessage(error: unknown, fallback = 'Something went wrong.') {
 function loadAppearance(): Appearance {
   try {
     const raw = localStorage.getItem(APPEARANCE_KEY)
-    return raw ? { ...DEFAULT_APPEARANCE, ...JSON.parse(raw) } : DEFAULT_APPEARANCE
+    if (!raw) return DEFAULT_APPEARANCE
+    const parsed = JSON.parse(raw) as Partial<Appearance>
+    return {
+      ...DEFAULT_APPEARANCE,
+      ...parsed,
+      layout: normalizeReaderLayout(parsed.layout),
+    }
   } catch { return DEFAULT_APPEARANCE }
 }
 
@@ -322,12 +343,14 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
   highlights,
   playback,
   playbackColor,
+  virtualize = true,
 }: {
   paragraphs: ReaderParagraph[]
   bionic: boolean
   highlights: ReaderHighlight[]
   playback: { start: number; end: number } | null
   playbackColor: string
+  virtualize?: boolean
 }) {
   return (
     <>
@@ -336,7 +359,10 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
         return (
           <p
             key={`${p.startOffset}-${i}`}
-            className="mb-[1.4em] [content-visibility:auto] [contain-intrinsic-size:auto_6em]"
+            className={cn(
+              'mb-[1.4em]',
+              virtualize && '[content-visibility:auto] [contain-intrinsic-size:auto_6em]',
+            )}
             data-reader-paragraph-start={p.startOffset}
           >
             {parts.map((part) => {
@@ -354,7 +380,7 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
                     backgroundColor: part.playback ? playbackColor : HIGHLIGHT_BG[part.color!],
                     color: 'inherit',
                     borderRadius: part.playback ? 1 : 2,
-                    padding: part.playback ? '0.18em 0.16em' : '0 0.04em',
+                    padding: part.playback && virtualize ? '0.18em 0.16em' : '0 0.04em',
                   }}
                 >
                   {content}
@@ -2469,6 +2495,31 @@ function AppearanceContent({ appearance, onChange }: {
         </div>
       </div>
 
+      {/* Layout: continuous scroll vs paginated page-turn */}
+      <div>
+        <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Layout</p>
+        <div className="flex gap-1.5">
+          {([
+            { id: 'continuous' as const, label: 'Continuous', Icon: Rows3 },
+            { id: 'paginated' as const, label: 'Paginated', Icon: BookOpen },
+          ]).map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              onClick={() => onChange({ layout: id })}
+              className={cn(
+                'flex-1 py-2 rounded-lg border text-xs font-medium transition-all flex items-center justify-center gap-1.5',
+                appearance.layout === id
+                  ? 'border-primary bg-primary text-white shadow-sm'
+                  : 'border-border/60 opacity-55 hover:opacity-90',
+              )}
+            >
+              <Icon size={13} />
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Align + Theme on same row */}
       <div className="flex gap-3 pb-1">
         <div className="flex-1">
@@ -2492,15 +2543,18 @@ function AppearanceContent({ appearance, onChange }: {
           <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Theme</p>
           <div className="flex gap-1">
             {([
-              { id: 'paper' as const, bg: '#fbf8f4', fg: '#1c1c1e' },
-              { id: 'white' as const, bg: '#ffffff', fg: '#1c1c1e' },
-              { id: 'dark'  as const, bg: '#1a1a18', fg: '#e8e6e1' },
-            ]).map(({ id, bg, fg }) => (
+              { id: 'paper' as const, bg: '#fbf8f4', fg: '#1c1c1e', title: 'Paper' },
+              { id: 'white' as const, bg: '#efe4cf', fg: '#2a241c', title: 'Kindle paper' },
+              { id: 'dark'  as const, bg: '#1a1a18', fg: '#e8e6e1', title: 'Dark' },
+            ]).map(({ id, bg, fg, title }) => (
               <button key={id} onClick={() => onChange({ theme: id })}
-                className={cn('flex-1 py-2 rounded-lg border text-xs font-medium transition-all',
-                  appearance.theme === id ? 'ring-2 ring-primary ring-offset-1' : 'hover:opacity-80')}
+                className={cn(
+                  'flex-1 py-2 rounded-lg border text-xs font-medium transition-all',
+                  id === 'white' && 'reader-theme-kindle',
+                  appearance.theme === id ? 'ring-2 ring-primary ring-offset-1' : 'hover:opacity-80',
+                )}
                 style={{ backgroundColor: bg, color: fg, borderColor: `${fg}22` }}
-                title={id.charAt(0).toUpperCase() + id.slice(1)}>
+                title={title}>
                 <span style={{ fontFamily: 'Lora, serif', fontSize: 13 }}>Aa</span>
               </button>
             ))}
@@ -2706,6 +2760,8 @@ export function ReaderRoute() {
   const [appearance,    setAppearance]    = useState<Appearance>(loadAppearance)
   const [sheet,         setSheet]         = useState<'none' | 'appearance' | 'audio' | 'chat'>('none')
   const [scrollPct,     setScrollPct]     = useState(0)
+  const [pageIndex,     setPageIndex]     = useState(0)
+  const [pageBreaks,    setPageBreaks]    = useState<ReaderPageBreak[]>([])
   const [barVisible,    setBarVisible]    = useState(true)
   const [selection,     setSelection]     = useState<SelectionState | null>(null)
   const [panel,         setPanel]         = useState<SecondaryPanel | null>(null)
@@ -2732,6 +2788,14 @@ export function ReaderRoute() {
   const presynthGridRef         = useRef<Array<{ start: number; end: number }> | null>(null)
   const readerTextRef         = useRef<HTMLDivElement | null>(null)
   const readerScrollRef       = useRef<HTMLDivElement | null>(null)
+  const layoutRef             = useRef<ReaderLayout>(appearance.layout)
+  const pageIndexRef          = useRef(0)
+  const pageBreaksRef         = useRef<ReaderPageBreak[]>([])
+  const pendingPageOffsetRef  = useRef<number | null>(null)
+  const prevLayoutRef         = useRef<ReaderLayout>(appearance.layout)
+  layoutRef.current = appearance.layout
+  pageIndexRef.current = pageIndex
+  pageBreaksRef.current = pageBreaks
   const panelSnapshotRef      = useRef<SecondaryPanel | null>(null)
   const openPanel = useCallback((nextPanel: SecondaryPanel) => {
     panelSnapshotRef.current = nextPanel
@@ -2846,6 +2910,138 @@ export function ReaderRoute() {
     else window.scrollBy({ top: delta, behavior })
   }
 
+  function getPagedChrome() {
+    const scroller = readerScrollRef.current
+    const viewH = Math.max(120, (scroller?.clientHeight ?? window.innerHeight) - PAGED_BOTTOM_RESERVE)
+    return { headerH: READER_HEADER_HEIGHT, top: 0, viewH }
+  }
+
+  function getPageViewHeight() {
+    return getPagedChrome().viewH
+  }
+
+  function scrollToPagedPage(page: ReaderPageBreak) {
+    const scroller = readerScrollRef.current
+    if (!scroller) return
+    scroller.scrollTo({ top: Math.max(0, page.top - 2), behavior: 'auto' })
+  }
+
+  function collectReaderLineBoxes(root: HTMLElement): ReaderLineBox[] {
+    const paragraphs = Array.from(root.querySelectorAll<HTMLElement>('[data-reader-paragraph-start]'))
+    const rootRect = root.getBoundingClientRect()
+    const lines: ReaderLineBox[] = []
+
+    for (const para of paragraphs) {
+      const paraStart = Number(para.dataset.readerParagraphStart)
+      if (!Number.isFinite(paraStart)) continue
+      const range = document.createRange()
+      range.selectNodeContents(para)
+      const raw = Array.from(range.getClientRects())
+        .filter((rect) => rect.width > 0 && rect.height > 0)
+        .sort((a, b) => a.top - b.top || a.left - b.left)
+      const merged: Array<{ top: number; bottom: number }> = []
+      for (const rect of raw) {
+        const top = rect.top - rootRect.top
+        const bottom = rect.bottom - rootRect.top
+        const prev = merged[merged.length - 1]
+        if (prev && Math.abs(top - prev.top) <= 3) {
+          prev.bottom = Math.max(prev.bottom, bottom)
+        } else {
+          merged.push({ top, bottom })
+        }
+      }
+      for (const line of merged) {
+        lines.push({ ...line, startOffset: paraStart })
+      }
+    }
+
+    return lines
+  }
+
+  function yForSourceOffset(offset: number): number | null {
+    const root = readerTextRef.current
+    const text = payload?.text ?? ''
+    if (!root || !text) return null
+    const start = Math.max(0, Math.min(offset, Math.max(0, text.length - 1)))
+    const end = Math.min(text.length, start + 1)
+    const range = domRangeForSourceOffsets(start, end, root)
+    if (!range) return null
+    const rect = range.getBoundingClientRect()
+    if (rect.width === 0 && rect.height === 0) return null
+    return rect.top - root.getBoundingClientRect().top
+  }
+
+  function goToPage(index: number, reason: 'user' | 'follow' | 'restore' = 'user') {
+    const pages = pageBreaksRef.current
+    if (pages.length === 0) return
+    const next = clampPageIndex(index, pages.length)
+    const page = pages[next]
+    if (!page) return
+
+    if (reason === 'user' && isAudioActive() && !audioFollowPausedRef.current) {
+      audioFollowPausedRef.current = true
+      setAudioFollowPaused(true)
+    }
+
+    programmaticScrollRef.current = true
+    pageIndexRef.current = next
+    setPageIndex(next)
+    scrollToPagedPage(page)
+
+    const textLen = payload?.text.length ?? 0
+    const pct = textLen > 0 ? Math.min(1, page.startOffset / textLen) : 0
+    latestScrollPct.current = pct
+    setScrollPct(pct)
+    setBarVisible(true)
+
+    if (reason === 'user') {
+      if (saveTimer.current) clearTimeout(saveTimer.current)
+      saveTimer.current = setTimeout(() => saveProgress(pct), 400)
+    }
+
+    window.setTimeout(() => {
+      programmaticScrollRef.current = false
+    }, 80)
+  }
+
+  function measurePagedLayout() {
+    const root = readerTextRef.current
+    if (!root || !payload?.text) return
+
+    const lines = collectReaderLineBoxes(root)
+    const pages = pageBreaksFromLineBoxes(lines, getPageViewHeight())
+    const unchanged = pages.length === pageBreaksRef.current.length
+      && pages.every((page, i) => {
+        const prev = pageBreaksRef.current[i]
+        return prev != null && prev.top === page.top && prev.startOffset === page.startOffset
+      })
+    if (!unchanged) {
+      pageBreaksRef.current = pages
+      setPageBreaks(pages)
+    }
+
+    const pending = pendingPageOffsetRef.current
+    if (pending != null) pendingPageOffsetRef.current = null
+    const offset = pending
+      ?? activeAudioCueRangeRef.current?.start
+      ?? Math.round(latestScrollPct.current * payload.text.length)
+    const y = yForSourceOffset(offset)
+    const next = y == null
+      ? pageIndexForOffset(pages, offset)
+      : pageIndexForY(pages, y)
+    if (unchanged && next === pageIndexRef.current) {
+      const scroller = readerScrollRef.current
+      const page = pages[next]
+      if (page && scroller && Math.abs(scroller.scrollTop - page.top) > 2) {
+        programmaticScrollRef.current = true
+        scrollToPagedPage(page)
+        window.setTimeout(() => { programmaticScrollRef.current = false }, 80)
+      }
+      return
+    }
+    goToPage(next, pending != null ? 'restore' : 'follow')
+  }
+
   useEffect(() => {
     primeBrowserSpeechVoices()
   }, [])
@@ -2922,6 +3118,23 @@ export function ReaderRoute() {
   useEffect(() => {
     if (!payload?.text) return
 
+    const applyOffset = (offset: number) => {
+      const pct = payload.text.length ? Math.min(1, Math.max(0, offset / payload.text.length)) : 0
+      latestScrollPct.current = pct
+      setScrollPct(pct)
+      if (appearance.layout === 'paginated') {
+        pendingPageOffsetRef.current = offset
+        if (pageBreaksRef.current.length > 0) {
+          const y = yForSourceOffset(offset)
+          const next = y == null ? 0 : pageIndexForY(pageBreaksRef.current, y)
+          goToPage(next, 'restore')
+        }
+        return
+      }
+      const { max } = getReaderScrollMetrics()
+      scrollReaderTo(pct * max, 'auto')
+    }
+
     if (!scrolledToOffsetRef.current) {
       const params = new URLSearchParams(window.location.search)
       const offsetStr = params.get('offset')
@@ -2929,9 +3142,7 @@ export function ReaderRoute() {
         const offset = parseInt(offsetStr, 10)
         if (!isNaN(offset) && offset >= 0) {
           scrolledToOffsetRef.current = true
-          const pct = offset / payload.text.length
-          const { max } = getReaderScrollMetrics()
-          scrollReaderTo(pct * max, 'auto')
+          applyOffset(offset)
           window.history.replaceState({}, '', window.location.pathname)
           return
         }
@@ -2942,11 +3153,139 @@ export function ReaderRoute() {
     if (!progressData?.reading) return
     const { textStart, textLength } = progressData.reading
     if (!textLength) return
-    const pct = textStart / textLength
-    const { max } = getReaderScrollMetrics()
-    scrollReaderTo(pct * max, 'auto')
     scrolledToOffsetRef.current = true
-  }, [progressData, payload?.text])
+    applyOffset(textStart)
+  }, [progressData, payload?.text, appearance.layout])
+
+  // Paginated: measure viewport pages when type, size, or book text changes.
+  useLayoutEffect(() => {
+    const prev = prevLayoutRef.current
+    prevLayoutRef.current = appearance.layout
+
+    if (appearance.layout !== 'paginated') {
+      if (pageBreaksRef.current.length > 0) {
+        pageBreaksRef.current = []
+        setPageBreaks([])
+      }
+      if (prev === 'paginated' && payload?.text) {
+        const { max } = getReaderScrollMetrics()
+        programmaticScrollRef.current = true
+        scrollReaderTo(latestScrollPct.current * max, 'auto')
+        window.setTimeout(() => { programmaticScrollRef.current = false }, 80)
+      }
+      return
+    }
+
+    setBarVisible(true)
+    measurePagedLayout()
+
+    const scroller = readerScrollRef.current
+    const text = readerTextRef.current
+    if (!scroller) return
+    const ro = new ResizeObserver(() => measurePagedLayout())
+    ro.observe(scroller)
+    if (text) ro.observe(text)
+    return () => ro.disconnect()
+  }, [
+    appearance.layout,
+    appearance.fontSize,
+    appearance.lineHeight,
+    appearance.width,
+    appearance.font,
+    appearance.bionic,
+    appearance.align,
+    appearance.theme,
+    payload?.text,
+  ])
+
+  useEffect(() => {
+    if (appearance.layout !== 'paginated') return
+
+    function onKey(e: KeyboardEvent) {
+      if (sheet !== 'none' || panel) return
+      const target = e.target
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return
+      if ((target as HTMLElement | null)?.isContentEditable) return
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === 'PageDown') {
+        e.preventDefault()
+        goToPage(pageIndexRef.current + 1, 'user')
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') {
+        e.preventDefault()
+        goToPage(pageIndexRef.current - 1, 'user')
+      }
+    }
+
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [appearance.layout, sheet, panel])
+
+  // Empty-area swipe turns pages when the gesture did not start on a word.
+  useEffect(() => {
+    if (appearance.layout !== 'paginated') return
+    const el = readerScrollRef.current
+    if (!el) return
+
+    let startX = 0
+    let startY = 0
+    let tracking = false
+
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        tracking = false
+        return
+      }
+      tracking = true
+      startX = e.touches[0].clientX
+      startY = e.touches[0].clientY
+    }
+    const onEnd = (e: TouchEvent) => {
+      if (!tracking || dragRef.current.mode === 'selecting' || dragRef.current.mode === 'paging') {
+        tracking = false
+        return
+      }
+      tracking = false
+      if (sheet !== 'none' || panel) return
+      const t = e.changedTouches[0]
+      if (!t) return
+      const dx = t.clientX - startX
+      const dy = t.clientY - startY
+      if (Math.abs(dx) < 50 && Math.abs(dy) < 50) return
+      justShowedMenu.current = true
+      if (Math.abs(dx) >= Math.abs(dy)) {
+        goToPage(pageIndexRef.current + (dx < 0 ? 1 : -1), 'user')
+      } else {
+        goToPage(pageIndexRef.current + (dy < 0 ? 1 : -1), 'user')
+      }
+    }
+
+    el.addEventListener('touchstart', onStart, { passive: true })
+    el.addEventListener('touchend', onEnd, { passive: true })
+
+    let wheelAcc = 0
+    let wheelTimer: ReturnType<typeof setTimeout> | null = null
+    const onWheel = (e: WheelEvent) => {
+      if (sheet !== 'none' || panel) return
+      e.preventDefault()
+      wheelAcc += e.deltaY
+      if (wheelTimer) clearTimeout(wheelTimer)
+      wheelTimer = setTimeout(() => { wheelAcc = 0 }, 280)
+      if (wheelAcc > 70) {
+        wheelAcc = 0
+        goToPage(pageIndexRef.current + 1, 'user')
+      } else if (wheelAcc < -70) {
+        wheelAcc = 0
+        goToPage(pageIndexRef.current - 1, 'user')
+      }
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+
+    return () => {
+      el.removeEventListener('touchstart', onStart)
+      el.removeEventListener('touchend', onEnd)
+      el.removeEventListener('wheel', onWheel)
+      if (wheelTimer) clearTimeout(wheelTimer)
+    }
+  }, [appearance.layout, sheet, panel, payload?.text])
 
   // Persist appearance
   useEffect(() => {
@@ -3183,9 +3522,12 @@ export function ReaderRoute() {
     if (!payload?.text || !bookId) return
     const textLength = payload.text.length
     const textStart  = Math.round(pct * textLength)
+    const paged = layoutRef.current === 'paginated' && pageBreaksRef.current.length > 0
     const reading: ReadingProgress = {
-      pageNumber: Math.max(1, Math.round(pct * 100)),
-      totalPages: 100,
+      pageNumber: paged
+        ? pageIndexRef.current + 1
+        : Math.max(1, Math.round(pct * 100)),
+      totalPages: paged ? pageBreaksRef.current.length : 100,
       textStart,
       textEnd: Math.min(textLength, textStart + 2200),
       textLength,
@@ -3221,6 +3563,7 @@ export function ReaderRoute() {
   // Scroll tracking
   useEffect(() => {
     function onScroll() {
+      if (layoutRef.current === 'paginated') return
       const { y, max } = getReaderScrollMetrics()
       const pct = max > 0 ? Math.min(1, y / max) : 0
       latestScrollPct.current = pct
@@ -3339,7 +3682,14 @@ export function ReaderRoute() {
 
     // Single click → expand to word
     const word = getWordAtPoint(e.clientX, e.clientY)
-    if (!word) return
+    if (!word) {
+      if (layoutRef.current === 'paginated' && !selection) {
+        const x = e.clientX
+        if (x < window.innerWidth * 0.18) goToPage(pageIndexRef.current - 1, 'user')
+        else if (x > window.innerWidth * 0.82) goToPage(pageIndexRef.current + 1, 'user')
+      }
+      return
+    }
 
     // Do NOT add to native selection → no browser selection toolbar appears
     // We show our own highlight overlay instead
@@ -3364,7 +3714,7 @@ export function ReaderRoute() {
     startRange: Range | null
     startX: number
     startY: number
-    mode: 'idle' | 'deciding' | 'selecting' | 'scrolling'
+    mode: 'idle' | 'deciding' | 'selecting' | 'scrolling' | 'paging'
   }>({ startRange: null, startX: 0, startY: 0, mode: 'idle' })
   const [isDragSelecting, setIsDragSelecting] = useState(false)
 
@@ -3397,6 +3747,13 @@ export function ReaderRoute() {
     } else if (r.mode === 'scrolling') {
       // Vertical scroll — suppress the trailing synthetic click that some browsers fire
       justShowedMenu.current = true
+    } else if (r.mode === 'paging' && ev.changedTouches.length > 0) {
+      justShowedMenu.current = true
+      const t = ev.changedTouches[0]
+      const dx = t.clientX - r.startX
+      const dy = t.clientY - r.startY
+      if (dx < -40 || dy < -40) goToPage(pageIndexRef.current + 1, 'user')
+      else if (dx > 40 || dy > 40) goToPage(pageIndexRef.current - 1, 'user')
     } else if (r.mode === 'deciding' && ev.changedTouches.length > 0) {
       // Touch ended before onMove could classify it — if it moved at all, it was a scroll
       const t = ev.changedTouches[0]
@@ -3423,9 +3780,9 @@ export function ReaderRoute() {
       if (r.mode === 'deciding') {
         const dist = Math.hypot(dx, dy)
         if (dist < 8) return
-        // If the gesture is mostly vertical, defer to scroll
+        // If the gesture is mostly vertical, defer to scroll — or page-turn in paginated.
         if (Math.abs(dy) > Math.abs(dx) * 1.4 && Math.abs(dy) > 8) {
-          r.mode = 'scrolling'
+          r.mode = layoutRef.current === 'paginated' ? 'paging' : 'scrolling'
           return
         }
         r.mode = 'selecting'
@@ -3433,6 +3790,10 @@ export function ReaderRoute() {
       }
 
       if (r.mode === 'scrolling') return
+      if (r.mode === 'paging') {
+        if (e.cancelable) e.preventDefault()
+        return
+      }
 
       if (r.mode === 'selecting') {
         // touch-action: pan-y keeps vertical page scroll native. Only cancel
@@ -3501,6 +3862,15 @@ export function ReaderRoute() {
     // Respect user scroll: highlight still updates, viewport stays put.
     if (!follow || audioFollowPausedRef.current || rects.length === 0) return
 
+    if (layoutRef.current === 'paginated') {
+      const pages = pageBreaksRef.current
+      if (pages.length === 0) return
+      const y = Math.min(...rects.map((rect) => rect.top)) - root.getBoundingClientRect().top
+      const next = pageIndexForY(pages, y + 0.5)
+      if (next !== pageIndexRef.current) goToPage(next, 'follow')
+      return
+    }
+
     const top = Math.min(...rects.map((rect) => rect.top))
     const bottom = Math.max(...rects.map((rect) => rect.top + rect.height))
     const view = getReaderScrollMetrics().view
@@ -3558,6 +3928,11 @@ export function ReaderRoute() {
     [payload?.highlights],
   )
   const readPct = Math.round(scrollPct * 100)
+  const paginated = appearance.layout === 'paginated'
+  const pageCount = Math.max(1, pageBreaks.length)
+  const pageLabel = pageBreaks.length > 0
+    ? `${pageIndex + 1} / ${pageCount}`
+    : '—'
   const activePlayBarPhase = wordAudioPhase
   const activePlayBarCurIdx = wordAudioCurIdx
   const activePlayBarTotal = wordAudioTotal
@@ -3567,30 +3942,38 @@ export function ReaderRoute() {
 
   return (
     <div
-      ref={readerScrollRef}
-      className="h-svh overflow-y-auto overflow-x-hidden overscroll-y-contain"
+      data-reader-layout={appearance.layout}
+      data-reader-theme={appearance.theme}
+      className={cn(
+        'h-svh flex flex-col overflow-hidden',
+        appearance.theme === 'white' && 'reader-theme-kindle',
+      )}
       style={{
         backgroundColor: colors.bg,
         color: colors.text,
         maxWidth: '100vw',
-        touchAction: 'pan-y',
-        WebkitOverflowScrolling: 'touch',
       }}
     >
       {/* ── Top bar (full-width) ──────────────────────────────────── */}
       <header
-        className="fixed z-40 top-0 left-0 right-0 flex items-center px-3"
+        data-reader-header=""
+        className={cn(
+          'z-40 flex items-center px-3 shrink-0 overflow-hidden',
+          paginated ? 'relative' : 'fixed top-0 left-0 right-0',
+        )}
         style={{
           height: 'calc(52px + env(safe-area-inset-top, 0px))',
           paddingTop: 'env(safe-area-inset-top, 0px)',
-          backgroundColor: colors.bar,
-          backdropFilter: 'blur(14px)',
-          WebkitBackdropFilter: 'blur(14px)',
+          backgroundColor: colors.bg,
+          backgroundImage: 'none',
+          backdropFilter: paginated ? 'none' : 'blur(14px)',
+          WebkitBackdropFilter: paginated ? 'none' : 'blur(14px)',
+          isolation: 'isolate',
           borderBottom: `1px solid ${colors.text}12`,
-          opacity: barVisible ? 1 : 0,
-          transform: barVisible ? 'translateY(0)' : 'translateY(-14px)',
+          opacity: paginated || barVisible ? 1 : 0,
+          transform: paginated || barVisible ? 'translateY(0)' : 'translateY(-14px)',
           transition: 'opacity 200ms, transform 200ms',
-          pointerEvents: barVisible ? 'auto' : 'none',
+          pointerEvents: paginated || barVisible ? 'auto' : 'none',
         }}
       >
         {/* Left: back to library */}
@@ -3615,7 +3998,7 @@ export function ReaderRoute() {
             {payload?.book.title ?? ''}
           </span>
           <span className="text-[10.5px]" style={{ color: `${colors.text}80` }}>
-            {readPct}%
+            {paginated ? pageLabel : `${readPct}%`}
           </span>
         </div>
 
@@ -3676,14 +4059,26 @@ export function ReaderRoute() {
         />
       ))}
 
-      {/* ── Scrollable text ───────────────────────────────────────────── */}
+      {/* ── Scrollable / paged text ───────────────────────────────────── */}
+      <div
+        ref={readerScrollRef}
+        className={cn(
+          'min-h-0 flex-1 overflow-x-hidden overscroll-y-contain',
+          paginated ? 'overflow-y-hidden mb-24' : 'overflow-y-auto',
+        )}
+        style={{
+          touchAction: paginated ? 'none' : 'pan-y',
+          WebkitOverflowScrolling: paginated ? 'auto' : 'touch',
+          overflow: paginated ? 'hidden' : undefined,
+        }}
+      >
       <div
         className="mx-auto px-5 pb-36 transition-all duration-200"
         style={{
-          paddingTop: 'calc(72px + env(safe-area-inset-top, 0px))',
+          paddingTop: paginated ? 16 : 'calc(72px + env(safe-area-inset-top, 0px))',
           maxWidth: `${WIDTH_PX[appearance.width]}px`,
           WebkitTouchCallout: 'none',  // suppress iOS long-press callout
-          touchAction: 'pan-y',
+          touchAction: paginated ? 'none' : 'pan-y',
         }}
         onMouseUp={handleMouseUp}
         onClick={handleClick}
@@ -3706,9 +4101,11 @@ export function ReaderRoute() {
               highlights={readerHighlights}
               playback={playbackRange}
               playbackColor={colors.playback}
+              virtualize={!paginated}
             />
           </div>
         )}
+      </div>
       </div>
 
       {/* ── Bottom progress bar (floating pill) ─────────────────────── */}
@@ -3734,10 +4131,13 @@ export function ReaderRoute() {
         }}
       >
         <button
-          onClick={() => scrollReaderBy(-Math.round(getReaderScrollMetrics().view * 0.8), 'smooth')}
-          className="flex items-center justify-center w-8 h-8 rounded-full shrink-0 hover:opacity-55 transition-opacity"
+          onClick={() => paginated
+            ? goToPage(pageIndex - 1, 'user')
+            : scrollReaderBy(-Math.round(getReaderScrollMetrics().view * 0.8), 'smooth')}
+          className="flex items-center justify-center w-8 h-8 rounded-full shrink-0 hover:opacity-55 transition-opacity disabled:opacity-25"
           style={{ color: colors.text }}
-          aria-label="Scroll up"
+          aria-label={paginated ? 'Previous page' : 'Scroll up'}
+          disabled={paginated && pageIndex <= 0}
         >
           <ChevronLeft size={16} />
         </button>
@@ -3748,7 +4148,10 @@ export function ReaderRoute() {
         >
           <div
             className="h-full rounded-full transition-all duration-300"
-            style={{ width: `${readPct}%`, background: colors.text }}
+            style={{
+              width: `${paginated ? Math.round(((pageIndex + 1) / pageCount) * 100) : readPct}%`,
+              background: colors.text,
+            }}
           />
         </div>
 
@@ -3756,14 +4159,17 @@ export function ReaderRoute() {
           className="text-[11px] shrink-0 tabular-nums"
           style={{ color: `${colors.text}80`, fontFamily: '"Inter", system-ui, sans-serif' }}
         >
-          {readPct}%
+          {paginated ? pageLabel : `${readPct}%`}
         </span>
 
         <button
-          onClick={() => scrollReaderBy(Math.round(getReaderScrollMetrics().view * 0.8), 'smooth')}
-          className="flex items-center justify-center w-8 h-8 rounded-full shrink-0 hover:opacity-55 transition-opacity"
+          onClick={() => paginated
+            ? goToPage(pageIndex + 1, 'user')
+            : scrollReaderBy(Math.round(getReaderScrollMetrics().view * 0.8), 'smooth')}
+          className="flex items-center justify-center w-8 h-8 rounded-full shrink-0 hover:opacity-55 transition-opacity disabled:opacity-25"
           style={{ color: colors.text }}
-          aria-label="Scroll down"
+          aria-label={paginated ? 'Next page' : 'Scroll down'}
+          disabled={paginated && pageIndex >= pageCount - 1}
         >
           <ChevronRight size={16} />
         </button>
