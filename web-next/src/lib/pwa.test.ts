@@ -137,11 +137,11 @@ describe('install surface', () => {
   })
 
   it('always offers an install button label', () => {
-    expect(installCtaLabel('prompt')).toBe('Install HiggsRead')
-    expect(installCtaLabel('desktop-menu')).toBe('Install HiggsRead')
-    expect(installCtaLabel('android-menu')).toBe('Install HiggsRead')
-    expect(installCtaLabel('ios')).toBe('Add to Home Screen')
-    expect(installCtaLabel('mac-dock')).toBe('Add to Dock')
+    expect(installCtaLabel('prompt')).toBe('Install as app')
+    expect(installCtaLabel('desktop-menu')).toBe('Install as app')
+    expect(installCtaLabel('android-menu')).toBe('Install as app')
+    expect(installCtaLabel('ios')).toBe('Install as app')
+    expect(installCtaLabel('mac-dock')).toBe('Install as app')
   })
 
   it('does not claim a one-click prompt without a captured event', () => {

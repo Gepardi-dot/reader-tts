@@ -270,10 +270,8 @@ export function getDeferredInstallPrompt(): BeforeInstallPromptEvent | null {
   return adoptCapturedInstallPrompt()
 }
 
-export function installCtaLabel(surface: InstallSurface): string {
-  if (surface === 'ios') return 'Add to Home Screen'
-  if (surface === 'mac-dock') return 'Add to Dock'
-  return 'Install HiggsRead'
+export function installCtaLabel(_surface?: InstallSurface): string {
+  return 'Install as app'
 }
 
 export async function promptPwaInstall(): Promise<'accepted' | 'dismissed' | 'unavailable'> {
