@@ -13,6 +13,7 @@ import { recoverStuckClient } from '@/lib/clientRecovery'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import higgsReadLogo from '@/assets/higgsread-logo.png'
 
 type Mode = 'signin' | 'signup'
 
@@ -109,10 +110,14 @@ export function LoginRoute() {
   return (
     <div className="flex min-h-svh items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm space-y-6">
-        <div className="text-center">
-          <span className="text-3xl">📚</span>
-          <h1 className="mt-2 text-xl font-semibold text-foreground">Storybook Reader</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+        <div className="text-center space-y-3">
+          <img
+            src={higgsReadLogo}
+            alt="HiggsRead"
+            className="mx-auto h-10 w-auto max-w-[220px] object-contain"
+            draggable={false}
+          />
+          <p className="text-sm text-muted-foreground">
             {mode === 'signin' ? 'Sign in to your library' : 'Create an account'}
           </p>
         </div>

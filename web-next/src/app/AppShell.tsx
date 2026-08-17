@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getStoredUser, signOut, subscribeAuth } from '@/lib/auth'
 import { api } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
+import higgsReadLogo from '@/assets/higgsread-logo.png'
 
 interface Book {
   id: string
@@ -32,29 +33,12 @@ const LEARN_NAV = [
 
 function BrandLogo() {
   return (
-    <div
-      className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-md border shrink-0"
-      style={{ background: '#f7f7f5', borderColor: '#f4f3ef' }}
-    >
-      <div className="relative pb-[3px] shrink-0">
-        <span
-          className="text-[18px] leading-none text-foreground block"
-          style={{ fontFamily: '"Playfair Display", Georgia, serif', fontWeight: 600 }}
-        >
-          R
-        </span>
-        <span
-          className="absolute bottom-0 left-0 right-0 h-[2px] rounded-full"
-          style={{ background: 'linear-gradient(90deg, #c8960c, #e8b824)' }}
-        />
-      </div>
-      <span
-        className="text-[13px] leading-none text-foreground whitespace-nowrap"
-        style={{ fontFamily: '"Playfair Display", Georgia, serif' }}
-      >
-        Book <em>Reader</em>
-      </span>
-    </div>
+    <img
+      src={higgsReadLogo}
+      alt="HiggsRead"
+      className="h-7 w-auto max-w-[148px] object-contain object-left shrink-0"
+      draggable={false}
+    />
   )
 }
 

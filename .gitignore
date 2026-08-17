@@ -39,6 +39,7 @@ tmp-*.har
 
 # Screenshot / debug images (Playwright, manual checks)
 *.png
+!web-next/src/assets/higgsread-*.png
 *.har
 
 # Python cache
@@ -53,6 +54,13 @@ web-next/public/*
 !web-next/public/dictionary-seed.json
 !web-next/public/sw.js
 !web-next/public/_headers
+!web-next/public/favicon.png
+!web-next/public/favicon-16.png
+!web-next/public/favicon-32.png
+!web-next/public/favicon-48.png
+!web-next/public/favicon-64.png
+!web-next/public/favicon.svg
+!web-next/public/apple-touch-icon.png
 .wrangler/
 
 # Stitch design loop outputs
