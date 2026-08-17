@@ -13,12 +13,12 @@ export interface KokoroVoiceOption {
   accent?: 'us' | 'uk'
 }
 
-export const DEFAULT_KOKORO_VOICE = 'af_heart'
+export const DEFAULT_KOKORO_VOICE = 'af_sky'
 
 export const KOKORO_VOICE_CATALOG: readonly KokoroVoiceOption[] = [
-  { id: 'af_heart', label: 'Heart', gender: 'female', style: 'Warm & Natural', recommended: true, accent: 'us' },
+  { id: 'af_heart', label: 'Heart', gender: 'female', style: 'Warm & Natural', accent: 'us' },
   { id: 'af_sarah', label: 'Sarah', gender: 'female', style: 'Clear & Conversational', accent: 'us' },
-  { id: 'af_sky', label: 'Sky', gender: 'female', style: 'Bright & Expressive', accent: 'us' },
+  { id: 'af_sky', label: 'Sky', gender: 'female', style: 'Bright & Expressive', recommended: true, accent: 'us' },
   { id: 'af_bella', label: 'Bella', gender: 'female', style: 'Soft', accent: 'us' },
   { id: 'am_adam', label: 'Adam', gender: 'male', style: 'Natural & Steady', recommended: true, accent: 'us' },
   { id: 'am_michael', label: 'Michael', gender: 'male', style: 'Authoritative', accent: 'us' },

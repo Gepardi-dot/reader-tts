@@ -121,7 +121,7 @@ async function warmup() {
       // sees a hot pipeline.
       post({ type: 'warming' })
       try {
-        await pipeline.generate('a', { voice: 'af_heart' as never, speed: 1 as never })
+        await pipeline.generate('a', { voice: 'af_sky' as never, speed: 1 as never })
       } catch {
         // Warmup synth failure is non-fatal — user-facing synth will surface its own error.
       }

@@ -315,9 +315,9 @@ GEMINI_VOICES = [
     voice_option("Sulafat", "Sulafat", gender="female", gender_source="estimated", style="Warm", tags=["Story"]),
 ]
 KOKORO_VOICES = [
-    voice_option("af_heart",   "Heart",   gender="female", gender_source="provider", style="Warm & Natural",        tags=["Story", "Narration", "Audiobook"]),
+    voice_option("af_heart",   "Heart",   gender="female", gender_source="provider", style="Warm & Natural"),
     voice_option("af_sarah",   "Sarah",   gender="female", gender_source="provider", style="Clear & Conversational"),
-    voice_option("af_sky",     "Sky",     gender="female", gender_source="provider", style="Bright & Expressive"),
+    voice_option("af_sky",     "Sky",     gender="female", gender_source="provider", style="Bright & Expressive",   tags=["Story", "Narration", "Audiobook"]),
     voice_option("am_adam",    "Adam",    gender="male",   gender_source="provider", style="Natural & Steady",      tags=["Story", "Narration", "Audiobook"]),
     voice_option("am_michael", "Michael", gender="male",   gender_source="provider", style="Authoritative"),
     voice_option("bf_emma",    "Emma",    gender="female", gender_source="provider", style="British · Warm"),
@@ -3320,10 +3320,10 @@ def provider_catalog() -> list[dict[str, Any]]:
                 "Free, no API key required. Natural narration voices."
             ),
             "voices": KOKORO_VOICES,
-            "defaultVoice": "af_heart",
+            "defaultVoice": "af_sky",
             "models": [],
             "defaultModel": None,
-            "voiceMetaNote": "Kokoro voices are fixed (no cloning). af_heart and bm_george are recommended for narration.",
+            "voiceMetaNote": "Kokoro voices are fixed (no cloning). af_sky and bm_george are recommended for narration.",
         },
         {
             "id": "google",
@@ -3690,7 +3690,7 @@ def resolve_live_audio_voice_model(
     if provider_id == "google":
         chosen_model = resolve_google_tts_model(model)
     elif provider_id == "kokoro":
-        chosen_voice = chosen_voice or "af_heart"
+        chosen_voice = chosen_voice or "af_sky"
     return chosen_voice, chosen_model
 
 
@@ -5032,7 +5032,7 @@ def synthesize_provider_audio(
         # Preprocess text for naturalness (abbreviations, em-dashes, unicode cleanup)
         # then send as a single request — fastest path, avoids server queue buildup.
         preprocessed = preprocess_kokoro_text(full_text)
-        synthesize_kokoro_remote(preprocessed, voice or "af_heart", speed, output_path)
+        synthesize_kokoro_remote(preprocessed, voice or "af_sky", speed, output_path)
     else:
         raise RuntimeError(f"Unsupported provider: {provider_id}")
 
@@ -5072,7 +5072,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
     if request.provider == "google":
         chosen_model = resolve_google_tts_model(request.model)
     elif request.provider == "kokoro":
-        chosen_voice = chosen_voice or "af_heart"
+        chosen_voice = chosen_voice or "af_sky"
 
     playback_format = "wav"
 
@@ -5469,7 +5469,7 @@ def run_provider_warmup(request: ProviderWarmupRequest) -> dict[str, Any]:
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if KOKORO_REMOTE_API_KEY:
             headers["X-Api-Key"] = KOKORO_REMOTE_API_KEY
-        voice = request.voice or "af_heart"
+        voice = request.voice or "af_sky"
         with httpx.Client(timeout=30.0) as client:
             resp = client.post(warmup_url, json={"text": "Hi.", "voice": voice, "speed": 1.0}, headers=headers)
         if resp.status_code != 200:
@@ -5593,7 +5593,7 @@ def kickoff_auto_presynth(book_id: str) -> None:
             continue
         voice = prov.get("defaultVoice")
         if not voice and provider_id == "kokoro":
-            voice = "af_heart"
+            voice = "af_sky"
         if not voice:
             continue
         if (

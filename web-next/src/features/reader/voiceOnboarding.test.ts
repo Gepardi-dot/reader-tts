@@ -49,11 +49,11 @@ describe('voice onboarding', () => {
     expect(needsVoiceOnboarding('user-1')).toBe(false)
   })
 
-  it('falls back to Heart for unknown voice ids', () => {
+  it('falls back to Sky for unknown voice ids', () => {
     installStorage()
     const voice = commitKokoroVoiceChoice('user-2', 'not_a_voice')
-    expect(voice).toBe('af_heart')
-    expect(savedKokoroVoice()).toBe('af_heart')
+    expect(voice).toBe('af_sky')
+    expect(savedKokoroVoice()).toBe('af_sky')
   })
 
   it('treats an existing saved voice as onboarding already done', () => {

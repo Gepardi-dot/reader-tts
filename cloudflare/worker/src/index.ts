@@ -81,7 +81,7 @@ const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-preview-tts'
 const GEMINI_CHAT_DEFAULT_MODEL = 'gemini-2.0-flash'
 const GEMINI_SAMPLE_RATE = 24_000
 const KOKORO_SAMPLE_RATE = 24_000
-const KOKORO_DEFAULT_VOICE = 'af_heart'
+const KOKORO_DEFAULT_VOICE = 'af_sky'
 const LIVE_AUDIO_CACHE_VERSION = 2
 const EDGE_AUDIO_CACHE_SECONDS = 7 * 24 * 60 * 60
 const R2_AUDIO_CACHE_PREFIX = `live-audio/v${LIVE_AUDIO_CACHE_VERSION}`
@@ -126,9 +126,9 @@ const GEMINI_VOICES = [
 ]
 
 const KOKORO_VOICES = [
-  { id: 'af_heart', label: 'Heart', gender: 'female', style: 'Warm & Natural', tags: ['Story'] },
+  { id: 'af_heart', label: 'Heart', gender: 'female', style: 'Warm & Natural' },
   { id: 'af_sarah', label: 'Sarah', gender: 'female', style: 'Clear & Conversational' },
-  { id: 'af_sky', label: 'Sky', gender: 'female', style: 'Bright & Expressive' },
+  { id: 'af_sky', label: 'Sky', gender: 'female', style: 'Bright & Expressive', tags: ['Story'] },
   { id: 'af_bella', label: 'Bella', gender: 'female', style: 'Soft' },
   { id: 'am_adam', label: 'Adam', gender: 'male', style: 'Natural & Steady', tags: ['Story'] },
   { id: 'am_michael', label: 'Michael', gender: 'male', style: 'Authoritative' },

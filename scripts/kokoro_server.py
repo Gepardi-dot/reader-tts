@@ -51,16 +51,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("kokoro-server")
 
 VOICES = [
-    {"id": "af_heart", "label": "Heart", "gender": "female", "locale": "en-US", "style": "Warm & Natural", "tags": ["Story", "Narration"]},
+    {"id": "af_heart", "label": "Heart", "gender": "female", "locale": "en-US", "style": "Warm & Natural"},
     {"id": "af_sarah", "label": "Sarah", "gender": "female", "locale": "en-US", "style": "Clear & Conversational"},
-    {"id": "af_sky", "label": "Sky", "gender": "female", "locale": "en-US", "style": "Bright & Expressive"},
+    {"id": "af_sky", "label": "Sky", "gender": "female", "locale": "en-US", "style": "Bright & Expressive", "tags": ["Story", "Narration"]},
     {"id": "am_adam", "label": "Adam", "gender": "male", "locale": "en-US", "style": "Natural & Steady", "tags": ["Story", "Narration"]},
     {"id": "am_michael", "label": "Michael", "gender": "male", "locale": "en-US", "style": "Authoritative"},
     {"id": "bf_emma", "label": "Emma", "gender": "female", "locale": "en-GB", "style": "British & Warm"},
     {"id": "bm_george", "label": "George", "gender": "male", "locale": "en-GB", "style": "British & Deep", "tags": ["Story", "Narration"]},
     {"id": "bm_lewis", "label": "Lewis", "gender": "male", "locale": "en-GB", "style": "British & Calm"},
 ]
-DEFAULT_VOICE = "af_heart"
+DEFAULT_VOICE = "af_sky"
 VOICE_IDS = {v["id"] for v in VOICES}
 
 _kokoro: "Kokoro | None" = None  # type: ignore[name-defined]
