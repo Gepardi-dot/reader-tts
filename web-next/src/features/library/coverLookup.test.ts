@@ -27,6 +27,17 @@ describe('coverSearchTermsForBook', () => {
     })
   })
 
+  it('splits title plus author and ignores academic suffixes', () => {
+    expect(coverSearchTermsForBook('Influence Robert B. Cialdini PhD')).toContainEqual({
+      title: 'Influence',
+      author: 'Robert B. Cialdini',
+    })
+    expect(coverSearchTermsForBook('Influence Robert B. Cialdini PhD')).not.toContainEqual({
+      title: 'Influence Robert B.',
+      author: 'Cialdini Phd',
+    })
+  })
+
   it('does not use Google Books during library cover lookup', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ docs: [] }))
     vi.stubGlobal('fetch', fetchMock)

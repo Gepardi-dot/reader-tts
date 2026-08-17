@@ -138,6 +138,8 @@ interface Book {
   sourceUrl: string
   excerpt: string
   highlightCount: number
+  /** data: URL, remote URL, 'stored', or '' when lookup already found nothing. */
+  coverUrl?: string | null
 }
 
 interface UploadBookOptions {
@@ -190,6 +192,7 @@ export async function uploadBook(
     text: string
     pageCount: number
     sourceFormat: string
+    cover?: Blob | null
   }
   let epubMeta: UploadBookResult['epub']
 
@@ -214,12 +217,27 @@ export async function uploadBook(
     payload = await extractBookText(file, { title, onProgress: options.onProgress })
   }
 
+  options.onProgress?.({ phase: 'uploading', progress: 96, message: 'Saving cover...' })
+  const { persistBookCover, resolveCoverForUpload } = await import('@/features/library/resolveBookCover')
+  const cover = await resolveCoverForUpload(file, payload.title, payload.cover)
+
   options.onProgress?.({ phase: 'uploading', progress: 100, message: 'Saving book...' })
 
   const book = await request<Book>('/api/books', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      title: payload.title,
+      fileName: payload.fileName,
+      text: payload.text,
+      pageCount: payload.pageCount,
+      sourceFormat: payload.sourceFormat,
+      ...(cover ? { coverUrl: cover.dataUrl } : {}),
+    }),
   })
 
-  return { book, epub: epubMeta }
+  if (cover) {
+    await persistBookCover(book.id, cover)
+  }
+
+  return { book: { ...book, coverUrl: cover?.dataUrl ?? book.coverUrl ?? null }, epub: epubMeta }
 }

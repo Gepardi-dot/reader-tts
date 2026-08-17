@@ -24,9 +24,11 @@ const MODEL_HOSTS = new Set([
   'cdn-lfs-eu-1.huggingface.co',
 ])
 const COVER_HOSTS = new Set([
+  'openlibrary.org',
   'covers.openlibrary.org',
   'books.google.com',
   'books.googleusercontent.com',
+  'www.googleapis.com',
 ])
 
 self.addEventListener('install', (event) => {

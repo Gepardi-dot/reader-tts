@@ -3,10 +3,19 @@ export interface CoverSearchTerms {
   author?: string
 }
 
-const MAX_COVER_SEARCH_TERMS = 3
-const COVER_LOOKUP_TIMEOUT_MS = 2500
+const MAX_COVER_SEARCH_TERMS = 5
+const COVER_LOOKUP_TIMEOUT_MS = 6000
 const COVER_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const EMPTY_COVER_CACHE_TTL_MS = 10 * 60 * 1000
 const COVER_CACHE_PREFIX = 'reader-tts-cover:'
+const AUTHOR_SUFFIXES = new Set([
+  'phd', 'ph.d', 'ph.d.', 'md', 'jr', 'jr.', 'sr', 'sr.',
+  'ii', 'iii', 'iv', 'esq', 'esq.',
+])
+
+function stripHonorifics(raw: string): string {
+  return raw.replace(/\b(Ph\.?\s*D\.?|M\.?D\.?|Jr\.?|Sr\.?|Esq\.?|II|III|IV)\b/gi, ' ')
+}
 
 function normalizeBookText(raw: string): string {
   return raw
@@ -27,14 +36,27 @@ function titleCaseToken(token: string) {
   return token ? `${token[0].toUpperCase()}${token.slice(1).toLowerCase()}` : token
 }
 
+function isAuthorSuffix(token: string) {
+  return AUTHOR_SUFFIXES.has(token.toLowerCase())
+}
+
 function looksLikeAuthorName(raw: string) {
   const tokens = raw.split(' ').filter(Boolean)
-  if (tokens.length < 2 || tokens.length > 3) return false
-  return tokens.every((token) => /^[A-Za-z][A-Za-z'.-]*$/.test(token))
+  const meaningful = tokens.filter((token) => !isAuthorSuffix(token))
+  if (meaningful.length < 2 || meaningful.length > 3) return false
+  // "B. Cialdini" is a leftover slice, not a full author name.
+  if (meaningful.length === 2 && /^[A-Za-z]\.?$/.test(meaningful[0])) return false
+  return meaningful.every((token) => (
+    /^[A-Za-z][A-Za-z'.-]*$/.test(token) || /^[A-Za-z]\.$/.test(token)
+  ))
 }
 
 function displayAuthor(raw: string) {
-  return raw.split(' ').map(titleCaseToken).join(' ')
+  return raw
+    .split(' ')
+    .filter((token) => token && !isAuthorSuffix(token))
+    .map(titleCaseToken)
+    .join(' ')
 }
 
 function uniqueTerms(terms: CoverSearchTerms[]) {
@@ -59,7 +81,7 @@ export function coverSearchTermsForBook(title: string, fileName?: string): Cover
 
   const candidates: CoverSearchTerms[] = []
   for (const source of sources) {
-    const normalized = normalizeBookText(splitCamelJoinedWords(source.title))
+    const normalized = normalizeBookText(splitCamelJoinedWords(stripHonorifics(source.title)))
     if (!normalized) continue
 
     candidates.push({ title: normalized })
@@ -74,11 +96,11 @@ export function coverSearchTermsForBook(title: string, fileName?: string): Cover
 
     const tokens = normalized.split(' ').filter(Boolean)
     if (tokens.length > 2) {
-      for (const authorWordCount of [2, 3]) {
+      for (const authorWordCount of [2, 3, 4]) {
         if (tokens.length <= authorWordCount) continue
         const possibleAuthor = tokens.slice(-authorWordCount).join(' ')
         const possibleTitle = tokens.slice(0, -authorWordCount).join(' ')
-        if (looksLikeAuthorName(possibleAuthor)) {
+        if (looksLikeAuthorName(possibleAuthor) && possibleTitle.length >= 2) {
           candidates.push({
             title: possibleTitle,
             author: displayAuthor(possibleAuthor),
@@ -127,7 +149,7 @@ function writeCachedCover(key: string, url: string | null) {
   try {
     storage.setItem(key, JSON.stringify({
       url,
-      expiresAt: Date.now() + COVER_CACHE_TTL_MS,
+      expiresAt: Date.now() + (url ? COVER_CACHE_TTL_MS : EMPTY_COVER_CACHE_TTL_MS),
     }))
   } catch {
     // Cover lookup is cosmetic; storage failures should not affect library load.

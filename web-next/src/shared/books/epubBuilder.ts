@@ -12,6 +12,7 @@ export interface BuildEpubInput {
   chapters: BookChapter[]
   /** Original filename stem used for download name */
   fileNameBase?: string
+  cover?: Blob
 }
 
 export interface BuiltEpub {
@@ -108,6 +109,17 @@ export async function buildEpub(input: BuildEpubInput): Promise<BuiltEpub> {
   const manifestItems: string[] = [
     '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
   ]
+  let coverMeta = ''
+  if (input.cover && input.cover.size > 0) {
+    const coverBytes = new Uint8Array(await input.cover.arrayBuffer())
+    const coverType = input.cover.type || 'image/jpeg'
+    const coverExt = coverType.includes('png') ? 'png' : coverType.includes('webp') ? 'webp' : 'jpg'
+    zip.file(`OEBPS/cover.${coverExt}`, coverBytes)
+    manifestItems.push(
+      `<item id="cover-image" href="cover.${coverExt}" media-type="${coverType}" properties="cover-image"/>`,
+    )
+    coverMeta = '<meta name="cover" content="cover-image"/>'
+  }
   const spineItems: string[] = []
   const navPoints: string[] = []
 
@@ -141,6 +153,7 @@ export async function buildEpub(input: BuildEpubInput): Promise<BuiltEpub> {
     <dc:language>${escapeXml(language)}</dc:language>
     <meta property="dcterms:modified">${modified}</meta>
     <meta name="generator" content="Storybook Reader"/>
+    ${coverMeta}
   </metadata>
   <manifest>
     ${manifestItems.join('\n    ')}

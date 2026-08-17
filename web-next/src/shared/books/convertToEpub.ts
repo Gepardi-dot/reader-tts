@@ -30,6 +30,7 @@ export interface ConvertToEpubResult {
   epub: BuiltEpub
   /** Original source kind label */
   sourceLabel: string
+  cover?: Blob | null
 }
 
 export interface ConvertToEpubOptions {
@@ -61,6 +62,23 @@ export async function convertFileToEpub(
     onProgress: options.onProgress,
   })
 
+  let cover = book.cover ?? null
+  if (!cover) {
+    options.onProgress?.({
+      phase: 'converting',
+      progress: 90,
+      message: 'Looking up book cover...',
+    })
+    try {
+      const { lookupRemoteCover } = await import('@/features/library/resolveBookCover')
+      const { dataUrlToBlob } = await import('@/shared/books/extractCover')
+      const found = await lookupRemoteCover(book.title, file.name)
+      if (found) cover = await dataUrlToBlob(found.dataUrl)
+    } catch {
+      cover = null
+    }
+  }
+
   options.onProgress?.({
     phase: 'converting',
     progress: 92,
@@ -74,6 +92,7 @@ export async function convertFileToEpub(
     language: options.language,
     chapters,
     fileNameBase: book.fileName.replace(/\.[^.]+$/, '') || book.title,
+    cover: cover ?? undefined,
   })
 
   options.onProgress?.({
@@ -88,8 +107,10 @@ export async function convertFileToEpub(
       // Prefer .epub as the normalized source name for library display
       fileName: book.fileName.replace(/\.[^.]+$/i, '') + '.epub',
       sourceFormat: 'epub',
+      cover,
     },
     epub,
     sourceLabel,
+    cover,
   }
 }

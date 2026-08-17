@@ -26,6 +26,7 @@ interface R2ObjectBody {
 
 interface R2Bucket {
   get(key: string): Promise<R2ObjectBody | null>
+  delete(key: string): Promise<unknown>
   put(
     key: string,
     value: ArrayBuffer | ArrayBufferView | ReadableStream | string,
@@ -85,6 +86,16 @@ const KOKORO_DEFAULT_VOICE = 'af_sky'
 const LIVE_AUDIO_CACHE_VERSION = 2
 const EDGE_AUDIO_CACHE_SECONDS = 7 * 24 * 60 * 60
 const R2_AUDIO_CACHE_PREFIX = `live-audio/v${LIVE_AUDIO_CACHE_VERSION}`
+const R2_COVER_PREFIX = 'book-covers'
+const MAX_COVER_STORE_BYTES = 400_000
+const MAX_COVER_FETCH_BYTES = 2_500_000
+const COVER_FETCH_TIMEOUT_MS = 7000
+const ALLOWED_COVER_HOSTS = new Set([
+  'covers.openlibrary.org',
+  'books.google.com',
+  'books.googleusercontent.com',
+  'lh3.googleusercontent.com',
+])
 const TELEMETRY_MAX_EVENTS = 20
 const TELEMETRY_MAX_TEXT = 160
 const TELEMETRY_MAX_METADATA_CHARS = 1800
@@ -225,6 +236,9 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   if (path === '/api/dictionary/lookup' && request.method === 'GET') return dictionaryLookup(url, env)
 
   const user = await requireUser(request, env)
+
+  if (path === '/api/covers/search' && request.method === 'GET') return searchBookCover(url)
+  if (path === '/api/covers/image' && request.method === 'GET') return proxyBookCover(url)
 
   if (path === '/api/providers/test' && request.method === 'POST') return testProvider(request, env, ctx)
   if (path === '/api/telemetry/tts-summary' && request.method === 'GET') return ttsTelemetrySummary(env, user)
@@ -594,6 +608,7 @@ async function createBook(request: Request, env: Env, user: User) {
   let text = ''
   let sourceFormat = ''
   let pageCount: number | null = null
+  let coverUrl: string | null = null
 
   if (contentType.includes('application/json')) {
     const body = await readJson<Record<string, unknown>>(request)
@@ -602,6 +617,9 @@ async function createBook(request: Request, env: Env, user: User) {
     text = stringField(body.text)
     sourceFormat = stringField(body.sourceFormat)
     pageCount = requestedPageCount(body.pageCount)
+    if (Object.prototype.hasOwnProperty.call(body, 'coverUrl')) {
+      coverUrl = stringField(body.coverUrl)
+    }
   } else if (contentType.includes('multipart/form-data')) {
     const form = await request.formData()
     const file = form.get('file')
@@ -633,23 +651,10 @@ async function createBook(request: Request, env: Env, user: User) {
     sourceUrl: '',
     sourceFormat,
   }
-  await env.DB.prepare(
-    `INSERT INTO books
-     (id, user_id, title, file_name, uploaded_at, page_count, text_characters, text, excerpt, source_url, source_format)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(
-    book.id,
-    book.userId,
-    book.title,
-    book.fileName,
-    book.uploadedAt,
-    book.pageCount,
-    book.textCharacters,
-    book.text,
-    book.excerpt,
-    book.sourceUrl,
-    book.sourceFormat,
-  ).run()
+  const storedCoverUrl = coverUrl == null
+    ? null
+    : await persistIncomingCover(env, user.id, book.id, coverUrl)
+  await insertBookRow(env, book, storedCoverUrl)
   return json(serializeBook({
     ...book,
     user_id: book.userId,
@@ -659,6 +664,7 @@ async function createBook(request: Request, env: Env, user: User) {
     text_characters: book.textCharacters,
     source_url: book.sourceUrl,
     source_format: book.sourceFormat,
+    cover_url: storedCoverUrl,
     highlight_count: 0,
   }), 201)
 }
@@ -682,6 +688,7 @@ function serializeBook(row: Record<string, unknown>) {
     sourceUrl: String(row.source_url ?? row.sourceUrl ?? ''),
     excerpt: String(row.excerpt ?? ''),
     highlightCount: Number(row.highlight_count ?? 0),
+    coverUrl: row.cover_url == null ? null : String(row.cover_url),
     readingProgress: progress,
   }
 }
@@ -708,11 +715,290 @@ function requestedPageCount(value: unknown) {
   return Number.isFinite(pageCount) && pageCount > 0 ? Math.round(pageCount) : null
 }
 
+function coverObjectKey(userId: string, bookId: string) {
+  return `${R2_COVER_PREFIX}/${userId}/${bookId}`
+}
+
+function isAllowedCoverHost(hostname: string) {
+  if (ALLOWED_COVER_HOSTS.has(hostname)) return true
+  return hostname.endsWith('.googleusercontent.com')
+}
+
+function decodeDataUrl(value: string) {
+  const match = value.match(/^data:([^;,]+);base64,(.+)$/)
+  if (!match) return null
+  try {
+    const binary = atob(match[2])
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+    return { bytes, contentType: match[1] || 'image/jpeg' }
+  } catch {
+    return null
+  }
+}
+
+async function fetchWithTimeout(url: string, timeoutMs = COVER_FETCH_TIMEOUT_MS) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    return await fetch(url, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'HiggsRead/1.0 (book cover lookup)' },
+    })
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function insertBookRow(
+  env: Env,
+  book: {
+    id: string
+    userId: string
+    title: string
+    fileName: string
+    uploadedAt: string
+    pageCount: number
+    textCharacters: number
+    text: string
+    excerpt: string
+    sourceUrl: string
+    sourceFormat: string
+  },
+  coverUrl: string | null,
+) {
+  const values = [
+    book.id,
+    book.userId,
+    book.title,
+    book.fileName,
+    book.uploadedAt,
+    book.pageCount,
+    book.textCharacters,
+    book.text,
+    book.excerpt,
+    book.sourceUrl,
+    book.sourceFormat,
+  ]
+  try {
+    await env.DB.prepare(
+      `INSERT INTO books
+       (id, user_id, title, file_name, uploaded_at, page_count, text_characters, text, excerpt, source_url, source_format, cover_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(...values, coverUrl).run()
+  } catch {
+    await env.DB.prepare(
+      `INSERT INTO books
+       (id, user_id, title, file_name, uploaded_at, page_count, text_characters, text, excerpt, source_url, source_format)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(...values).run()
+  }
+}
+
+async function writeBookCoverUrl(env: Env, userId: string, bookId: string, coverUrl: string) {
+  try {
+    await env.DB.prepare('UPDATE books SET cover_url = ? WHERE id = ? AND user_id = ?')
+      .bind(coverUrl, bookId, userId)
+      .run()
+  } catch {
+    // Column may not exist until the D1 migration is applied.
+  }
+}
+
+async function deleteStoredCover(env: Env, userId: string, bookId: string) {
+  try {
+    await env.AUDIO_CACHE?.delete(coverObjectKey(userId, bookId))
+  } catch {
+    // Cover cleanup is best-effort.
+  }
+}
+
+async function persistCoverBytes(
+  env: Env,
+  userId: string,
+  bookId: string,
+  bytes: Uint8Array,
+  contentType: string,
+) {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_COVER_FETCH_BYTES) return null
+  if (env.AUDIO_CACHE) {
+    await env.AUDIO_CACHE.put(coverObjectKey(userId, bookId), bytes, {
+      httpMetadata: {
+        contentType: contentType || 'image/jpeg',
+        cacheControl: 'public, max-age=31536000',
+      },
+      customMetadata: { contentType: contentType || 'image/jpeg' },
+    })
+    return 'stored'
+  }
+  if (bytes.byteLength > MAX_COVER_STORE_BYTES) return null
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return `data:${contentType || 'image/jpeg'};base64,${btoa(binary)}`
+}
+
+async function persistIncomingCover(env: Env, userId: string, bookId: string, coverUrl: string) {
+  if (!coverUrl) return ''
+  const data = decodeDataUrl(coverUrl)
+  if (data) {
+    return await persistCoverBytes(env, userId, bookId, data.bytes, data.contentType) ?? ''
+  }
+  if (!isAllowedCoverSource(coverUrl)) return coverUrl
+  const fetched = await fetchCoverBytes(coverUrl)
+  if (!fetched) return coverUrl
+  return await persistCoverBytes(env, userId, bookId, fetched.bytes, fetched.contentType) ?? coverUrl
+}
+
+function isAllowedCoverSource(raw: string) {
+  try {
+    const parsed = new URL(raw)
+    return parsed.protocol === 'https:' && isAllowedCoverHost(parsed.hostname)
+  } catch {
+    return false
+  }
+}
+
+async function fetchCoverBytes(rawUrl: string) {
+  const res = await fetchWithTimeout(rawUrl)
+  if (!res?.ok) return null
+  const contentType = res.headers.get('content-type') || 'image/jpeg'
+  if (!contentType.startsWith('image/')) return null
+  const buffer = new Uint8Array(await res.arrayBuffer())
+  if (buffer.byteLength === 0 || buffer.byteLength > MAX_COVER_FETCH_BYTES) return null
+  return { bytes: buffer, contentType }
+}
+
+async function searchOpenLibraryCover(title: string, author?: string) {
+  const params = new URLSearchParams({
+    title,
+    limit: '1',
+    fields: 'cover_i',
+  })
+  if (author) params.set('author', author)
+  const res = await fetchWithTimeout(`https://openlibrary.org/search.json?${params.toString()}`)
+  if (!res?.ok) return null
+  const data = await res.json() as { docs?: { cover_i?: number }[] }
+  const coverId = data.docs?.[0]?.cover_i
+  return coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : null
+}
+
+async function searchGoogleBooksCover(title: string, author?: string) {
+  const query = author ? `intitle:${title} inauthor:${author}` : `intitle:${title}`
+  const params = new URLSearchParams({
+    q: query,
+    maxResults: '1',
+    fields: 'items(volumeInfo/imageLinks)',
+  })
+  const res = await fetchWithTimeout(`https://www.googleapis.com/books/v1/volumes?${params.toString()}`)
+  if (!res?.ok) return null
+  const data = await res.json() as {
+    items?: { volumeInfo?: { imageLinks?: Record<string, string> } }[]
+  }
+  const links = data.items?.[0]?.volumeInfo?.imageLinks
+  const raw = links?.extraLarge || links?.large || links?.medium || links?.thumbnail || links?.smallThumbnail
+  return raw ? raw.replace(/^http:\/\//i, 'https://') : null
+}
+
+async function searchBookCover(url: URL) {
+  const title = url.searchParams.get('title')?.trim() ?? ''
+  const author = url.searchParams.get('author')?.trim() ?? ''
+  if (title.length < 2) return json({ url: null })
+  const found = await searchOpenLibraryCover(title, author || undefined)
+    ?? await searchGoogleBooksCover(title, author || undefined)
+  return json({ url: found })
+}
+
+async function proxyBookCover(url: URL) {
+  const src = url.searchParams.get('url')?.trim() ?? ''
+  if (!isAllowedCoverSource(src)) throw new ApiError(400, 'Cover source is not allowed.')
+  const fetched = await fetchCoverBytes(src)
+  if (!fetched) throw new ApiError(404, 'Cover image was not found.')
+  return new Response(fetched.bytes, {
+    headers: {
+      'Content-Type': fetched.contentType,
+      'Cache-Control': 'public, max-age=86400',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+    },
+  })
+}
+
+async function getBookCover(env: Env, user: User, bookId: string) {
+  const row = await bookRow(env, user, bookId)
+  const stored = await env.AUDIO_CACHE?.get(coverObjectKey(user.id, bookId))
+  if (stored) {
+    return new Response(await stored.arrayBuffer(), {
+      headers: {
+        'Content-Type': stored.customMetadata?.contentType || 'image/jpeg',
+        'Cache-Control': 'private, max-age=31536000',
+        'Cross-Origin-Resource-Policy': 'cross-origin',
+      },
+    })
+  }
+  const coverUrl = String(row.cover_url ?? '')
+  const data = decodeDataUrl(coverUrl)
+  if (data) {
+    return new Response(data.bytes, {
+      headers: {
+        'Content-Type': data.contentType,
+        'Cache-Control': 'private, max-age=31536000',
+        'Cross-Origin-Resource-Policy': 'cross-origin',
+      },
+    })
+  }
+  if (isAllowedCoverSource(coverUrl)) {
+    const fetched = await fetchCoverBytes(coverUrl)
+    if (fetched) {
+      await persistCoverBytes(env, user.id, bookId, fetched.bytes, fetched.contentType)
+      return new Response(fetched.bytes, {
+        headers: {
+          'Content-Type': fetched.contentType,
+          'Cache-Control': 'private, max-age=31536000',
+          'Cross-Origin-Resource-Policy': 'cross-origin',
+        },
+      })
+    }
+  }
+  throw new ApiError(404, 'Cover image was not found.')
+}
+
+async function putBookCover(request: Request, env: Env, user: User, bookId: string) {
+  await bookRow(env, user, bookId)
+  const contentType = request.headers.get('Content-Type') ?? ''
+  let coverUrl = ''
+  if (contentType.includes('application/json')) {
+    const body = await readJson<Record<string, unknown>>(request)
+    coverUrl = stringField(body.coverUrl)
+  } else if (contentType.startsWith('image/')) {
+    const bytes = new Uint8Array(await request.arrayBuffer())
+    const stored = await persistCoverBytes(env, user.id, bookId, bytes, contentType)
+    await writeBookCoverUrl(env, user.id, bookId, stored ?? '')
+    return json({ ok: true, coverUrl: stored ?? '' })
+  } else {
+    throw new ApiError(415, 'Unsupported cover content type.')
+  }
+
+  if (!coverUrl) {
+    await deleteStoredCover(env, user.id, bookId)
+    await writeBookCoverUrl(env, user.id, bookId, '')
+    return json({ ok: true, coverUrl: '' })
+  }
+
+  const stored = await persistIncomingCover(env, user.id, bookId, coverUrl)
+  await writeBookCoverUrl(env, user.id, bookId, stored)
+  return json({ ok: true, coverUrl: stored })
+}
+
 async function handleBookRoute(request: Request, env: Env, user: User, bookId: string, rest: string, ctx: ExecutionContext) {
   if (!rest && request.method === 'GET') return json(await getBook(env, user, bookId))
   if (!rest && request.method === 'DELETE') {
+    await deleteStoredCover(env, user.id, bookId)
     await env.DB.prepare('DELETE FROM books WHERE id = ? AND user_id = ?').bind(bookId, user.id).run()
     return json({ ok: true })
+  }
+  if (rest === 'cover' && request.method === 'GET') return getBookCover(env, user, bookId)
+  if (rest === 'cover' && (request.method === 'PUT' || request.method === 'PATCH')) {
+    return putBookCover(request, env, user, bookId)
   }
   if (rest === 'reader' && request.method === 'GET') return bookReader(env, user, bookId)
   if (rest === 'source' && request.method === 'GET') {

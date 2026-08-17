@@ -13,7 +13,8 @@ import {
 import { Button } from '@/components/ui/button'
 import { api } from '@/shared/api/client'
 import { cn } from '@/lib/utils'
-import { findBookCover } from './coverLookup'
+import { loadLibraryCover } from './resolveBookCover'
+import { deleteStoredCover } from '@/shared/storage/coverCache'
 
 interface Book {
   id: string
@@ -26,6 +27,7 @@ interface Book {
   excerpt: string
   highlightCount: number
   readingProgress: ReadingProgress | null
+  coverUrl?: string | null
 }
 
 interface ReadingProgress { pageNumber: number; totalPages: number; updatedAt?: string }
@@ -33,10 +35,10 @@ interface ReadingProgress { pageNumber: number; totalPages: number; updatedAt?: 
 // Warm cover tints cycling across books (fallback when no internet match is found)
 const COVER_COLORS = ['#fef6ee', '#eef4fb', '#f0efe9', '#f8eef0']
 
-function useBookCover(title: string, fileName?: string) {
+function useBookCover(book: Book) {
   return useQuery({
-    queryKey: ['book-cover', title, fileName],
-    queryFn: () => findBookCover(title, fileName),
+    queryKey: ['book-cover', book.id, book.coverUrl ?? ''],
+    queryFn: () => loadLibraryCover(book),
     staleTime: Infinity,
     gcTime: 24 * 60 * 60 * 1000,
     retry: false,
@@ -170,8 +172,8 @@ function BookCard({ book, progress, index, onDelete }: {
   const pct = readPct(progress)
   const coverBg = COVER_COLORS[index % COVER_COLORS.length]
   const [failedCoverUrl, setFailedCoverUrl] = useState<string | null>(null)
-  const { data: coverUrl } = useBookCover(book.title, book.fileName)
-  const showCover = coverUrl && failedCoverUrl !== coverUrl
+  const { data: coverUrl } = useBookCover(book)
+  const showCover = Boolean(coverUrl && failedCoverUrl !== coverUrl)
 
   return (
     <div className="group relative">
@@ -183,12 +185,10 @@ function BookCard({ book, progress, index, onDelete }: {
         <div className="aspect-[2/3] relative overflow-hidden">
           {showCover ? (
             <img
-              src={coverUrl}
+              src={coverUrl ?? undefined}
               alt={book.title}
-              crossOrigin="anonymous"
-              referrerPolicy="no-referrer"
               className="w-full h-full object-cover"
-              onError={() => setFailedCoverUrl(coverUrl)}
+              onError={() => setFailedCoverUrl(coverUrl ?? null)}
             />
           ) : (
             <div
@@ -264,7 +264,9 @@ export function LibraryRoute() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/api/books/${id}`),
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
+      void deleteStoredCover(id)
+      queryClient.removeQueries({ queryKey: ['book-cover', id] })
       queryClient.invalidateQueries({ queryKey: ['books'] })
       setDeleteId(null)
     },
