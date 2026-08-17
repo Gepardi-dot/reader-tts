@@ -206,6 +206,12 @@
 .prose-reader em { font-style: italic; }
 .prose-reader strong { font-weight: 600; }
 
+/* Spoken-sentence wash: wraps like a real selection (screenshot / Speechify). */
+.reader-playback-hl {
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
 .prose-reader blockquote {
   border-left: 3px solid currentColor;
   opacity: 0.7;

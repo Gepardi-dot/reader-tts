@@ -67,6 +67,7 @@ import {
   useTtsSessionController,
   type TtsAudioChunk,
 } from './tts-engine/useTtsSessionController'
+import { expandToReadingPhrase } from './readingPhrase'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -147,9 +148,9 @@ const DEFAULT_APPEARANCE: Appearance = {
 
 const WIDTH_PX  = { narrow: 520, balanced: 660, wide: 820 }
 const THEMES    = {
-  paper: { bg: '#fbf8f4', text: '#1c1c1e', bar: 'rgba(251,248,244,0.92)' },
-  white: { bg: '#ffffff', text: '#1c1c1e', bar: 'rgba(255,255,255,0.92)' },
-  dark:  { bg: '#1a1a18', text: '#e8e6e1', bar: 'rgba(26,26,24,0.92)'   },
+  paper: { bg: '#fbf8f4', text: '#1c1c1e', bar: 'rgba(251,248,244,0.92)', playback: 'rgba(168, 176, 226, 0.58)' },
+  white: { bg: '#ffffff', text: '#1c1c1e', bar: 'rgba(255,255,255,0.92)', playback: 'rgba(168, 176, 226, 0.55)' },
+  dark:  { bg: '#1a1a18', text: '#e8e6e1', bar: 'rgba(26,26,24,0.92)',   playback: 'rgba(130, 148, 228, 0.34)' },
 }
 
 const HIGHLIGHT_COLORS = [
@@ -260,41 +261,49 @@ function splitParagraphByHighlights(
   text: string,
   paragraphStart: number,
   highlights: ReaderHighlight[],
-): Array<{ text: string; color: 'amber' | 'rose' | 'sky' | null; key: string }> {
+  playback: { start: number; end: number } | null,
+): Array<{ text: string; color: 'amber' | 'rose' | 'sky' | null; playback: boolean; key: string }> {
   const paraEnd = paragraphStart + text.length
-  const ranges = highlights
-    .filter((h) => h.end > paragraphStart && h.start < paraEnd)
-    .map((h) => ({
-      id: h.id,
-      color: (h.color === 'rose' || h.color === 'sky' ? h.color : 'amber') as 'amber' | 'rose' | 'sky',
-      start: Math.max(0, h.start - paragraphStart),
-      end: Math.min(text.length, h.end - paragraphStart),
-    }))
-    .filter((h) => h.end > h.start)
-    .sort((a, b) => a.start - b.start || a.end - b.end)
+  const cuts = new Set<number>([0, text.length])
 
-  if (ranges.length === 0) return [{ text, color: null, key: 'plain' }]
+  for (const highlight of highlights) {
+    if (highlight.end <= paragraphStart || highlight.start >= paraEnd) continue
+    cuts.add(Math.max(0, highlight.start - paragraphStart))
+    cuts.add(Math.min(text.length, highlight.end - paragraphStart))
+  }
+  if (playback && playback.end > paragraphStart && playback.start < paraEnd) {
+    cuts.add(Math.max(0, playback.start - paragraphStart))
+    cuts.add(Math.min(text.length, playback.end - paragraphStart))
+  }
 
-  const parts: Array<{ text: string; color: 'amber' | 'rose' | 'sky' | null; key: string }> = []
-  let cursor = 0
-  for (const range of ranges) {
-    const start = Math.max(cursor, range.start)
-    if (start > cursor) {
-      parts.push({ text: text.slice(cursor, start), color: null, key: `t-${cursor}` })
-    }
-    if (range.end > start) {
-      parts.push({
-        text: text.slice(start, range.end),
-        color: range.color,
-        key: `h-${range.id}-${start}`,
-      })
-      cursor = range.end
-    }
+  const points = [...cuts].sort((a, b) => a - b)
+  const parts: Array<{
+    text: string
+    color: 'amber' | 'rose' | 'sky' | null
+    playback: boolean
+    key: string
+  }> = []
+
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const from = points[i]!
+    const to = points[i + 1]!
+    if (to <= from) continue
+    const absFrom = paragraphStart + from
+    const absTo = paragraphStart + to
+    const owner = highlights.find((h) => h.start <= absFrom && h.end >= absTo)
+    parts.push({
+      text: text.slice(from, to),
+      color: owner
+        ? (owner.color === 'rose' || owner.color === 'sky' ? owner.color : 'amber')
+        : null,
+      playback: Boolean(playback && playback.start <= absFrom && playback.end >= absTo),
+      key: `s-${from}-${to}`,
+    })
   }
-  if (cursor < text.length) {
-    parts.push({ text: text.slice(cursor), color: null, key: `t-${cursor}` })
-  }
-  return parts
+
+  return parts.length > 0
+    ? parts
+    : [{ text, color: null, playback: false, key: 'plain' }]
 }
 
 // Paragraph list, isolated from the parent's frequent state updates (audio ticks, scroll %, etc).
@@ -311,15 +320,19 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
   paragraphs,
   bionic,
   highlights,
+  playback,
+  playbackColor,
 }: {
   paragraphs: ReaderParagraph[]
   bionic: boolean
   highlights: ReaderHighlight[]
+  playback: { start: number; end: number } | null
+  playbackColor: string
 }) {
   return (
     <>
       {paragraphs.map((p, i) => {
-        const parts = splitParagraphByHighlights(p.text, p.startOffset, highlights)
+        const parts = splitParagraphByHighlights(p.text, p.startOffset, highlights, playback)
         return (
           <p
             key={`${p.startOffset}-${i}`}
@@ -328,18 +341,20 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
           >
             {parts.map((part) => {
               const content = bionic ? toBionicNodes(part.text) : part.text
-              if (!part.color) {
+              if (!part.color && !part.playback) {
                 return <span key={part.key}>{content}</span>
               }
               return (
                 <mark
                   key={part.key}
-                  data-reader-highlight="true"
+                  data-reader-highlight={part.color ? 'true' : undefined}
+                  data-reader-playback={part.playback ? 'true' : undefined}
+                  className={part.playback ? 'reader-playback-hl' : undefined}
                   style={{
-                    backgroundColor: HIGHLIGHT_BG[part.color],
+                    backgroundColor: part.playback ? playbackColor : HIGHLIGHT_BG[part.color!],
                     color: 'inherit',
-                    borderRadius: 2,
-                    padding: '0 0.04em',
+                    borderRadius: part.playback ? 1 : 2,
+                    padding: part.playback ? '0.18em 0.16em' : '0 0.04em',
                   }}
                 >
                   {content}
@@ -2695,7 +2710,7 @@ export function ReaderRoute() {
   const [selection,     setSelection]     = useState<SelectionState | null>(null)
   const [panel,         setPanel]         = useState<SecondaryPanel | null>(null)
   const [toast,         setToast]         = useState<string | null>(null)
-  const [audioFollowRects, setAudioFollowRects] = useState<SelectionRect[]>([])
+  const [playbackRange, setPlaybackRange] = useState<{ start: number; end: number } | null>(null)
   const [rollingCacheState, setRollingCacheState] = useState<RollingCacheState>(() => getRollingCacheState())
   const [audioPrefs, setAudioPrefs] = useState(loadAudioPrefs)
   const [audioRate,     setAudioRate]     = useState(1.0)
@@ -3180,9 +3195,7 @@ export function ReaderRoute() {
       setScrollPct(pct)
       const activeCueRange = activeAudioCueRangeRef.current
       if (activeCueRange) {
-        // Never pass follow=true here — that used to re-center the page on every
-        // user scroll while audio played, making the reader feel stuck.
-        showAudioFollow(activeCueRange.start, activeCueRange.end, false)
+        // Inline playback mark scrolls with the page — do not re-layout on scroll.
         if (!programmaticScrollRef.current && isAudioActive() && !audioFollowPausedRef.current) {
           audioFollowPausedRef.current = true
           setAudioFollowPaused(true)
@@ -3418,7 +3431,7 @@ export function ReaderRoute() {
   function clearAudioFollow() {
     activeAudioCueKeyRef.current = null
     activeAudioCueRangeRef.current = null
-    setAudioFollowRects([])
+    setPlaybackRange(null)
     audioFollowPausedRef.current = false
     setAudioFollowPaused(false)
   }
@@ -3431,26 +3444,18 @@ export function ReaderRoute() {
   }
 
   function showAudioFollow(startOffset: number, endOffset: number, follow: boolean) {
+    setPlaybackRange({ start: startOffset, end: endOffset })
+
     const root = readerTextRef.current
-    if (!root) {
-      setAudioFollowRects([])
-      return
-    }
+    if (!root) return
 
     const range = domRangeForSourceOffsets(startOffset, endOffset, root)
-    if (!range) {
-      setAudioFollowRects([])
-      return
-    }
+    if (!range) return
 
     const fallbackRect = range.getBoundingClientRect()
-    if (fallbackRect.width === 0 && fallbackRect.height === 0) {
-      setAudioFollowRects([])
-      return
-    }
+    if (fallbackRect.width === 0 && fallbackRect.height === 0) return
 
     const rects = selectionRectsFromRange(range, fallbackRect)
-    setAudioFollowRects(rects)
 
     // Respect user scroll: highlight still updates, viewport stays put.
     if (!follow || audioFollowPausedRef.current || rects.length === 0) return
@@ -3485,15 +3490,16 @@ export function ReaderRoute() {
       ? (currentTime < cues[0].timeStart ? cues[0] : cues[cues.length - 1])
       : null)
 
-    const startOffset = activeCue?.start ?? chunk.start
-    const endOffset = activeCue?.end ?? chunk.end
-    const nextKey = `${startOffset}:${endOffset}`
+    const cueStart = activeCue?.start ?? chunk.start
+    const cueEnd = activeCue?.end ?? chunk.end
+    const phrase = expandToReadingPhrase(cueStart, cueEnd, payload?.text ?? '')
+    const nextKey = `${phrase.start}:${phrase.end}`
 
-    activeAudioCueRangeRef.current = { start: startOffset, end: endOffset }
+    activeAudioCueRangeRef.current = { start: phrase.start, end: phrase.end }
     if (activeAudioCueKeyRef.current === nextKey) return
 
     activeAudioCueKeyRef.current = nextKey
-    showAudioFollow(startOffset, endOffset, follow && !audioFollowPausedRef.current)
+    showAudioFollow(phrase.start, phrase.end, follow && !audioFollowPausedRef.current)
   }
   // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -3526,7 +3532,8 @@ export function ReaderRoute() {
       <header
         className="fixed z-40 top-0 left-0 right-0 flex items-center px-3"
         style={{
-          height: 52,
+          height: 'calc(52px + env(safe-area-inset-top, 0px))',
+          paddingTop: 'env(safe-area-inset-top, 0px)',
           backgroundColor: colors.bar,
           backdropFilter: 'blur(14px)',
           WebkitBackdropFilter: 'blur(14px)',
@@ -3604,22 +3611,6 @@ export function ReaderRoute() {
         </div>
       </header>
 
-      {audioFollowRects.map((rect, index) => (
-        <div
-          key={`audio-follow-${Math.round(rect.top)}-${Math.round(rect.left)}-${index}`}
-          className="fixed pointer-events-none z-[54] rounded-[4px]"
-          style={{
-            left: rect.left,
-            top: rect.top,
-            width: rect.width,
-            height: rect.height,
-            backgroundColor: 'rgba(59, 130, 246, 0.18)',
-            boxShadow: 'inset 0 0 0 1px rgba(59, 130, 246, 0.30)',
-            transition: 'left 140ms linear, top 140ms linear, width 140ms linear, height 140ms linear',
-          }}
-        />
-      ))}
-
       {/* ── Custom word highlight overlay (replaces browser selection highlight) ── */}
       {selection?.rects.map((rect, index) => (
         <div
@@ -3640,7 +3631,7 @@ export function ReaderRoute() {
       <div
         className="mx-auto px-5 pb-36 transition-all duration-200"
         style={{
-          paddingTop: 72,
+          paddingTop: 'calc(72px + env(safe-area-inset-top, 0px))',
           maxWidth: `${WIDTH_PX[appearance.width]}px`,
           WebkitTouchCallout: 'none',  // suppress iOS long-press callout
         }}
@@ -3663,6 +3654,8 @@ export function ReaderRoute() {
               paragraphs={paragraphs}
               bionic={appearance.bionic}
               highlights={readerHighlights}
+              playback={playbackRange}
+              playbackColor={colors.playback}
             />
           </div>
         )}
@@ -3672,7 +3665,7 @@ export function ReaderRoute() {
       <div
         className="fixed z-40 flex items-center gap-2.5 px-3"
         style={{
-          bottom: 18,
+          bottom: 'calc(18px + env(safe-area-inset-bottom, 0px))',
           left: '50%',
           height: 44,
           width: 'min(420px, calc(100vw - 32px))',
