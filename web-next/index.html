@@ -22,6 +22,16 @@
     -->
     <script>
       (function () {
+        // Capture the Chromium install event before React boots. If we miss it,
+        // desktop/Android can only show menu instructions — no one-click prompt().
+        window.__higgsPwa = window.__higgsPwa || { promptEvent: null }
+        window.addEventListener('beforeinstallprompt', function (event) {
+          event.preventDefault()
+          window.__higgsPwa.promptEvent = event
+        })
+        window.addEventListener('appinstalled', function () {
+          window.__higgsPwa.promptEvent = null
+        })
         try {
           if (!('caches' in window)) return
           // Permanent: never keep app-shell caches (they broke returning logins).

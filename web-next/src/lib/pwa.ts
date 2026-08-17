@@ -18,6 +18,19 @@ export interface BeforeInstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
 }
 
+export interface HiggsPwaCapture {
+  promptEvent: BeforeInstallPromptEvent | null
+}
+
+declare global {
+  interface Window {
+    __higgsPwa?: HiggsPwaCapture
+  }
+  interface Navigator {
+    install?: (installUrl?: string, manifestId?: string) => Promise<void>
+  }
+}
+
 const updateListeners = new Set<(available: boolean) => void>()
 const installListeners = new Set<() => void>()
 
@@ -62,6 +75,20 @@ export function isMacSafari(
   return mac && safari
 }
 
+export function adoptCapturedInstallPrompt(): BeforeInstallPromptEvent | null {
+  if (typeof window === 'undefined') return deferredPrompt
+  const captured = window.__higgsPwa?.promptEvent
+  if (captured && captured !== deferredPrompt) {
+    deferredPrompt = captured
+  }
+  return deferredPrompt
+}
+
+export function canOneClickInstall(): boolean {
+  if (adoptCapturedInstallPrompt()) return true
+  return typeof navigator !== 'undefined' && typeof navigator.install === 'function'
+}
+
 export function getInstallSurface(options?: {
   ios?: boolean
   android?: boolean
@@ -69,10 +96,31 @@ export function getInstallSurface(options?: {
   canPrompt?: boolean
 }): InstallSurface {
   if (options?.ios ?? isIosDevice()) return 'ios'
-  if (options?.canPrompt ?? Boolean(deferredPrompt)) return 'prompt'
+  if (options?.canPrompt ?? canOneClickInstall()) return 'prompt'
   if (options?.android ?? isAndroidDevice()) return 'android-menu'
   if (options?.macSafari ?? isMacSafari()) return 'mac-dock'
   return 'desktop-menu'
+}
+
+function attachInstallCapture() {
+  if (typeof window === 'undefined') return
+  window.__higgsPwa = window.__higgsPwa ?? { promptEvent: null }
+  adoptCapturedInstallPrompt()
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault()
+    const promptEvent = event as BeforeInstallPromptEvent
+    window.__higgsPwa = window.__higgsPwa ?? { promptEvent: null }
+    window.__higgsPwa.promptEvent = promptEvent
+    setDeferredInstallPrompt(promptEvent)
+  })
+  window.addEventListener('appinstalled', () => {
+    if (window.__higgsPwa) window.__higgsPwa.promptEvent = null
+    markAppInstalled()
+  })
+}
+
+if (typeof window !== 'undefined') {
+  attachInstallCapture()
 }
 
 export function shouldCountInstallUsage(pathname: string): boolean {
@@ -219,29 +267,54 @@ export function setDeferredInstallPrompt(event: BeforeInstallPromptEvent | null)
 }
 
 export function getDeferredInstallPrompt(): BeforeInstallPromptEvent | null {
-  return deferredPrompt
+  return adoptCapturedInstallPrompt()
+}
+
+export function installCtaLabel(surface: InstallSurface): string {
+  if (surface === 'ios') return 'Add to Home Screen'
+  if (surface === 'mac-dock') return 'Add to Dock'
+  return 'Install HiggsRead'
 }
 
 export async function promptPwaInstall(): Promise<'accepted' | 'dismissed' | 'unavailable'> {
-  const event = deferredPrompt
-  if (!event) return 'unavailable'
-  deferredPrompt = null
-  emitInstallChange()
-  try {
-    await event.prompt()
-    const choice = await event.userChoice
-    if (choice.outcome === 'accepted') {
-      dismissInstallHint()
-      void requestPersistentStorage()
+  const event = adoptCapturedInstallPrompt()
+  if (event) {
+    deferredPrompt = null
+    if (typeof window !== 'undefined' && window.__higgsPwa) {
+      window.__higgsPwa.promptEvent = null
     }
-    return choice.outcome
-  } catch {
-    return 'unavailable'
+    emitInstallChange()
+    try {
+      await event.prompt()
+      const choice = await event.userChoice
+      if (choice.outcome === 'accepted') {
+        dismissInstallHint()
+        void requestPersistentStorage()
+      }
+      return choice.outcome
+    } catch {
+      // Fall through to navigator.install() when the stored event is stale.
+    }
   }
+
+  if (typeof navigator !== 'undefined' && typeof navigator.install === 'function') {
+    try {
+      await navigator.install()
+      markAppInstalled()
+      return 'accepted'
+    } catch {
+      return 'dismissed'
+    }
+  }
+
+  return 'unavailable'
 }
 
 export function markAppInstalled(): void {
   deferredPrompt = null
+  if (typeof window !== 'undefined' && window.__higgsPwa) {
+    window.__higgsPwa.promptEvent = null
+  }
   dismissInstallHint()
   void requestPersistentStorage()
 }

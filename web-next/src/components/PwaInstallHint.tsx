@@ -2,8 +2,10 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { X } from 'lucide-react'
 import {
+  canOneClickInstall,
   dismissInstallHint,
   getInstallSurface,
+  installCtaLabel,
   isStandaloneDisplay,
   promptPwaInstall,
   shouldShowInstallHint,
@@ -43,74 +45,105 @@ function IosShareGlyph({ className }: { className?: string }) {
 function copyFor(surface: InstallSurface): {
   title: string
   body: ReactNode
-  action: string | null
+  action: string
 } {
   if (surface === 'ios') {
     return {
       title: 'Keep HiggsRead on your Home Screen',
-      body: (
-        <>
-          Tap{' '}
-          <span className="text-foreground inline-flex translate-y-px items-center">
-            <IosShareGlyph />
-          </span>{' '}
-          Share, then <span className="text-foreground">Add to Home Screen</span>.
-        </>
-      ),
-      action: null,
+      body: 'Add the app icon so reading opens full-screen, like a native app.',
+      action: installCtaLabel(surface),
     }
   }
   if (surface === 'android-menu') {
     return {
       title: 'Install HiggsRead',
-      body: (
-        <>
-          Open the browser menu and tap <span className="text-foreground">Install app</span> or{' '}
-          <span className="text-foreground">Add to Home screen</span>.
-        </>
-      ),
-      action: null,
+      body: 'Install for a Home Screen icon and a full-screen reader.',
+      action: installCtaLabel(surface),
     }
   }
   if (surface === 'mac-dock') {
     return {
       title: 'Keep HiggsRead in your Dock',
-      body: (
-        <>
-          Choose <span className="text-foreground">File → Add to Dock</span>, or Share → Add to
-          Dock.
-        </>
-      ),
-      action: null,
+      body: 'Add it next to your other apps for one-click reading.',
+      action: installCtaLabel(surface),
     }
   }
   if (surface === 'desktop-menu') {
     return {
       title: 'Install HiggsRead',
-      body: (
-        <>
-          Use the install icon in the address bar, or your browser menu →{' '}
-          <span className="text-foreground">Install HiggsRead</span>.
-        </>
-      ),
-      action: null,
+      body: 'Install for a desktop app window and a faster launch.',
+      action: installCtaLabel(surface),
     }
   }
   return {
     title: 'Keep HiggsRead at hand',
-    body: 'Install for a full-screen reader and a Home Screen icon on this device.',
-    action: 'Install HiggsRead',
+    body: 'Install for a full-screen reader and an icon on this device.',
+    action: installCtaLabel(surface),
   }
+}
+
+function guideFor(surface: InstallSurface): ReactNode {
+  if (surface === 'ios') {
+    return (
+      <ol className="text-muted-foreground mt-2 space-y-1.5 text-[12.5px] leading-relaxed">
+        <li>
+          1. Tap{' '}
+          <span className="text-foreground inline-flex translate-y-px items-center gap-1">
+            <IosShareGlyph /> Share
+          </span>
+        </li>
+        <li>
+          2. Choose <span className="text-foreground">Add to Home Screen</span>
+        </li>
+        <li>
+          3. Tap <span className="text-foreground">Add</span>
+        </li>
+      </ol>
+    )
+  }
+  if (surface === 'android-menu') {
+    return (
+      <ol className="text-muted-foreground mt-2 space-y-1.5 text-[12.5px] leading-relaxed">
+        <li>1. Tap the browser menu (⋮)</li>
+        <li>
+          2. Tap <span className="text-foreground">Install app</span> or{' '}
+          <span className="text-foreground">Add to Home screen</span>
+        </li>
+      </ol>
+    )
+  }
+  if (surface === 'mac-dock') {
+    return (
+      <ol className="text-muted-foreground mt-2 space-y-1.5 text-[12.5px] leading-relaxed">
+        <li>
+          1. Choose <span className="text-foreground">File → Add to Dock</span>
+        </li>
+        <li>2. Or Share → Add to Dock</li>
+      </ol>
+    )
+  }
+  return (
+    <ol className="text-muted-foreground mt-2 space-y-1.5 text-[12.5px] leading-relaxed">
+      <li>1. Click the install icon in the address bar</li>
+      <li>
+        2. Or open the browser menu → <span className="text-foreground">Install HiggsRead</span>
+      </li>
+    </ol>
+  )
 }
 
 export function PwaInstallBanner() {
   const { pathname } = useLocation()
   const [visible, setVisible] = useState(() => shouldShowInstallHint({ pathname }))
   const [surface, setSurface] = useState<InstallSurface>(() => getInstallSurface())
+  const [oneClick, setOneClick] = useState(() => canOneClickInstall())
+  const [busy, setBusy] = useState(false)
+  const [showGuide, setShowGuide] = useState(false)
 
   useEffect(() => {
     const sync = () => {
       setSurface(getInstallSurface())
+      setOneClick(canOneClickInstall())
       setVisible(shouldShowInstallHint({ pathname }))
     }
     sync()
@@ -122,8 +155,18 @@ export function PwaInstallBanner() {
   const copy = copyFor(surface)
 
   async function onInstall() {
-    const outcome = await promptPwaInstall()
-    if (outcome !== 'accepted') setVisible(shouldShowInstallHint({ pathname }))
+    setBusy(true)
+    try {
+      const outcome = await promptPwaInstall()
+      if (outcome === 'accepted') {
+        setVisible(false)
+        return
+      }
+      if (outcome === 'unavailable') setShowGuide(true)
+      setVisible(shouldShowInstallHint({ pathname }))
+    } finally {
+      setBusy(false)
+    }
   }
 
   function onDismiss() {
@@ -137,6 +180,7 @@ export function PwaInstallBanner() {
         <div className="min-w-0 flex-1">
           <p className="text-foreground text-[13.5px] font-medium tracking-tight">{copy.title}</p>
           <p className="text-muted-foreground mt-1 text-[12.5px] leading-relaxed">{copy.body}</p>
+          {(!oneClick || showGuide) && guideFor(surface)}
         </div>
         <button
           type="button"
@@ -147,15 +191,14 @@ export function PwaInstallBanner() {
           <X size={15} />
         </button>
       </div>
-      {copy.action && (
-        <button
-          type="button"
-          onClick={() => void onInstall()}
-          className="mt-2.5 h-9 w-full rounded-lg bg-[#37352f] text-[13px] font-medium text-[#f7f7f5] transition-opacity hover:opacity-90"
-        >
-          {copy.action}
-        </button>
-      )}
+      <button
+        type="button"
+        onClick={() => void onInstall()}
+        disabled={busy}
+        className="mt-2.5 h-9 w-full rounded-lg bg-[#37352f] text-[13px] font-medium text-[#f7f7f5] transition-opacity hover:opacity-90 disabled:opacity-60"
+      >
+        {busy ? 'Opening…' : copy.action}
+      </button>
     </div>
   )
 }

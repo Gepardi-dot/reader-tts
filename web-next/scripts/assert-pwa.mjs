@@ -104,6 +104,9 @@ async function assertIndexHtml() {
   if (!text.includes('apple-mobile-web-app-capable')) {
     fail(relPath, 'must declare iOS web-app-capable')
   }
+  if (!text.includes('beforeinstallprompt') || !text.includes('__higgsPwa')) {
+    fail(relPath, 'must capture beforeinstallprompt before the app module loads')
+  }
   console.log(`[assert-pwa] OK ${relPath}`)
 }
 

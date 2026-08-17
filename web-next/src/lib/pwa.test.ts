@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   PWA_INSTALL_AFTER_MS,
   addUsageMs,
+  canOneClickInstall,
   getInstallSurface,
+  installCtaLabel,
   isAndroidDevice,
   isInstallDismissed,
   isIosDevice,
@@ -132,6 +134,18 @@ describe('install surface', () => {
     expect(
       getInstallSurface({ ios: false, android: false, macSafari: false, canPrompt: false }),
     ).toBe('desktop-menu')
+  })
+
+  it('always offers an install button label', () => {
+    expect(installCtaLabel('prompt')).toBe('Install HiggsRead')
+    expect(installCtaLabel('desktop-menu')).toBe('Install HiggsRead')
+    expect(installCtaLabel('android-menu')).toBe('Install HiggsRead')
+    expect(installCtaLabel('ios')).toBe('Add to Home Screen')
+    expect(installCtaLabel('mac-dock')).toBe('Add to Dock')
+  })
+
+  it('does not claim a one-click prompt without a captured event', () => {
+    expect(canOneClickInstall()).toBe(false)
   })
 })
 
