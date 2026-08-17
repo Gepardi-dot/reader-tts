@@ -67,10 +67,21 @@ The SPA also **runtime-guards** any `*.vercel.app` host: even if a bad relative 
 
 **Do not** put `VITE_API_ORIGIN=relative` in `web-next/.env.production` — that used to break Vercel login (same-origin `/api` → 405, no useful error).
 
-## Custom domain (recommended next)
+## Custom domain
+
+### Vercel custom domain (current: higgsread.com)
+
+If the SPA stays on Vercel and only the domain changes:
+
+1. Add `higgsread.com` / `www.higgsread.com` in the Vercel project Domains settings.
+2. Ensure the Worker allows those origins in CORS (`APP_ORIGIN` + `isAllowedBrowserOrigin` in `cloudflare/worker`).
+3. Redeploy the Worker after origin changes (`npm run worker:deploy`).
+4. SPA runtime treats `higgsread.com` as a static host and always calls the absolute Worker API.
+
+### Unified Cloudflare host (recommended long-term)
 
 In Cloudflare DNS / Workers:
 
-1. Add custom domain to the Worker (e.g. `app.yourdomain.com` or apex).
+1. Add custom domain to the Worker (e.g. `app.higgsread.com` or apex).
 2. SPA + API stay same-origin automatically.
 3. Point users at that domain; optional: redirect `readertts.vercel.app` there.

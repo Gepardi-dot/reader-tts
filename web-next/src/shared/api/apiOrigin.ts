@@ -14,6 +14,8 @@ export const FALLBACK_ABSOLUTE_API = 'https://reader-tts-api.reader-tts-ari.work
 /** True when this page is on a static frontend that has no Worker /api. */
 export function isStaticFrontendHost(hostname = typeof window !== 'undefined' ? window.location.hostname : '') {
   if (!hostname) return false
+  // Custom domain on Vercel (static SPA → Cloudflare Worker API)
+  if (hostname === 'higgsread.com' || hostname === 'www.higgsread.com') return true
   // Production + preview + team aliases on Vercel
   if (hostname === 'readertts.vercel.app') return true
   if (hostname.endsWith('.vercel.app')) return true

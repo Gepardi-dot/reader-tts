@@ -24,7 +24,7 @@ let cachedUser: AuthUser | null = readStoredUser()
 const listeners = new Set<(user: AuthUser | null) => void>()
 
 const API_UNREACHABLE_MESSAGE =
-  'Could not reach the auth service. Check your connection, hard-refresh, and try again. If this keeps happening, open https://readertts.vercel.app (not a Vercel preview SSO URL).'
+  'Could not reach the auth service. Check your connection, hard-refresh, and try again. If this keeps happening, open https://www.higgsread.com or https://readertts.vercel.app (not a Vercel preview SSO URL).'
 
 function resolveUrl(url: string) {
   return resolveApiUrl(url)

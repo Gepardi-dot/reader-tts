@@ -12,6 +12,11 @@ describe('isStaticFrontendHost', () => {
     expect(isStaticFrontendHost('reader-tts-git-main-ku.vercel.app')).toBe(true)
   })
 
+  it('treats the custom higgsread.com domain as a static frontend', () => {
+    expect(isStaticFrontendHost('higgsread.com')).toBe(true)
+    expect(isStaticFrontendHost('www.higgsread.com')).toBe(true)
+  })
+
   it('does not treat unified Cloudflare or localhost as static-only', () => {
     expect(isStaticFrontendHost('reader-tts-api.reader-tts-ari.workers.dev')).toBe(false)
     expect(isStaticFrontendHost('localhost')).toBe(false)

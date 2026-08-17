@@ -326,6 +326,8 @@ function isAllowedBrowserOrigin(origin: string, allowed: Set<string>) {
     if (protocol !== 'https:' && protocol !== 'http:') return false
     // Any Vercel deployment / preview (static SPA talking to this Worker).
     if (hostname === 'readertts.vercel.app' || hostname.endsWith('.vercel.app')) return true
+    // Custom production domain (Vercel static → Worker API).
+    if (hostname === 'higgsread.com' || hostname === 'www.higgsread.com') return true
     // Local Vite dev servers on common ports.
     if (
       (hostname === 'localhost' || hostname === '127.0.0.1')
@@ -346,8 +348,10 @@ function corsHeaders(request: Request, env: Env) {
     .split(',')
     .map((item) => item.trim().replace(/\/$/, ''))
     .filter(Boolean)
-  // Always allow the production Vercel app + local Vite ports, even if APP_ORIGIN is unset.
+  // Always allow production frontends + local Vite ports, even if APP_ORIGIN is unset.
   const defaults = [
+    'https://higgsread.com',
+    'https://www.higgsread.com',
     'https://readertts.vercel.app',
     'https://reader-tts-api.reader-tts-ari.workers.dev',
     'http://localhost:5175',
