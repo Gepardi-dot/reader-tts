@@ -77,6 +77,14 @@ railway.*.toml
 /tmp-*.png
 /tmp-*.har
 *.png
+# Brand assets required by the SPA build (logo import + public favicons)
+!web-next/src/assets/higgsread-*.png
+!web-next/public/favicon.png
+!web-next/public/favicon-16.png
+!web-next/public/favicon-32.png
+!web-next/public/favicon-48.png
+!web-next/public/favicon-64.png
+!web-next/public/apple-touch-icon.png
 *.har
 
 # Explicit keep (belt-and-suspenders if a broader pattern is added later)
