@@ -2731,6 +2731,7 @@ export function ReaderRoute() {
   const [audioFollowPaused, setAudioFollowPaused] = useState(false)
   const presynthGridRef         = useRef<Array<{ start: number; end: number }> | null>(null)
   const readerTextRef         = useRef<HTMLDivElement | null>(null)
+  const readerScrollRef       = useRef<HTMLDivElement | null>(null)
   const panelSnapshotRef      = useRef<SecondaryPanel | null>(null)
   const openPanel = useCallback((nextPanel: SecondaryPanel) => {
     panelSnapshotRef.current = nextPanel
@@ -2817,6 +2818,34 @@ export function ReaderRoute() {
   }, [playWordRaw])
   const hasReaderText = Boolean(payload?.text)
 
+  function getReaderScrollMetrics() {
+    const el = readerScrollRef.current
+    if (el) {
+      return {
+        y: el.scrollTop,
+        max: Math.max(0, el.scrollHeight - el.clientHeight),
+        view: el.clientHeight,
+      }
+    }
+    return {
+      y: window.scrollY,
+      max: Math.max(0, document.documentElement.scrollHeight - window.innerHeight),
+      view: window.innerHeight,
+    }
+  }
+
+  function scrollReaderTo(top: number, behavior: ScrollBehavior = 'auto') {
+    const el = readerScrollRef.current
+    if (el) el.scrollTo({ top, behavior })
+    else window.scrollTo({ top, behavior })
+  }
+
+  function scrollReaderBy(delta: number, behavior: ScrollBehavior = 'auto') {
+    const el = readerScrollRef.current
+    if (el) el.scrollBy({ top: delta, behavior })
+    else window.scrollBy({ top: delta, behavior })
+  }
+
   useEffect(() => {
     primeBrowserSpeechVoices()
   }, [])
@@ -2833,9 +2862,12 @@ export function ReaderRoute() {
     const prevBodyTouch = body.style.touchAction
     const scrollY = window.scrollY
 
+    const scroller = readerScrollRef.current
+    const prevScrollerOverflow = scroller?.style.overflow ?? ''
     html.style.overflow = 'hidden'
     body.style.overflow = 'hidden'
     body.style.touchAction = 'none'
+    if (scroller) scroller.style.overflow = 'hidden'
     // Freeze position so iOS doesn't jump when overflow is restored.
     body.style.position = 'fixed'
     body.style.top = `-${scrollY}px`
@@ -2863,6 +2895,7 @@ export function ReaderRoute() {
       html.style.overflow = prevHtmlOverflow
       body.style.overflow = prevBodyOverflow
       body.style.touchAction = prevBodyTouch
+      if (scroller) scroller.style.overflow = prevScrollerOverflow
       body.style.position = ''
       body.style.top = ''
       body.style.left = ''
@@ -2897,8 +2930,8 @@ export function ReaderRoute() {
         if (!isNaN(offset) && offset >= 0) {
           scrolledToOffsetRef.current = true
           const pct = offset / payload.text.length
-          const maxScroll = document.documentElement.scrollHeight - window.innerHeight
-          window.scrollTo({ top: pct * maxScroll, behavior: 'instant' })
+          const { max } = getReaderScrollMetrics()
+          scrollReaderTo(pct * max, 'auto')
           window.history.replaceState({}, '', window.location.pathname)
           return
         }
@@ -2910,8 +2943,8 @@ export function ReaderRoute() {
     const { textStart, textLength } = progressData.reading
     if (!textLength) return
     const pct = textStart / textLength
-    const maxScroll = document.documentElement.scrollHeight - window.innerHeight
-    window.scrollTo({ top: pct * maxScroll, behavior: 'instant' })
+    const { max } = getReaderScrollMetrics()
+    scrollReaderTo(pct * max, 'auto')
     scrolledToOffsetRef.current = true
   }, [progressData, payload?.text])
 
@@ -3188,8 +3221,7 @@ export function ReaderRoute() {
   // Scroll tracking
   useEffect(() => {
     function onScroll() {
-      const y   = window.scrollY
-      const max = document.documentElement.scrollHeight - window.innerHeight
+      const { y, max } = getReaderScrollMetrics()
       const pct = max > 0 ? Math.min(1, y / max) : 0
       latestScrollPct.current = pct
       setScrollPct(pct)
@@ -3209,8 +3241,13 @@ export function ReaderRoute() {
       if (saveTimer.current) clearTimeout(saveTimer.current)
       saveTimer.current = setTimeout(() => saveProgress(pct), 4000)
     }
+    const scroller = readerScrollRef.current
+    scroller?.addEventListener('scroll', onScroll, { passive: true })
     window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
+    return () => {
+      scroller?.removeEventListener('scroll', onScroll)
+      window.removeEventListener('scroll', onScroll)
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text])
 
@@ -3395,8 +3432,12 @@ export function ReaderRoute() {
         setIsDragSelecting(true)
       }
 
+      if (r.mode === 'scrolling') return
+
       if (r.mode === 'selecting') {
-        e.preventDefault()
+        // touch-action: pan-y keeps vertical page scroll native. Only cancel
+        // the horizontal sweep so the browser does not treat it as a pan.
+        if (e.cancelable) e.preventDefault()
         const cur = getWordAtPoint(t.clientX, t.clientY)
         if (!cur) return
 
@@ -3462,18 +3503,19 @@ export function ReaderRoute() {
 
     const top = Math.min(...rects.map((rect) => rect.top))
     const bottom = Math.max(...rects.map((rect) => rect.top + rect.height))
-    const safeTop = window.innerHeight * 0.22
-    const safeBottom = window.innerHeight * 0.72
+    const view = getReaderScrollMetrics().view
+    const safeTop = view * 0.22
+    const safeBottom = view * 0.72
     if (top >= safeTop && bottom <= safeBottom) return
 
     const centerY = (top + bottom) / 2
-    const targetY = window.innerHeight * 0.42
+    const targetY = view * 0.42
     const delta = centerY - targetY
     if (Math.abs(delta) < 12) return
 
     programmaticScrollRef.current = true
     // Instant scroll avoids fighting the user's finger/wheel with smooth animation.
-    window.scrollBy({ top: delta, behavior: 'auto' })
+    scrollReaderBy(delta, 'auto')
     window.setTimeout(() => {
       programmaticScrollRef.current = false
     }, 80)
@@ -3525,8 +3567,15 @@ export function ReaderRoute() {
 
   return (
     <div
-      className="min-h-svh"
-      style={{ backgroundColor: colors.bg, color: colors.text, overflowX: 'hidden', maxWidth: '100vw' }}
+      ref={readerScrollRef}
+      className="h-svh overflow-y-auto overflow-x-hidden overscroll-y-contain"
+      style={{
+        backgroundColor: colors.bg,
+        color: colors.text,
+        maxWidth: '100vw',
+        touchAction: 'pan-y',
+        WebkitOverflowScrolling: 'touch',
+      }}
     >
       {/* ── Top bar (full-width) ──────────────────────────────────── */}
       <header
@@ -3634,6 +3683,7 @@ export function ReaderRoute() {
           paddingTop: 'calc(72px + env(safe-area-inset-top, 0px))',
           maxWidth: `${WIDTH_PX[appearance.width]}px`,
           WebkitTouchCallout: 'none',  // suppress iOS long-press callout
+          touchAction: 'pan-y',
         }}
         onMouseUp={handleMouseUp}
         onClick={handleClick}
@@ -3684,7 +3734,7 @@ export function ReaderRoute() {
         }}
       >
         <button
-          onClick={() => window.scrollBy({ top: -Math.round(window.innerHeight * 0.8), behavior: 'smooth' })}
+          onClick={() => scrollReaderBy(-Math.round(getReaderScrollMetrics().view * 0.8), 'smooth')}
           className="flex items-center justify-center w-8 h-8 rounded-full shrink-0 hover:opacity-55 transition-opacity"
           style={{ color: colors.text }}
           aria-label="Scroll up"
@@ -3710,7 +3760,7 @@ export function ReaderRoute() {
         </span>
 
         <button
-          onClick={() => window.scrollBy({ top: Math.round(window.innerHeight * 0.8), behavior: 'smooth' })}
+          onClick={() => scrollReaderBy(Math.round(getReaderScrollMetrics().view * 0.8), 'smooth')}
           className="flex items-center justify-center w-8 h-8 rounded-full shrink-0 hover:opacity-55 transition-opacity"
           style={{ color: colors.text }}
           aria-label="Scroll down"
