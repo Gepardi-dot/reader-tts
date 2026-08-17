@@ -110,11 +110,11 @@ export function LoginRoute() {
   return (
     <div className="flex min-h-svh items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm space-y-6">
-        <div className="text-center space-y-3">
+        <div className="text-center space-y-4">
           <img
             src={higgsReadLogo}
             alt="HiggsRead"
-            className="mx-auto h-10 w-auto max-w-[220px] object-contain"
+            className="mx-auto h-14 w-auto max-w-[min(100%,280px)] object-contain select-none"
             draggable={false}
           />
           <p className="text-sm text-muted-foreground">

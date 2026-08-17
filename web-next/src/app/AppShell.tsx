@@ -36,7 +36,7 @@ function BrandLogo() {
     <img
       src={higgsReadLogo}
       alt="HiggsRead"
-      className="h-7 w-auto max-w-[148px] object-contain object-left shrink-0"
+      className="h-8 w-auto max-w-[168px] object-contain object-left shrink-0 select-none"
       draggable={false}
     />
   )
