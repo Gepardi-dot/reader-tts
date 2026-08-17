@@ -3158,6 +3158,8 @@ export function ReaderRoute() {
   }, [progressData, payload?.text, appearance.layout])
 
   // Paginated: measure viewport pages when type, size, or book text changes.
+  // ResizeObserver callbacks are the allowed setState path; do not setState
+  // synchronously in this effect body (react-hooks/set-state-in-effect).
   useLayoutEffect(() => {
     const prev = prevLayoutRef.current
     prevLayoutRef.current = appearance.layout
@@ -3165,7 +3167,6 @@ export function ReaderRoute() {
     if (appearance.layout !== 'paginated') {
       if (pageBreaksRef.current.length > 0) {
         pageBreaksRef.current = []
-        setPageBreaks([])
       }
       if (prev === 'paginated' && payload?.text) {
         const { max } = getReaderScrollMetrics()
@@ -3175,9 +3176,6 @@ export function ReaderRoute() {
       }
       return
     }
-
-    setBarVisible(true)
-    measurePagedLayout()
 
     const scroller = readerScrollRef.current
     const text = readerTextRef.current
