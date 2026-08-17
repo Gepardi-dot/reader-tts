@@ -6,6 +6,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { subscribeAuth } from '@/lib/auth'
 import { registerServiceWorkerWithUpdate } from '@/lib/clientRecovery'
+import { applyDisplayModeClass } from '@/lib/pwa'
+import { initLaunchQueue } from '@/lib/pwaLaunch'
 import { router } from './app/router'
 
 const queryClient = new QueryClient({
@@ -45,7 +47,7 @@ function applyAuthUser(nextUserId: string) {
       queryFn: async () => {
         const { api } = await import('@/shared/api/client')
         const res = await api.get<{ items: unknown[] } | unknown[]>('/api/books')
-        return Array.isArray(res) ? res : (res as { items: unknown[] }).items ?? []
+        return Array.isArray(res) ? res : ((res as { items: unknown[] }).items ?? [])
       },
     })
   }
@@ -55,6 +57,10 @@ subscribeAuth((user) => applyAuthUser(user?.id ?? ''))
 
 // Register SW with update + one-time shell-cache purge so old browsers are not
 // stuck on a cache-first index.html from a previous deploy (broke login).
+if (typeof window !== 'undefined') {
+  applyDisplayModeClass()
+  initLaunchQueue()
+}
 registerServiceWorkerWithUpdate()
 
 // Strip one-shot deploy recovery query params without a full navigation loop.
@@ -68,7 +74,9 @@ if (typeof window !== 'undefined' && window.location.search.includes('_chunk='))
 // WASM). If headers are misconfigured we'll silently fall back to single-thread —
 // log so a regression is visible in DevTools.
 if (typeof window !== 'undefined' && !window.crossOriginIsolated) {
-  console.warn('[tts] crossOriginIsolated is false — WASM threads disabled; check COOP/COEP headers.')
+  console.warn(
+    '[tts] crossOriginIsolated is false — WASM threads disabled; check COOP/COEP headers.',
+  )
 }
 
 // Request persistent storage early so the 82 MB Kokoro model in Cache Storage

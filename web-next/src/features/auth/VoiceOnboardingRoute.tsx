@@ -196,7 +196,13 @@ export function VoiceOnboardingRoute() {
   }
 
   return (
-    <div className="flex min-h-svh items-center justify-center bg-background px-4 py-10">
+    <div
+      className="flex min-h-svh items-center justify-center bg-background px-4 py-10"
+      style={{
+        paddingTop: 'max(2.5rem, env(safe-area-inset-top, 0px))',
+        paddingBottom: 'max(2.5rem, env(safe-area-inset-bottom, 0px))',
+      }}
+    >
       <div className="w-full max-w-lg space-y-6">
         <div className="text-center">
           <span className="text-3xl" aria-hidden>🎙️</span>

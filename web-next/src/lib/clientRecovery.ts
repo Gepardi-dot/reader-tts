@@ -8,6 +8,7 @@
  */
 
 import { clearAuth } from '@/lib/auth'
+import { setSwUpdateAvailable, shouldDeferSwReload } from '@/lib/pwa'
 
 /** Bump when SW policy changes; triggers one automatic migration reload. */
 export const CLIENT_SW_PROTOCOL = 'models-covers-only-v1'
@@ -47,20 +48,30 @@ export async function recoverStuckClient(options?: { reload?: boolean }): Promis
   const shouldReload = options?.reload !== false
   try {
     clearAuth({ keepLastEmail: true })
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   try {
     window.localStorage.removeItem('storybook-qcache-v1')
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   try {
     // Full cache wipe including models — intentional clean slate
     await clearServiceWorkerCaches({ keepModels: false })
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   try {
     await unregisterServiceWorkers()
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   try {
     window.localStorage.setItem(PROTOCOL_KEY, CLIENT_SW_PROTOCOL)
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   if (shouldReload && typeof window !== 'undefined') {
     const url = new URL(window.location.href)
     url.searchParams.set('_recovered', String(Date.now()))
@@ -83,11 +94,15 @@ async function migrateClientProtocolIfNeeded(): Promise<boolean> {
 
   try {
     await clearServiceWorkerCaches({ keepModels: true })
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 
   try {
     window.localStorage.setItem(PROTOCOL_KEY, CLIENT_SW_PROTOCOL)
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 
   // First-ever visitor: purge shells but skip forced reload.
   if (!previous) return false
@@ -95,8 +110,10 @@ async function migrateClientProtocolIfNeeded(): Promise<boolean> {
 }
 
 function stripMigrationParams() {
-  if (!window.location.search.includes('_sw_migrated=')
-    && !window.location.search.includes('_recovered=')) {
+  if (
+    !window.location.search.includes('_sw_migrated=') &&
+    !window.location.search.includes('_recovered=')
+  ) {
     return
   }
   const url = new URL(window.location.href)
@@ -124,7 +141,9 @@ export function registerServiceWorkerWithUpdate(): void {
         }
       }
       stripMigrationParams()
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
     window.addEventListener('load', () => {
       void (async () => {
@@ -160,6 +179,10 @@ export function registerServiceWorkerWithUpdate(): void {
             let refreshing = false
             navigator.serviceWorker.addEventListener('controllerchange', () => {
               if (refreshing) return
+              if (shouldDeferSwReload(window.location.pathname)) {
+                setSwUpdateAvailable(true)
+                return
+              }
               refreshing = true
               window.location.reload()
             })

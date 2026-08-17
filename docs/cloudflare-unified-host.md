@@ -63,6 +63,10 @@ npm --prefix web-next run assert:sw-policy
 
 See `web-next/scripts/assert-sw-policy.mjs`.
 
+The installable PWA is **manifest + local-first data**, not an app-shell worker.
+Do not add `vite-plugin-pwa` / Workbox `generateSW`. `web-next/scripts/assert-pwa.mjs`
+guards the manifest, icons, and the no-Workbox rule.
+
 The SPA also **runtime-guards** any `*.vercel.app` host: even if a bad relative bundle is served, auth/API calls force the Worker URL (`web-next/src/shared/api/apiOrigin.ts`). Prefer the unified Workers URL for day-to-day use.
 
 **Do not** put `VITE_API_ORIGIN=relative` in `web-next/.env.production` — that used to break Vercel login (same-origin `/api` → 405, no useful error).

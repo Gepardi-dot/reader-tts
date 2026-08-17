@@ -1,0 +1,289 @@
+/**
+ * Installable PWA helpers.
+ *
+ * The service worker stays models/covers-only. This module never caches
+ * the app shell — it only detects display-mode, install eligibility,
+ * and when a worker update should wait until the reader is idle.
+ */
+
+export const PWA_INSTALL_DISMISS_KEY = 'higgsread-pwa-install-dismissed'
+export const PWA_INSTALL_DISMISS_MS = 14 * 24 * 60 * 60 * 1000
+export const PWA_USAGE_MS_KEY = 'higgsread-pwa-usage-ms'
+export const PWA_INSTALL_AFTER_MS = 5 * 60 * 1000
+
+export type InstallSurface = 'prompt' | 'ios' | 'android-menu' | 'mac-dock' | 'desktop-menu'
+
+export interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
+}
+
+const updateListeners = new Set<(available: boolean) => void>()
+const installListeners = new Set<() => void>()
+
+let deferredPrompt: BeforeInstallPromptEvent | null = null
+let swUpdateAvailable = false
+
+export function isStandaloneDisplay(win: Window = window): boolean {
+  const nav = win.navigator as Navigator & { standalone?: boolean }
+  if (nav.standalone === true) return true
+  if (typeof win.matchMedia !== 'function') return false
+  return (
+    win.matchMedia('(display-mode: standalone)').matches ||
+    win.matchMedia('(display-mode: window-controls-overlay)').matches ||
+    win.matchMedia('(display-mode: minimal-ui)').matches
+  )
+}
+
+export function isIosDevice(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+  maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints,
+  platform = typeof navigator === 'undefined' ? '' : navigator.platform,
+): boolean {
+  if (/iphone|ipad|ipod/i.test(userAgent)) return true
+  return platform === 'MacIntel' && maxTouchPoints > 1
+}
+
+export function isAndroidDevice(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+): boolean {
+  return /android/i.test(userAgent)
+}
+
+export function isMacSafari(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+  maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints,
+  platform = typeof navigator === 'undefined' ? '' : navigator.platform,
+): boolean {
+  if (isIosDevice(userAgent, maxTouchPoints, platform)) return false
+  const ua = userAgent.toLowerCase()
+  const mac = /macintosh|mac os x/.test(ua) || platform === 'MacIntel'
+  const safari = /safari/.test(ua) && !/chrome|chromium|crios|edg|fxios|android/.test(ua)
+  return mac && safari
+}
+
+export function getInstallSurface(options?: {
+  ios?: boolean
+  android?: boolean
+  macSafari?: boolean
+  canPrompt?: boolean
+}): InstallSurface {
+  if (options?.ios ?? isIosDevice()) return 'ios'
+  if (options?.canPrompt ?? Boolean(deferredPrompt)) return 'prompt'
+  if (options?.android ?? isAndroidDevice()) return 'android-menu'
+  if (options?.macSafari ?? isMacSafari()) return 'mac-dock'
+  return 'desktop-menu'
+}
+
+export function shouldCountInstallUsage(pathname: string): boolean {
+  return pathname !== '/login' && !pathname.startsWith('/login?')
+}
+
+export function readUsageMs(
+  raw: string | null = typeof window === 'undefined'
+    ? null
+    : window.localStorage.getItem(PWA_USAGE_MS_KEY),
+): number {
+  const ms = Number(raw)
+  if (!Number.isFinite(ms) || ms < 0) return 0
+  return ms
+}
+
+export function isUsageEligible(ms = readUsageMs()): boolean {
+  return ms >= PWA_INSTALL_AFTER_MS
+}
+
+export function addUsageMs(deltaMs: number): boolean {
+  if (!Number.isFinite(deltaMs) || deltaMs <= 0) return isUsageEligible()
+  const next = Math.min(readUsageMs() + deltaMs, PWA_INSTALL_AFTER_MS)
+  const wasEligible = isUsageEligible()
+  try {
+    window.localStorage.setItem(PWA_USAGE_MS_KEY, String(next))
+  } catch {
+    /* private mode */
+  }
+  const eligible = next >= PWA_INSTALL_AFTER_MS
+  if (eligible && !wasEligible) emitInstallChange()
+  return eligible
+}
+
+/** Visible time in the app (not login). Pauses when the tab is hidden. */
+export function startInstallUsageTracking(getPathname: () => string): () => void {
+  if (typeof window === 'undefined') return () => {}
+  if (isStandaloneDisplay() || isInstallDismissed() || isUsageEligible()) {
+    if (isUsageEligible()) emitInstallChange()
+    return () => {}
+  }
+
+  let last = Date.now()
+  let timer: ReturnType<typeof setInterval> | null = null
+
+  const tick = () => {
+    const now = Date.now()
+    const delta = Math.max(0, Math.min(now - last, 2000))
+    last = now
+    if (document.visibilityState !== 'visible') return
+    if (!shouldCountInstallUsage(getPathname())) return
+    if (isStandaloneDisplay() || isInstallDismissed()) return
+    if (addUsageMs(delta) && timer) {
+      clearInterval(timer)
+      timer = null
+    }
+  }
+
+  const start = () => {
+    last = Date.now()
+    if (timer == null) timer = setInterval(tick, 1000)
+  }
+  const stop = () => {
+    if (timer == null) return
+    clearInterval(timer)
+    timer = null
+  }
+
+  const onVisibility = () => {
+    if (document.visibilityState === 'visible') start()
+    else {
+      tick()
+      stop()
+    }
+  }
+
+  document.addEventListener('visibilitychange', onVisibility)
+  if (document.visibilityState === 'visible') start()
+
+  return () => {
+    document.removeEventListener('visibilitychange', onVisibility)
+    stop()
+  }
+}
+
+export function isInstallDismissed(
+  now = Date.now(),
+  raw: string | null = typeof window === 'undefined'
+    ? null
+    : window.localStorage.getItem(PWA_INSTALL_DISMISS_KEY),
+): boolean {
+  if (!raw) return false
+  const ts = Number(raw)
+  if (!Number.isFinite(ts) || ts <= 0) return false
+  return now - ts < PWA_INSTALL_DISMISS_MS
+}
+
+export function dismissInstallHint(now = Date.now()): void {
+  try {
+    window.localStorage.setItem(PWA_INSTALL_DISMISS_KEY, String(now))
+  } catch {
+    /* private mode */
+  }
+  emitInstallChange()
+}
+
+export function clearInstallDismiss(): void {
+  try {
+    window.localStorage.removeItem(PWA_INSTALL_DISMISS_KEY)
+  } catch {
+    /* ignore */
+  }
+  emitInstallChange()
+}
+
+export function shouldShowInstallHint(options?: {
+  standalone?: boolean
+  dismissed?: boolean
+  usageEligible?: boolean
+  pathname?: string
+}): boolean {
+  const standalone = options?.standalone ?? isStandaloneDisplay()
+  const dismissed = options?.dismissed ?? isInstallDismissed()
+  const usageEligible = options?.usageEligible ?? isUsageEligible()
+  const pathname =
+    options?.pathname ?? (typeof window === 'undefined' ? '' : window.location.pathname)
+  if (standalone || dismissed || !usageEligible) return false
+  return shouldCountInstallUsage(pathname)
+}
+
+export function shouldDeferSwReload(pathname: string): boolean {
+  return pathname.startsWith('/book/') || pathname === '/studio' || pathname.startsWith('/studio/')
+}
+
+export function applyDisplayModeClass(el: HTMLElement = document.documentElement): void {
+  const standalone = isStandaloneDisplay()
+  el.dataset.displayMode = standalone ? 'standalone' : 'browser'
+  el.classList.toggle('pwa-standalone', standalone)
+}
+
+export function setDeferredInstallPrompt(event: BeforeInstallPromptEvent | null): void {
+  deferredPrompt = event
+  emitInstallChange()
+}
+
+export function getDeferredInstallPrompt(): BeforeInstallPromptEvent | null {
+  return deferredPrompt
+}
+
+export async function promptPwaInstall(): Promise<'accepted' | 'dismissed' | 'unavailable'> {
+  const event = deferredPrompt
+  if (!event) return 'unavailable'
+  deferredPrompt = null
+  emitInstallChange()
+  try {
+    await event.prompt()
+    const choice = await event.userChoice
+    if (choice.outcome === 'accepted') {
+      dismissInstallHint()
+      void requestPersistentStorage()
+    }
+    return choice.outcome
+  } catch {
+    return 'unavailable'
+  }
+}
+
+export function markAppInstalled(): void {
+  deferredPrompt = null
+  dismissInstallHint()
+  void requestPersistentStorage()
+}
+
+export function subscribeInstallState(listener: () => void): () => void {
+  installListeners.add(listener)
+  return () => {
+    installListeners.delete(listener)
+  }
+}
+
+function emitInstallChange() {
+  for (const listener of installListeners) listener()
+}
+
+export function setSwUpdateAvailable(available: boolean): void {
+  if (swUpdateAvailable === available) return
+  swUpdateAvailable = available
+  for (const listener of updateListeners) listener(available)
+}
+
+export function getSwUpdateAvailable(): boolean {
+  return swUpdateAvailable
+}
+
+export function subscribeSwUpdate(listener: (available: boolean) => void): () => void {
+  updateListeners.add(listener)
+  listener(swUpdateAvailable)
+  return () => {
+    updateListeners.delete(listener)
+  }
+}
+
+export function reloadForSwUpdate(): void {
+  window.location.reload()
+}
+
+export async function requestPersistentStorage(): Promise<boolean> {
+  try {
+    if (!('storage' in navigator) || !navigator.storage?.persist) return false
+    return await navigator.storage.persist()
+  } catch {
+    return false
+  }
+}

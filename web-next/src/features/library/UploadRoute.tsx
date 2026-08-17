@@ -18,6 +18,7 @@ import {
   subscribeModelStatus,
   type ModelState,
 } from '@/shared/storage/modelCache'
+import { subscribeLaunchArrival, takeLaunchFiles } from '@/lib/pwaLaunch'
 
 export function UploadRoute() {
   const [file, setFile] = useState<File | null>(null)
@@ -34,6 +35,23 @@ export function UploadRoute() {
   const queryClient = useQueryClient()
 
   useEffect(() => subscribeModelStatus(setModelState), [])
+
+  useEffect(() => {
+    const applyLaunchFiles = () => {
+      const launched = takeLaunchFiles()
+      if (!launched.length) return
+      const next = launched.find((item) => isSupportedBookFile(item))
+      if (next) {
+        setFile(next)
+        setError('')
+        setLastEpubNote('')
+        return
+      }
+      setError(unsupportedBookMessage())
+    }
+    applyLaunchFiles()
+    return subscribeLaunchArrival(applyLaunchFiles)
+  }, [])
 
   async function handleUpload() {
     if (!file) return

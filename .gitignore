@@ -61,6 +61,14 @@ web-next/public/*
 !web-next/public/favicon-64.png
 !web-next/public/favicon.svg
 !web-next/public/apple-touch-icon.png
+!web-next/public/manifest.webmanifest
+!web-next/public/icon-96.png
+!web-next/public/icon-192.png
+!web-next/public/icon-512.png
+!web-next/public/icon-maskable-192.png
+!web-next/public/icon-maskable-512.png
+!web-next/public/screenshot-narrow.png
+!web-next/public/screenshot-wide.png
 .wrangler/
 
 # Stitch design loop outputs

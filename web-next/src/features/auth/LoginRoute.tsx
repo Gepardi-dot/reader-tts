@@ -108,7 +108,13 @@ export function LoginRoute() {
   }
 
   return (
-    <div className="flex min-h-svh items-center justify-center bg-background px-4">
+    <div
+      className="flex min-h-svh items-center justify-center bg-background px-4"
+      style={{
+        paddingTop: 'env(safe-area-inset-top, 0px)',
+        paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+      }}
+    >
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center space-y-4">
           <BrandLogo className="mx-auto h-16 max-w-[min(100%,320px)]" />

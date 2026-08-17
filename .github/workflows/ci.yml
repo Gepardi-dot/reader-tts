@@ -52,6 +52,11 @@ jobs:
         run: npm run assert:sw-policy
         working-directory: web-next
 
+      # Guardrail: installable PWA without Workbox app-shell caching.
+      - name: Assert PWA manifest
+        run: npm run assert:pwa
+        working-directory: web-next
+
       - name: Type-check + build
         run: npm run build
         working-directory: web-next

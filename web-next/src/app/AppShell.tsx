@@ -170,7 +170,13 @@ export function AppShell() {
 
       {/* ── Main area ───────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header className="md:hidden flex items-center h-12 px-4 border-b border-border bg-background/95 backdrop-blur-sm shrink-0 z-10">
+        <header
+          className="md:hidden flex items-center px-4 border-b border-border bg-background/95 backdrop-blur-sm shrink-0 z-10"
+          style={{
+            height: 'calc(48px + env(safe-area-inset-top, 0px))',
+            paddingTop: 'env(safe-area-inset-top, 0px)',
+          }}
+        >
           <BrandLogo className="h-8 max-w-[168px]" />
         </header>
 

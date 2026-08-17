@@ -162,6 +162,18 @@
     display: flex;
     flex-direction: column;
   }
+
+  /* Installed PWA: no rubber-band chrome, notch-safe, app-like taps */
+  html.pwa-standalone,
+  html.pwa-standalone body {
+    overscroll-behavior: none;
+  }
+  html.pwa-standalone {
+    -webkit-tap-highlight-color: transparent;
+  }
+  html.pwa-standalone #root {
+    min-height: 100dvh;
+  }
 }
 
 /* ── Kindle reader prose ────────────────────────────── */

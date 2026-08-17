@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "node --max-http-header-size=65536 node_modules/vite/bin/vite.js",
-    "build": "node scripts/assert-sw-policy.mjs && tsc -b && vite build && node scripts/assert-sw-policy.mjs --dist",
-    "build:vercel": "node scripts/assert-sw-policy.mjs && tsc -b && vite build && node scripts/assert-vercel-api-origin.mjs && node scripts/assert-sw-policy.mjs --dist",
+    "build": "node scripts/assert-sw-policy.mjs && node scripts/assert-pwa.mjs && tsc -b && vite build && node scripts/assert-sw-policy.mjs --dist && node scripts/assert-pwa.mjs --dist",
+    "build:vercel": "node scripts/assert-sw-policy.mjs && node scripts/assert-pwa.mjs && tsc -b && vite build && node scripts/assert-vercel-api-origin.mjs && node scripts/assert-sw-policy.mjs --dist && node scripts/assert-pwa.mjs --dist",
     "assert:api-origin": "node scripts/assert-vercel-api-origin.mjs",
     "assert:sw-policy": "node scripts/assert-sw-policy.mjs",
+    "assert:pwa": "node scripts/assert-pwa.mjs",
     "typecheck": "tsc -b --noEmit",
     "lint": "eslint .",
     "preview": "vite preview",
