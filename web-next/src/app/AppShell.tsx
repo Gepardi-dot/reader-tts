@@ -4,8 +4,8 @@ import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getStoredUser, signOut, subscribeAuth } from '@/lib/auth'
 import { api } from '@/shared/api/client'
+import { BrandLogo } from '@/components/BrandLogo'
 import { cn } from '@/lib/utils'
-import higgsReadLogo from '@/assets/higgsread-logo.png'
 
 interface Book {
   id: string
@@ -30,17 +30,6 @@ const LEARN_NAV = [
   { to: '/vocabulary', Icon: Type,       label: 'Words' },
   { to: '/progress',   Icon: TrendingUp, label: 'Progress' },
 ] as const
-
-function BrandLogo() {
-  return (
-    <img
-      src={higgsReadLogo}
-      alt="HiggsRead"
-      className="h-8 w-auto max-w-[168px] object-contain object-left shrink-0 select-none"
-      draggable={false}
-    />
-  )
-}
 
 export function AppShell() {
   const location = useLocation()
@@ -99,7 +88,7 @@ export function AppShell() {
 
         {/* Brand */}
         <div className="flex items-center px-4 h-14 border-b border-border shrink-0 bg-[#f7f7f5]">
-          <BrandLogo />
+          <BrandLogo className="h-8 max-w-[168px]" />
         </div>
 
         <nav className="flex-1 overflow-y-auto p-2">
@@ -182,7 +171,7 @@ export function AppShell() {
       {/* ── Main area ───────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <header className="md:hidden flex items-center h-12 px-4 border-b border-border bg-background/95 backdrop-blur-sm shrink-0 z-10">
-          <BrandLogo />
+          <BrandLogo className="h-8 max-w-[168px]" />
         </header>
 
         <main className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain">
