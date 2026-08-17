@@ -225,3 +225,20 @@
 .font-reader {
   font-family: "Lora", Georgia, serif;
 }
+
+/* Kindle-like warm paper: fine fiber + a hint of grain. */
+.reader-theme-kindle {
+  background-color: #efe4cf;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220' viewBox='0 0 220 220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E"),
+    repeating-linear-gradient(
+      90deg,
+      rgba(92, 64, 32, 0.018) 0,
+      rgba(92, 64, 32, 0.018) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    linear-gradient(180deg, #f4ead6 0%, #efe4cf 48%, #ead9ba 100%);
+  background-size: 220px 220px, 4px 100%, 100% 100%;
+  background-blend-mode: soft-light, multiply, normal;
+}
