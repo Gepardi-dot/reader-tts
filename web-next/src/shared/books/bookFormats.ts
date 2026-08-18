@@ -129,6 +129,23 @@ export function bookAcceptAttribute() {
   return [...parts].join(',')
 }
 
+/** iOS mixes MIME types into the photo picker; extensions-only opens Files. */
+export function bookFileInputAccept() {
+  if (typeof navigator !== 'undefined') {
+    const ua = navigator.userAgent
+    const ios = /iphone|ipad|ipod/i.test(ua)
+      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+    if (ios) {
+      const parts = new Set<string>()
+      for (const meta of BOOK_FORMATS) {
+        for (const ext of meta.extensions) parts.add(`.${ext}`)
+      }
+      return [...parts].join(',')
+    }
+  }
+  return bookAcceptAttribute()
+}
+
 /** Short UI helper under the drop zone. */
 export function bookFormatsHelpText() {
   return 'PDF, EPUB, DOCX, ODT, RTF, FB2, HTML, Markdown, TXT, CSV, JSON…'

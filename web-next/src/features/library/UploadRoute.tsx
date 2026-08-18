@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import {
   AuthError,
-  BOOK_ACCEPT,
+  bookFileInputAccept,
   bookFormatsHelpText,
   isSupportedBookFile,
   unsupportedBookMessage,
@@ -27,8 +27,6 @@ export function UploadRoute() {
   const [progressMessage, setProgressMessage] = useState('')
   const [progressValue, setProgressValue] = useState(0)
   const [drag, setDrag] = useState(false)
-  const [downloadEpub, setDownloadEpub] = useState(true)
-  const [lastEpubNote, setLastEpubNote] = useState('')
   const [modelState, setModelState] = useState<ModelState>(() => getModelStatus())
   const inputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
@@ -44,7 +42,6 @@ export function UploadRoute() {
       if (next) {
         setFile(next)
         setError('')
-        setLastEpubNote('')
         return
       }
       setError(unsupportedBookMessage())
@@ -57,25 +54,16 @@ export function UploadRoute() {
     if (!file) return
     setUploading(true)
     setError('')
-    setLastEpubNote('')
     setProgressMessage('Converting to EPUB...')
     setProgressValue(0)
     try {
-      const { book, epub } = await uploadBook(file, null, {
+      const { book } = await uploadBook(file, null, {
         convertToEpub: true,
-        downloadEpub,
         onProgress: (progress) => {
           setProgressMessage(progress.message)
           setProgressValue(progress.progress)
         },
       })
-      if (epub) {
-        setLastEpubNote(
-          downloadEpub
-            ? `Converted to ${epub.fileName} (${epub.chapterCount} chapters) and downloaded.`
-            : `Normalized as EPUB (${epub.chapterCount} chapters) for reading.`,
-        )
-      }
       queryClient.setQueryData<unknown[]>(['books'], (current) => {
         const items = Array.isArray(current) ? current : []
         return [book, ...items.filter((item) => {
@@ -116,7 +104,6 @@ export function UploadRoute() {
     if (isSupportedBookFile(dropped)) {
       setFile(dropped)
       setError('')
-      setLastEpubNote('')
     } else {
       setError(unsupportedBookMessage())
     }
@@ -167,7 +154,7 @@ export function UploadRoute() {
       <input
         ref={inputRef}
         type="file"
-        accept={BOOK_ACCEPT}
+        accept={bookFileInputAccept()}
         className="sr-only"
         onChange={(e) => {
           const selected = e.target.files?.[0] ?? null
@@ -178,7 +165,6 @@ export function UploadRoute() {
           if (isSupportedBookFile(selected)) {
             setFile(selected)
             setError('')
-            setLastEpubNote('')
           } else {
             setFile(null)
             setError(unsupportedBookMessage())
@@ -186,24 +172,7 @@ export function UploadRoute() {
         }}
       />
 
-      <label className="mt-4 flex items-start gap-2 text-sm text-muted-foreground cursor-pointer select-none">
-        <input
-          type="checkbox"
-          className="mt-0.5"
-          checked={downloadEpub}
-          onChange={(e) => setDownloadEpub(e.target.checked)}
-          disabled={uploading}
-        />
-        <span>
-          Also download the converted <span className="text-foreground">.epub</span> file
-          (portable copy for other readers)
-        </span>
-      </label>
-
       {error && <p className="text-sm text-destructive mt-3">{error}</p>}
-      {lastEpubNote && !error && (
-        <p className="text-sm text-muted-foreground mt-3">{lastEpubNote}</p>
-      )}
 
       <div className="mt-4 flex gap-3">
         <Button

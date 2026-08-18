@@ -1,3 +1,4 @@
+import { createAudioContext } from '@/lib/browser'
 import { audioBufferScheduledEndTime, audioBufferSourceStartTime } from '../audioPlayback'
 
 export interface ClockUnitMeta {
@@ -109,7 +110,7 @@ export class AudioClock {
 
   ensureContext() {
     if (!this.ctx || this.ctx.state === 'closed') {
-      this.ctx = new AudioContext()
+      this.ctx = createAudioContext()
       this.activeUnitId = null
     }
     return this.ctx

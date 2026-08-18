@@ -5,7 +5,7 @@ import {
   normalizeText,
   rtfToText,
 } from './textConverters'
-import { isSupportedBookFile, resolveBookFormat } from './bookFormats'
+import { bookAcceptAttribute, bookFileInputAccept, isSupportedBookFile, resolveBookFormat } from './bookFormats'
 
 describe('normalizeText', () => {
   it('collapses excess blank lines and spaces', () => {
@@ -58,5 +58,21 @@ describe('bookFormats', () => {
     expect(isSupportedBookFile(new File(['x'], 'book.mobi'))).toBe(false)
     expect(isSupportedBookFile(new File(['x'], 'scan.png'))).toBe(false)
     expect(isSupportedBookFile(new File(['x'], 'old.doc'))).toBe(false)
+  })
+
+  it('uses extension-only accept on iOS so Safari opens Files, not Photos', () => {
+    const original = navigator.userAgent
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+    })
+    try {
+      const accept = bookFileInputAccept()
+      expect(accept).toMatch(/\.pdf/)
+      expect(accept).not.toMatch(/application\/pdf/)
+    } finally {
+      Object.defineProperty(navigator, 'userAgent', { configurable: true, value: original })
+    }
+    expect(bookAcceptAttribute()).toMatch(/application\/pdf/)
   })
 })

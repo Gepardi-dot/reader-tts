@@ -3,6 +3,7 @@ import {
   resolveBookFormat,
   type BookFormatKind,
 } from '@/shared/books/bookFormats'
+import { isAppleWebKit, newBrowserId, readFileBuffer } from '@/lib/browser'
 import {
   describePdfError,
   isPdfInfrastructureError,
@@ -46,7 +47,7 @@ type PdfWorkerResponse =
 const PDF_WORKER_READY_MS = 20_000
 
 function newPdfJobId() {
-  return globalThis.crypto?.randomUUID?.() ?? `pdf-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return newBrowserId()
 }
 
 function waitForPdfWorkerReady(worker: Worker) {
@@ -163,8 +164,17 @@ async function extractPdfWithWorker(
 
 async function extractPdf(file: File, options: ExtractBookOptions) {
   emit(options, { phase: 'reading', progress: 1, message: 'Reading PDF...' })
-  const buffer = await file.arrayBuffer()
+  const buffer = await readFileBuffer(file)
   emit(options, { phase: 'extracting', progress: 2, message: 'Extracting PDF text...' })
+
+  // Safari / iOS: module workers are flaky and cannot nest pdf.js workers.
+  if (isAppleWebKit()) {
+    try {
+      return await extractPdfOnMainThread(buffer, options)
+    } catch (error) {
+      throw new Error(describePdfError(error))
+    }
+  }
 
   try {
     return await extractPdfWithWorker(buffer, options)

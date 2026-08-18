@@ -89,6 +89,7 @@ export async function requestBlob(
 
 export {
   bookAcceptAttribute as BOOK_ACCEPT_LIST,
+  bookFileInputAccept,
   bookFormatsHelpText,
   isSupportedBookFile,
   unsupportedBookMessage,
@@ -150,8 +151,6 @@ interface UploadBookOptions {
    * Set false only for tests that need the raw extractor.
    */
   convertToEpub?: boolean
-  /** If true, trigger a browser download of the generated .epub */
-  downloadEpub?: boolean
 }
 
 export interface UploadBookResult {
@@ -198,7 +197,6 @@ export async function uploadBook(
 
   if (convert) {
     const { convertFileToEpub } = await import('@/shared/books/convertToEpub')
-    const { downloadBlob } = await import('@/shared/books/epubBuilder')
     const result = await convertFileToEpub(file, {
       title,
       onProgress: options.onProgress,
@@ -208,9 +206,6 @@ export async function uploadBook(
       fileName: result.epub.fileName,
       chapterCount: result.epub.chapterCount,
       blob: result.epub.blob,
-    }
-    if (options.downloadEpub) {
-      downloadBlob(result.epub.blob, result.epub.fileName)
     }
   } else {
     const { extractBookText } = await import('@/shared/books/extractBookText')

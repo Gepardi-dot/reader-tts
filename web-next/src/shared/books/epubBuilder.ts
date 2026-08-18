@@ -89,7 +89,7 @@ export async function buildEpub(input: BuildEpubInput): Promise<BuiltEpub> {
     ? input.chapters
     : [{ id: 'ch-1', title: title, text: '' }]
 
-  const bookId = `urn:uuid:${crypto.randomUUID()}`
+  const bookId = `urn:uuid:${globalThis.crypto?.randomUUID?.() ?? `book-${Date.now().toString(16)}`}`
   const zip = new JSZip()
 
   // mimetype must be first and uncompressed for strict EPUB readers

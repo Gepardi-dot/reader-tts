@@ -1,3 +1,4 @@
+import { createAudioContext } from '@/lib/browser'
 import { audioBufferScheduledEndTime, audioBufferSourceStartTime, tapOffsetSeekSeconds } from '../audioPlayback'
 import type { TtsAudioChunk } from './types'
 
@@ -45,7 +46,7 @@ export class ClockedAudioSink {
 
   ensureContext() {
     if (!this.ctx || this.ctx.state === 'closed') {
-      this.ctx = new AudioContext()
+      this.ctx = createAudioContext()
       this.activeIndex = null
     }
     return this.ctx

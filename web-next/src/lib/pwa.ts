@@ -6,6 +6,8 @@
  * and when a worker update should wait until the reader is idle.
  */
 
+import { isIosWebKit as isIosDevice, isMacSafari } from './browser'
+
 export const PWA_INSTALL_DISMISS_KEY = 'higgsread-pwa-install-dismissed'
 export const PWA_INSTALL_DISMISS_MS = 14 * 24 * 60 * 60 * 1000
 export const PWA_USAGE_MS_KEY = 'higgsread-pwa-usage-ms'
@@ -48,31 +50,12 @@ export function isStandaloneDisplay(win: Window = window): boolean {
   )
 }
 
-export function isIosDevice(
-  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
-  maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints,
-  platform = typeof navigator === 'undefined' ? '' : navigator.platform,
-): boolean {
-  if (/iphone|ipad|ipod/i.test(userAgent)) return true
-  return platform === 'MacIntel' && maxTouchPoints > 1
-}
+export { isIosDevice, isMacSafari }
 
 export function isAndroidDevice(
   userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
 ): boolean {
   return /android/i.test(userAgent)
-}
-
-export function isMacSafari(
-  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
-  maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints,
-  platform = typeof navigator === 'undefined' ? '' : navigator.platform,
-): boolean {
-  if (isIosDevice(userAgent, maxTouchPoints, platform)) return false
-  const ua = userAgent.toLowerCase()
-  const mac = /macintosh|mac os x/.test(ua) || platform === 'MacIntel'
-  const safari = /safari/.test(ua) && !/chrome|chromium|crios|edg|fxios|android/.test(ua)
-  return mac && safari
 }
 
 export function adoptCapturedInstallPrompt(): BeforeInstallPromptEvent | null {
