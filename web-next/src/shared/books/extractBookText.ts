@@ -4,6 +4,10 @@ import {
   type BookFormatKind,
 } from '@/shared/books/bookFormats'
 import {
+  describePdfError,
+  isPdfInfrastructureError,
+} from '@/shared/books/pdfCompat'
+import {
   estimatePages,
   htmlToText,
   jsonToText,
@@ -34,9 +38,43 @@ interface ExtractBookOptions {
 }
 
 type PdfWorkerResponse =
+  | { type: 'ready' }
   | { id: string; type: 'progress'; progress: number; pageNumber: number; totalPages: number }
   | { id: string; type: 'complete'; text: string; pageCount: number; cover?: ArrayBuffer; coverType?: string }
   | { id: string; type: 'error'; message: string }
+
+const PDF_WORKER_READY_MS = 20_000
+
+function newPdfJobId() {
+  return globalThis.crypto?.randomUUID?.() ?? `pdf-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function waitForPdfWorkerReady(worker: Worker) {
+  return new Promise<void>((resolve, reject) => {
+    const timer = globalThis.setTimeout(() => {
+      cleanup()
+      reject(new Error('PDF worker failed to start'))
+    }, PDF_WORKER_READY_MS)
+
+    const onMessage = (event: MessageEvent<PdfWorkerResponse>) => {
+      if (event.data?.type !== 'ready') return
+      cleanup()
+      resolve()
+    }
+    const onError = (event: ErrorEvent) => {
+      cleanup()
+      reject(new Error(event.message || 'PDF worker failed to start'))
+    }
+    const cleanup = () => {
+      globalThis.clearTimeout(timer)
+      worker.removeEventListener('message', onMessage)
+      worker.removeEventListener('error', onError)
+    }
+
+    worker.addEventListener('message', onMessage)
+    worker.addEventListener('error', onError)
+  })
+}
 
 function titleFromFileName(fileName: string) {
   return fileName.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'Untitled book'
@@ -46,22 +84,47 @@ function emit(options: ExtractBookOptions, progress: BookExtractionProgress) {
   options.onProgress?.(progress)
 }
 
-async function extractPdf(file: File, options: ExtractBookOptions) {
-  const id = crypto.randomUUID()
+async function extractPdfOnMainThread(
+  buffer: ArrayBuffer,
+  options: ExtractBookOptions,
+) {
+  const { extractPdfDocument } = await import('@/shared/books/extractPdfDocument')
+  const result = await extractPdfDocument(buffer, ({ pageNumber, totalPages }) => {
+    emit(options, {
+      phase: 'extracting',
+      progress: Math.max(2, Math.round((pageNumber / totalPages) * 100)),
+      message: `Extracting page ${pageNumber} of ${totalPages}...`,
+    })
+  })
+  return {
+    text: result.text,
+    pageCount: result.pageCount,
+    cover: result.cover
+      ? new Blob([result.cover], { type: result.coverType || 'image/jpeg' })
+      : undefined,
+  }
+}
+
+async function extractPdfWithWorker(
+  buffer: ArrayBuffer,
+  options: ExtractBookOptions,
+) {
+  if (typeof Worker === 'undefined') {
+    throw new Error('PDF worker failed to start')
+  }
+
+  const id = newPdfJobId()
   const worker = new Worker(new URL('../../workers/pdfTextWorker.ts', import.meta.url), {
     type: 'module',
     name: 'pdf-text-extractor',
   })
 
   try {
-    emit(options, { phase: 'reading', progress: 1, message: 'Reading PDF...' })
-    const buffer = await file.arrayBuffer()
-    emit(options, { phase: 'extracting', progress: 2, message: 'Extracting PDF text...' })
-
+    await waitForPdfWorkerReady(worker)
     return await new Promise<{ text: string; pageCount: number; cover?: Blob }>((resolve, reject) => {
-      worker.addEventListener('message', (event: MessageEvent<PdfWorkerResponse>) => {
+      const onMessage = (event: MessageEvent<PdfWorkerResponse>) => {
         const message = event.data
-        if (!message || message.id !== id) return
+        if (!message || !('id' in message) || message.id !== id) return
         if (message.type === 'progress') {
           emit(options, {
             phase: 'extracting',
@@ -81,16 +144,39 @@ async function extractPdf(file: File, options: ExtractBookOptions) {
           return
         }
         reject(new Error(message.message))
-      })
-
-      worker.addEventListener('error', (event) => {
-        reject(new Error(event.message || 'PDF extraction worker failed.'))
+      }
+      const onError = (event: ErrorEvent) => {
+        reject(new Error(event.message || 'PDF worker failed to start'))
+      }
+      worker.addEventListener('message', onMessage)
+      worker.addEventListener('error', onError)
+      worker.addEventListener('messageerror', () => {
+        reject(new Error('PDF worker failed to start'))
       }, { once: true })
-
-      worker.postMessage({ id, buffer }, [buffer])
+      // Copy, don't transfer — a detached buffer cannot be retried on the main thread.
+      worker.postMessage({ id, buffer: buffer.slice(0) })
     })
   } finally {
     worker.terminate()
+  }
+}
+
+async function extractPdf(file: File, options: ExtractBookOptions) {
+  emit(options, { phase: 'reading', progress: 1, message: 'Reading PDF...' })
+  const buffer = await file.arrayBuffer()
+  emit(options, { phase: 'extracting', progress: 2, message: 'Extracting PDF text...' })
+
+  try {
+    return await extractPdfWithWorker(buffer, options)
+  } catch (workerError) {
+    if (!isPdfInfrastructureError(workerError)) {
+      throw new Error(describePdfError(workerError))
+    }
+    try {
+      return await extractPdfOnMainThread(buffer, options)
+    } catch (mainError) {
+      throw new Error(describePdfError(mainError))
+    }
   }
 }
 

@@ -94,6 +94,11 @@ export function UploadRoute() {
       }
       if (e instanceof TypeError && /fetch/i.test(e.message)) {
         setError('API is unreachable. Check the Cloudflare Worker or local Worker dev server and try again.')
+      } else if (e instanceof TypeError && /undefined is not a function/i.test(e.message)) {
+        setError(
+          'This browser could not convert the file. Update Safari or Chrome, '
+          + 'or export it as EPUB/TXT and upload that instead.',
+        )
       } else {
         setError(e instanceof Error ? e.message : 'Upload failed')
       }
