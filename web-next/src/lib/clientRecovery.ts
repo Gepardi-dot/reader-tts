@@ -123,11 +123,34 @@ function stripMigrationParams() {
 }
 
 /**
+ * Run `task` after `load`, or immediately if `load` already fired.
+ *
+ * Callers that `await` first must use this — `addEventListener('load')` after
+ * an await never runs when the page is already complete, which left the sidecar
+ * SW unregistered on first visits and blocked Chromium's install prompt.
+ */
+export function runWhenWindowLoaded(
+  task: () => void,
+  doc: { readyState: DocumentReadyState } = document,
+  onLoad: (fn: () => void) => void = (fn) => window.addEventListener('load', fn, { once: true }),
+): void {
+  if (doc.readyState === 'complete') {
+    task()
+    return
+  }
+  onLoad(task)
+}
+
+/**
  * Register SW for model/cover caching only. Updates aggressively; reloads only
  * when an *existing* controlling worker is replaced (not on first install).
+ *
+ * Registered in production *and* local preview. The sidecar worker never
+ * intercepts HTML/JS/CSS, so Vite HMR still reaches the page. Chromium on
+ * Windows/macOS will not fire `beforeinstallprompt` without an active worker.
  */
 export function registerServiceWorkerWithUpdate(): void {
-  if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return
+  if (import.meta.env.MODE === 'test' || !('serviceWorker' in navigator)) return
 
   void (async () => {
     try {
@@ -145,7 +168,7 @@ export function registerServiceWorkerWithUpdate(): void {
       /* ignore */
     }
 
-    window.addEventListener('load', () => {
+    runWhenWindowLoaded(() => {
       void (async () => {
         try {
           // Only reload when replacing an already-active controller (update path).
@@ -153,6 +176,7 @@ export function registerServiceWorkerWithUpdate(): void {
           const hadController = Boolean(navigator.serviceWorker.controller)
 
           const reg = await navigator.serviceWorker.register('/sw.js', {
+            scope: '/',
             updateViaCache: 'none',
           })
           await reg.update().catch(() => undefined)

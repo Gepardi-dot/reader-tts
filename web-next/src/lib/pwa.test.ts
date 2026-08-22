@@ -3,6 +3,7 @@ import {
   PWA_INSTALL_AFTER_MS,
   addUsageMs,
   canOneClickInstall,
+  detectInstalledRelatedApp,
   getInstallSurface,
   installCtaLabel,
   isAndroidDevice,
@@ -11,9 +12,14 @@ import {
   isMacSafari,
   isStandaloneDisplay,
   isUsageEligible,
+  promptPwaInstall,
+  setDeferredInstallPrompt,
   shouldCountInstallUsage,
   shouldDeferSwReload,
   shouldShowInstallHint,
+  supportsInstallElement,
+  supportsWebInstallApi,
+  type BeforeInstallPromptEvent,
 } from './pwa'
 
 describe('isStandaloneDisplay', () => {
@@ -146,6 +152,46 @@ describe('install surface', () => {
 
   it('does not claim a one-click prompt without a captured event', () => {
     expect(canOneClickInstall()).toBe(false)
+  })
+
+  it('detects navigator.install and the HTML install element', () => {
+    expect(supportsWebInstallApi({ install: async () => undefined })).toBe(true)
+    expect(supportsWebInstallApi({})).toBe(false)
+    expect(supportsInstallElement(undefined)).toBe(false)
+  })
+})
+
+describe('promptPwaInstall', () => {
+  it('calls prompt() on the captured event without dropping it first', async () => {
+    const calls: string[] = []
+    const event = {
+      prompt: async () => {
+        calls.push('prompt')
+      },
+      userChoice: Promise.resolve({ outcome: 'accepted' as const }),
+    } as BeforeInstallPromptEvent
+    setDeferredInstallPrompt(event)
+    const outcome = await promptPwaInstall()
+    expect(calls).toEqual(['prompt'])
+    expect(outcome).toBe('accepted')
+  })
+
+  it('returns unavailable when Chromium has no install API', async () => {
+    setDeferredInstallPrompt(null)
+    expect(await promptPwaInstall()).toBe('unavailable')
+  })
+})
+
+describe('detectInstalledRelatedApp', () => {
+  it('is false without the related-apps API', async () => {
+    expect(await detectInstalledRelatedApp({} as Navigator)).toBe(false)
+  })
+
+  it('is true when Chrome reports this web app as installed', async () => {
+    const nav = {
+      getInstalledRelatedApps: async () => [{ platform: 'webapp', url: '/manifest.webmanifest' }],
+    } as unknown as Navigator
+    expect(await detectInstalledRelatedApp(nav)).toBe(true)
   })
 })
 

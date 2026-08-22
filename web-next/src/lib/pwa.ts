@@ -67,9 +67,24 @@ export function adoptCapturedInstallPrompt(): BeforeInstallPromptEvent | null {
   return deferredPrompt
 }
 
+export function supportsWebInstallApi(
+  nav: { install?: Navigator['install'] } | null | undefined = typeof navigator === 'undefined'
+    ? undefined
+    : navigator,
+): boolean {
+  return typeof nav?.install === 'function'
+}
+
+export function supportsInstallElement(
+  win: Window | undefined = typeof window === 'undefined' ? undefined : window,
+): boolean {
+  return Boolean(win && 'HTMLInstallElement' in win)
+}
+
 export function canOneClickInstall(): boolean {
   if (adoptCapturedInstallPrompt()) return true
-  return typeof navigator !== 'undefined' && typeof navigator.install === 'function'
+  if (supportsWebInstallApi()) return true
+  return supportsInstallElement()
 }
 
 export function getInstallSurface(options?: {
@@ -260,35 +275,57 @@ export function installCtaLabel(_surface?: InstallSurface): string {
 export async function promptPwaInstall(): Promise<'accepted' | 'dismissed' | 'unavailable'> {
   const event = adoptCapturedInstallPrompt()
   if (event) {
-    deferredPrompt = null
-    if (typeof window !== 'undefined' && window.__higgsPwa) {
-      window.__higgsPwa.promptEvent = null
-    }
-    emitInstallChange()
     try {
+      // Keep the event until Chrome accepts the prompt. Clearing it first made
+      // retries impossible, and emitInstallChange() re-rendered the banner
+      // before prompt() ran on a user gesture.
       await event.prompt()
       const choice = await event.userChoice
       if (choice.outcome === 'accepted') {
-        dismissInstallHint()
-        void requestPersistentStorage()
+        markAppInstalled()
+      } else {
+        deferredPrompt = null
+        if (typeof window !== 'undefined' && window.__higgsPwa) {
+          window.__higgsPwa.promptEvent = null
+        }
+        emitInstallChange()
       }
       return choice.outcome
     } catch {
-      // Fall through to navigator.install() when the stored event is stale.
+      // Event is stale (already used, or the tab sat too long). Do not call
+      // navigator.install() here — the user gesture is gone after this await.
     }
-  }
-
-  if (typeof navigator !== 'undefined' && typeof navigator.install === 'function') {
-    try {
-      await navigator.install()
-      markAppInstalled()
-      return 'accepted'
-    } catch {
-      return 'dismissed'
+  } else {
+    const installFn = typeof navigator === 'undefined' ? undefined : navigator.install
+    if (typeof installFn === 'function') {
+      try {
+        await installFn.call(navigator)
+        markAppInstalled()
+        return 'accepted'
+      } catch {
+        return 'dismissed'
+      }
     }
   }
 
   return 'unavailable'
+}
+
+export async function detectInstalledRelatedApp(
+  nav: Navigator | undefined = typeof navigator === 'undefined' ? undefined : navigator,
+): Promise<boolean> {
+  try {
+    const related = nav as
+      | (Navigator & {
+          getInstalledRelatedApps?: () => Promise<Array<{ platform?: string; url?: string }>>
+        })
+      | undefined
+    if (typeof related?.getInstalledRelatedApps !== 'function') return false
+    const apps = await related.getInstalledRelatedApps()
+    return Array.isArray(apps) && apps.length > 0
+  } catch {
+    return false
+  }
 }
 
 export function markAppInstalled(): void {
