@@ -1,15 +1,26 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import {
+  createElement,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react'
 import { useLocation } from 'react-router-dom'
 import { X } from 'lucide-react'
 import {
   canOneClickInstall,
+  detectInstalledRelatedApp,
   dismissInstallHint,
+  getDeferredInstallPrompt,
   getInstallSurface,
   installCtaLabel,
   isStandaloneDisplay,
+  markAppInstalled,
   promptPwaInstall,
   shouldShowInstallHint,
   subscribeInstallState,
+  supportsInstallElement,
   type InstallSurface,
 } from '@/lib/pwa'
 
@@ -132,22 +143,58 @@ function guideFor(surface: InstallSurface): ReactNode {
   )
 }
 
+function ChromiumInstallElement({
+  onAccepted,
+  onDismissed,
+}: {
+  onAccepted: () => void
+  onDismissed: () => void
+}) {
+  const ref = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const accepted = () => onAccepted()
+    const dismissed = () => onDismissed()
+    el.addEventListener('promptaction', accepted)
+    el.addEventListener('promptdismiss', dismissed)
+    return () => {
+      el.removeEventListener('promptaction', accepted)
+      el.removeEventListener('promptdismiss', dismissed)
+    }
+  }, [onAccepted, onDismissed])
+  return createElement('install', {
+    ref,
+    className: 'mt-2.5 block h-9 w-full',
+    style: { width: '100%' },
+  })
+}
+
 export function PwaInstallBanner() {
   const { pathname } = useLocation()
   const [visible, setVisible] = useState(() => shouldShowInstallHint({ pathname }))
   const [surface, setSurface] = useState<InstallSurface>(() => getInstallSurface())
   const [oneClick, setOneClick] = useState(() => canOneClickInstall())
-  const [busy, setBusy] = useState(false)
   const [showGuide, setShowGuide] = useState(false)
+  const [nativeInstall, setNativeInstall] = useState(
+    () => supportsInstallElement() && !getDeferredInstallPrompt(),
+  )
 
   useEffect(() => {
     const sync = () => {
       setSurface(getInstallSurface())
       setOneClick(canOneClickInstall())
+      setNativeInstall(supportsInstallElement() && !getDeferredInstallPrompt())
       setVisible(shouldShowInstallHint({ pathname }))
     }
     sync()
-    return subscribeInstallState(sync)
+    const unsubscribe = subscribeInstallState(sync)
+    void detectInstalledRelatedApp().then((installed) => {
+      if (!installed) return
+      markAppInstalled()
+      setVisible(false)
+    })
+    return unsubscribe
   }, [pathname])
 
   if (!visible || isStandaloneDisplay()) return null
@@ -155,18 +202,15 @@ export function PwaInstallBanner() {
   const copy = copyFor(surface)
 
   async function onInstall() {
-    setBusy(true)
-    try {
-      const outcome = await promptPwaInstall()
-      if (outcome === 'accepted') {
-        setVisible(false)
-        return
-      }
-      if (outcome === 'unavailable') setShowGuide(true)
-      setVisible(shouldShowInstallHint({ pathname }))
-    } finally {
-      setBusy(false)
+    // prompt() / navigator.install() must run in this click turn. Don't await
+    // anything else first or Chromium drops the user gesture on Win/macOS.
+    const outcome = await promptPwaInstall()
+    if (outcome === 'accepted') {
+      setVisible(false)
+      return
     }
+    if (outcome === 'unavailable') setShowGuide(true)
+    setVisible(shouldShowInstallHint({ pathname }))
   }
 
   function onDismiss() {
@@ -191,14 +235,23 @@ export function PwaInstallBanner() {
           <X size={15} />
         </button>
       </div>
-      <button
-        type="button"
-        onClick={() => void onInstall()}
-        disabled={busy}
-        className="mt-2.5 h-9 w-full rounded-lg bg-[#37352f] text-[13px] font-medium text-[#f7f7f5] transition-opacity hover:opacity-90 disabled:opacity-60"
-      >
-        {busy ? 'Opening…' : copy.action}
-      </button>
+      {nativeInstall ? (
+        <ChromiumInstallElement
+          onAccepted={() => {
+            markAppInstalled()
+            setVisible(false)
+          }}
+          onDismissed={() => setShowGuide(true)}
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => void onInstall()}
+          className="mt-2.5 h-9 w-full rounded-lg bg-[#37352f] text-[13px] font-medium text-[#f7f7f5] transition-opacity hover:opacity-90"
+        >
+          {copy.action}
+        </button>
+      )}
     </div>
   )
 }

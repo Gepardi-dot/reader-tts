@@ -62,6 +62,9 @@ async function assertManifest(relPath) {
   if (manifest.display !== 'standalone') {
     fail(relPath, 'display must be standalone')
   }
+  if ((manifest.display_override ?? []).includes('browser')) {
+    fail(relPath, 'display_override must not include browser (Chromium treats that as not installable)')
+  }
   if (manifest.start_url !== '/' || manifest.scope !== '/') {
     fail(relPath, 'start_url and scope must be / (never a cached login URL)')
   }
