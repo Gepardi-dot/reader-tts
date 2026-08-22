@@ -3,6 +3,7 @@ import {
   clampPageIndex,
   normalizeReaderLayout,
   pageBreaksFromLineBoxes,
+  pageClipRange,
   pageIndexForOffset,
   pageIndexForY,
 } from './readerLayout'
@@ -21,7 +22,7 @@ describe('normalizeReaderLayout', () => {
 
 describe('pageBreaksFromLineBoxes', () => {
   it('returns a single empty page when there are no lines', () => {
-    expect(pageBreaksFromLineBoxes([], 400)).toEqual([{ top: 0, startOffset: 0 }])
+    expect(pageBreaksFromLineBoxes([], 400)).toEqual([{ top: 0, bottom: 400, startOffset: 0 }])
   })
 
   it('keeps a short chapter on one page', () => {
@@ -30,7 +31,7 @@ describe('pageBreaksFromLineBoxes', () => {
       { top: 24, bottom: 44, startOffset: 40 },
       { top: 48, bottom: 68, startOffset: 80 },
     ], 400)
-    expect(pages).toEqual([{ top: 0, startOffset: 0 }])
+    expect(pages).toEqual([{ top: 0, bottom: 68, startOffset: 0 }])
   })
 
   it('starts the next page at the first line that no longer fits', () => {
@@ -41,8 +42,8 @@ describe('pageBreaksFromLineBoxes', () => {
       { top: 300, bottom: 390, startOffset: 600 },
     ], 200)
     expect(pages).toEqual([
-      { top: 0, startOffset: 0 },
-      { top: 200, startOffset: 400 },
+      { top: 0, bottom: 200, startOffset: 0 },
+      { top: 200, bottom: 390, startOffset: 400 },
     ])
   })
 
@@ -52,17 +53,17 @@ describe('pageBreaksFromLineBoxes', () => {
       { top: 520, bottom: 540, startOffset: 80 },
     ], 200)
     expect(pages).toEqual([
-      { top: 0, startOffset: 0 },
-      { top: 520, startOffset: 80 },
+      { top: 0, bottom: 520, startOffset: 0 },
+      { top: 520, bottom: 540, startOffset: 80 },
     ])
   })
 })
 
 describe('page lookup', () => {
   const pages = [
-    { top: 0, startOffset: 0 },
-    { top: 400, startOffset: 900 },
-    { top: 800, startOffset: 1800 },
+    { top: 0, bottom: 400, startOffset: 0 },
+    { top: 400, bottom: 800, startOffset: 900 },
+    { top: 800, bottom: 1200, startOffset: 1800 },
   ]
 
   it('maps a spoken Y into the page that contains it', () => {
@@ -85,5 +86,22 @@ describe('page lookup', () => {
     expect(clampPageIndex(3, 12)).toBe(3)
     expect(clampPageIndex(40, 12)).toBe(11)
     expect(clampPageIndex(2, 0)).toBe(0)
+  })
+})
+
+describe('pageClipRange', () => {
+  const pages = [
+    { top: 0, bottom: 400 },
+    { top: 400, bottom: 720 },
+    { top: 720, bottom: 880 },
+  ]
+
+  it('clips each page to the start of the next so later text stays hidden', () => {
+    expect(pageClipRange(pages, 0, 500)).toEqual({ top: 0, bottom: 400 })
+    expect(pageClipRange(pages, 1, 500)).toEqual({ top: 400, bottom: 720 })
+  })
+
+  it('uses the stored bottom for the last page', () => {
+    expect(pageClipRange(pages, 2, 500)).toEqual({ top: 720, bottom: 880 })
   })
 })

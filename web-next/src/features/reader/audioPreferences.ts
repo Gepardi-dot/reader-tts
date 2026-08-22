@@ -49,22 +49,26 @@ function normalizeProviderId(value: unknown): string {
   return DEFAULT_TTS_PROVIDER_ID
 }
 
+export function normalizeAudioPrefs(raw: unknown): AudioPrefs {
+  const parsed = raw && typeof raw === 'object' ? raw as Partial<AudioPrefs> : {}
+  const provider = normalizeProviderId(parsed.provider)
+  const voicesByProvider = normalizedVoiceMap(parsed.voicesByProvider)
+  const voice = normalizedVoice(parsed.voice)
+  if (voice) voicesByProvider[provider] = voice
+
+  return {
+    provider,
+    voice: voicesByProvider[provider] ?? voice,
+    voicesByProvider,
+    version: AUDIO_PREFS_VERSION,
+  }
+}
+
 export function loadAudioPrefs(): AudioPrefs {
   try {
     const raw = storage()?.getItem(AUDIO_PREFS_KEY)
     if (!raw) return { ...DEFAULT_AUDIO_PREFS }
-    const parsed = JSON.parse(raw) as Partial<AudioPrefs>
-    const provider = normalizeProviderId(parsed.provider)
-    const voicesByProvider = normalizedVoiceMap(parsed.voicesByProvider)
-    const voice = normalizedVoice(parsed.voice)
-    if (voice) voicesByProvider[provider] = voice
-
-    return {
-      provider,
-      voice: voicesByProvider[provider] ?? voice,
-      voicesByProvider,
-      version: AUDIO_PREFS_VERSION,
-    }
+    return normalizeAudioPrefs(JSON.parse(raw))
   } catch {
     return { ...DEFAULT_AUDIO_PREFS }
   }
