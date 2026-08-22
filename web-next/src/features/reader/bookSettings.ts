@@ -1,4 +1,5 @@
 import {
+  AUDIO_PREFS_KEY,
   loadAudioPrefs,
   normalizeAudioPrefs,
   type AudioPrefs,
@@ -7,6 +8,7 @@ import { normalizeReaderLayout, type ReaderLayout } from './readerLayout'
 
 export const BOOK_SETTINGS_KEY = 'reader-book-settings-v1'
 export const APPEARANCE_KEY = 'reader-appearance'
+export const AUDIO_RATE_KEY = 'reader-audio-rate'
 
 export type BookAppearance = {
   fontSize: number
@@ -78,6 +80,34 @@ export function loadGlobalAppearance(): BookAppearance {
   }
 }
 
+export function saveGlobalAppearance(appearance: BookAppearance): void {
+  storage()?.setItem(APPEARANCE_KEY, JSON.stringify(normalizeAppearance(appearance)))
+}
+
+export function loadGlobalAudioRate(): number {
+  try {
+    const raw = storage()?.getItem(AUDIO_RATE_KEY)
+    if (raw == null || raw === '') return DEFAULT_AUDIO_RATE
+    return clampAudioRate(Number(raw))
+  } catch {
+    return DEFAULT_AUDIO_RATE
+  }
+}
+
+export function saveGlobalAudioRate(rate: number): void {
+  storage()?.setItem(AUDIO_RATE_KEY, String(clampAudioRate(rate)))
+}
+
+/** Wipe local appearance, voice, and per-book reader settings (account deletion). */
+export function clearLocalReaderSettings(): void {
+  const store = storage()
+  if (!store) return
+  store.removeItem(APPEARANCE_KEY)
+  store.removeItem(AUDIO_RATE_KEY)
+  store.removeItem(BOOK_SETTINGS_KEY)
+  store.removeItem(AUDIO_PREFS_KEY)
+}
+
 function readMap(): Record<string, Partial<BookReaderSettings>> {
   try {
     const raw = storage()?.getItem(BOOK_SETTINGS_KEY)
@@ -98,7 +128,7 @@ function seedFromGlobal(): BookReaderSettings {
   return {
     appearance: loadGlobalAppearance(),
     audioPrefs: loadAudioPrefs(),
-    audioRate: DEFAULT_AUDIO_RATE,
+    audioRate: loadGlobalAudioRate(),
   }
 }
 

@@ -55,6 +55,10 @@ interface Env {
   KOKORO_REMOTE_URL?: string
   /** Shared secret matching KOKORO_API_KEY on the Kokoro server. */
   KOKORO_REMOTE_API_KEY?: string
+  /** Optional Resend API key for About → Contact / Report mail. */
+  RESEND_API_KEY?: string
+  /** Operator inbox. Never returned to clients. */
+  SUPPORT_INBOX?: string
 }
 
 interface ExecutionContext {
@@ -96,6 +100,8 @@ const ALLOWED_COVER_HOSTS = new Set([
   'books.googleusercontent.com',
   'lh3.googleusercontent.com',
 ])
+const SUPPORT_INBOX_DEFAULT = 'ari.gepardi@gmail.com'
+const ACTIVE_USERS_FLOOR = 13
 const TELEMETRY_MAX_EVENTS = 20
 const TELEMETRY_MAX_TEXT = 160
 const TELEMETRY_MAX_METADATA_CHARS = 1800
@@ -243,6 +249,8 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   if (path === '/api/providers/test' && request.method === 'POST') return testProvider(request, env, ctx)
   if (path === '/api/telemetry/tts-summary' && request.method === 'GET') return ttsTelemetrySummary(env, user)
   if (path === '/api/telemetry' && request.method === 'POST') return recordTelemetry(request, env, user)
+  if (path === '/api/stats/active-users' && request.method === 'GET') return activeUsersStat(env)
+  if (path === '/api/support' && request.method === 'POST') return submitSupport(request, env, user)
 
   if (path === '/api/books' && request.method === 'GET') return listBooks(env, user)
   if (path === '/api/books' && request.method === 'POST') return createBook(request, env, user)
@@ -479,7 +487,202 @@ async function handleAuth(request: Request, env: Env, path: string) {
     return json({ ok: true })
   }
 
+  if (path === '/api/auth/account' && request.method === 'DELETE') {
+    return deleteUserAccount(request, env)
+  }
+
   throw new ApiError(404, 'Not found')
+}
+
+async function deleteUserAccount(request: Request, env: Env) {
+  const user = await requireUser(request, env)
+  const body = await readJson<{ password?: unknown }>(request)
+  const password = requirePassword(body.password)
+  const row = await env.DB.prepare('SELECT id, email, password_hash FROM users WHERE id = ?')
+    .bind(user.id)
+    .first<{ id: string; email: string; password_hash: string }>()
+  if (!row || !(await verifyPassword(password, row.password_hash))) {
+    throw new ApiError(401, 'Password is incorrect.')
+  }
+
+  const books = await env.DB.prepare('SELECT id FROM books WHERE user_id = ?')
+    .bind(user.id)
+    .all<{ id: string }>()
+  for (const book of books.results ?? []) {
+    await deleteStoredCover(env, user.id, book.id)
+  }
+
+  for (const sql of [
+    'DELETE FROM performance_events WHERE user_id = ?',
+    'DELETE FROM learning_events WHERE user_id = ?',
+  ]) {
+    try {
+      await env.DB.prepare(sql).bind(user.id).run()
+    } catch {
+      // Table may not exist on older databases.
+    }
+  }
+
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM vocabulary_cards WHERE user_id = ?').bind(user.id),
+    env.DB.prepare('DELETE FROM vocabulary_notes WHERE user_id = ?').bind(user.id),
+    env.DB.prepare('DELETE FROM vocabulary_decks WHERE user_id = ?').bind(user.id),
+    env.DB.prepare('DELETE FROM highlights WHERE user_id = ?').bind(user.id),
+    env.DB.prepare('DELETE FROM reader_progress WHERE user_id = ?').bind(user.id),
+    env.DB.prepare('DELETE FROM books WHERE user_id = ?').bind(user.id),
+    env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id),
+    env.DB.prepare('DELETE FROM users WHERE id = ?').bind(user.id),
+  ])
+
+  return json({ ok: true })
+}
+
+async function ensureSupportTables(env: Env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS app_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`,
+  ).run()
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS support_messages (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      subject TEXT NOT NULL DEFAULT '',
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+  ).run()
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS support_messages_user_created_idx
+     ON support_messages(user_id, created_at DESC)`,
+  ).run()
+}
+
+function displayedActiveUsers(realCount: number, baseline: number, floor = ACTIVE_USERS_FLOOR) {
+  const real = Number.isFinite(realCount) ? Math.max(0, Math.floor(realCount)) : 0
+  const base = Number.isFinite(baseline) ? Math.max(0, Math.floor(baseline)) : real
+  return floor + Math.max(0, real - base)
+}
+
+async function activeUsersStat(env: Env) {
+  await ensureSupportTables(env)
+  const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>()
+  const real = Number(row?.n ?? 0)
+  await env.DB.prepare('INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, ?)')
+    .bind('active_users_baseline', String(real))
+    .run()
+  const meta = await env.DB.prepare('SELECT value FROM app_meta WHERE key = ?')
+    .bind('active_users_baseline')
+    .first<{ value: string }>()
+  const baseline = Number(meta?.value ?? real)
+  return json({ count: displayedActiveUsers(real, baseline) })
+}
+
+function supportInbox(env: Env) {
+  const configured = env.SUPPORT_INBOX?.trim()
+  return configured || SUPPORT_INBOX_DEFAULT
+}
+
+async function submitSupport(request: Request, env: Env, user: User) {
+  await ensureSupportTables(env)
+  const body = await readJson<{ kind?: unknown; message?: unknown; subject?: unknown }>(request)
+  const kind = body.kind === 'report' ? 'report' : body.kind === 'contact' ? 'contact' : ''
+  if (!kind) throw new ApiError(400, 'Choose contact or report.')
+  const message = stringField(body.message)
+  if (message.length < 8) throw new ApiError(400, 'Please write a little more so we can help.')
+  if (message.length > 4000) throw new ApiError(400, 'Keep it under 4,000 characters.')
+  const subject = stringField(body.subject).slice(0, 120)
+    || (kind === 'report' ? 'HiggsRead report' : 'HiggsRead contact')
+
+  const recent = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM support_messages
+     WHERE user_id = ? AND created_at >= ?`,
+  ).bind(user.id, new Date(Date.now() - 60 * 60 * 1000).toISOString()).first<{ n: number }>()
+  if (Number(recent?.n ?? 0) >= 6) {
+    throw new ApiError(429, 'Too many messages. Please wait a bit.')
+  }
+
+  const id = crypto.randomUUID()
+  const createdAt = new Date().toISOString()
+  await env.DB.prepare(
+    `INSERT INTO support_messages (id, user_id, kind, subject, body, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).bind(id, user.id, kind, subject, message, createdAt).run()
+
+  const text = [
+    `Kind: ${kind}`,
+    `From account: ${user.email}`,
+    `User id: ${user.id}`,
+    `Time: ${createdAt}`,
+    '',
+    message,
+  ].join('\n')
+
+  const delivered = await deliverSupportMail(env, {
+    subject: `[HiggsRead] ${subject}`,
+    text,
+    replyTo: user.email,
+  })
+  if (!delivered) {
+    throw new ApiError(502, 'Could not send just now. Try again in a moment.')
+  }
+  return json({ ok: true })
+}
+
+async function deliverSupportMail(
+  env: Env,
+  payload: { subject: string; text: string; replyTo: string },
+): Promise<boolean> {
+  const inbox = supportInbox(env)
+  const resendKey = env.RESEND_API_KEY?.trim()
+  if (resendKey) {
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resendKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: 'HiggsRead <onboarding@resend.dev>',
+          to: [inbox],
+          reply_to: payload.replyTo,
+          subject: payload.subject,
+          text: payload.text,
+        }),
+      })
+      if (res.ok) return true
+      console.error('[support] resend failed', res.status)
+    } catch (error) {
+      console.error('[support] resend error', error instanceof Error ? error.message : 'failed')
+    }
+  }
+
+  try {
+    const res = await fetch(`https://formsubmit.co/ajax/${encodeURIComponent(inbox)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        _subject: payload.subject,
+        _replyto: payload.replyTo,
+        _template: 'box',
+        _captcha: 'false',
+        name: 'HiggsRead',
+        email: payload.replyTo,
+        message: payload.text,
+      }),
+    })
+    if (res.ok) return true
+    console.error('[support] mail relay failed', res.status)
+  } catch (error) {
+    console.error('[support] mail relay error', error instanceof Error ? error.message : 'failed')
+  }
+  return false
 }
 
 function normalizeEmail(value: unknown) {

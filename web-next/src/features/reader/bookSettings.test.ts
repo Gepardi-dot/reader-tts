@@ -2,10 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AUDIO_PREFS_KEY, audioPrefsWithSelection, loadAudioPrefs } from './audioPreferences'
 import {
   APPEARANCE_KEY,
+  AUDIO_RATE_KEY,
   BOOK_SETTINGS_KEY,
   DEFAULT_APPEARANCE,
+  clearLocalReaderSettings,
   loadBookSettings,
+  loadGlobalAppearance,
+  loadGlobalAudioRate,
   saveBookSettings,
+  saveGlobalAppearance,
+  saveGlobalAudioRate,
 } from './bookSettings'
 
 function installStorage() {
@@ -96,5 +102,51 @@ describe('bookSettings', () => {
       voice: 'am_adam',
     })
     expect(loadAudioPrefs()).toMatchObject({ provider: 'google', voice: 'Puck' })
+  })
+
+  it('saves global appearance and audio rate for new books only', () => {
+    installStorage()
+    const existing = loadBookSettings('book-a')
+    saveBookSettings('book-a', {
+      ...existing,
+      appearance: { ...existing.appearance, theme: 'dark' },
+      audioRate: 1.2,
+    })
+
+    saveGlobalAppearance({ ...DEFAULT_APPEARANCE, theme: 'white', layout: 'paginated' })
+    saveGlobalAudioRate(1.6)
+
+    expect(loadGlobalAppearance()).toMatchObject({ theme: 'white', layout: 'paginated' })
+    expect(loadGlobalAudioRate()).toBe(1.6)
+    expect(loadBookSettings('book-a')).toMatchObject({
+      appearance: { theme: 'dark' },
+      audioRate: 1.2,
+    })
+    expect(loadBookSettings('book-b')).toMatchObject({
+      appearance: { theme: 'white', layout: 'paginated' },
+      audioRate: 1.6,
+    })
+  })
+
+  it('clears local appearance, voice, and per-book settings', () => {
+    const storage = installStorage()
+    saveGlobalAppearance({ ...DEFAULT_APPEARANCE, theme: 'dark' })
+    saveGlobalAudioRate(1.4)
+    storage.set(AUDIO_PREFS_KEY, JSON.stringify({
+      provider: 'kokoro',
+      voice: 'am_adam',
+      voicesByProvider: { kokoro: 'am_adam' },
+      version: 4,
+    }))
+    loadBookSettings('book-a')
+
+    clearLocalReaderSettings()
+
+    expect(storage.get(APPEARANCE_KEY)).toBeUndefined()
+    expect(storage.get(AUDIO_RATE_KEY)).toBeUndefined()
+    expect(storage.get(BOOK_SETTINGS_KEY)).toBeUndefined()
+    expect(storage.get(AUDIO_PREFS_KEY)).toBeUndefined()
+    expect(loadGlobalAppearance().theme).toBe('paper')
+    expect(loadGlobalAudioRate()).toBe(1)
   })
 })

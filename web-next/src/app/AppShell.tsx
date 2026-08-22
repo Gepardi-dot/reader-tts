@@ -1,11 +1,12 @@
-import { NavLink, Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
-import { SquarePen, Type, TrendingUp, LogOut, Sparkles, Library } from 'lucide-react'
+import { NavLink, Outlet, Link, useLocation } from 'react-router-dom'
+import { SquarePen, Type, TrendingUp, Settings, Sparkles, Library } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getStoredUser, signOut, subscribeAuth } from '@/lib/auth'
+import { getStoredUser, subscribeAuth } from '@/lib/auth'
 import { api } from '@/shared/api/client'
 import { BrandLogo } from '@/components/BrandLogo'
 import { cn } from '@/lib/utils'
+import { SettingsSheet } from '@/features/settings/SettingsSheet'
 
 interface Book {
   id: string
@@ -33,9 +34,9 @@ const LEARN_NAV = [
 
 export function AppShell() {
   const location = useLocation()
-  const navigate = useNavigate()
   const isReader = location.pathname.startsWith('/book/')
   const [userEmail, setUserEmail] = useState<string | null>(() => getStoredUser()?.email ?? null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
     return subscribeAuth((user) => setUserEmail(user?.email ?? null))
@@ -71,11 +72,6 @@ export function AppShell() {
     if (label === 'Words' && wordCount > 0) return wordCount
     if (label === 'Notes' && notesCount > 0) return notesCount
     return null
-  }
-
-  async function handleSignOut() {
-    await signOut()
-    navigate('/login', { replace: true })
   }
 
   if (isReader) return <Outlet />
@@ -149,7 +145,7 @@ export function AppShell() {
           )}
         </nav>
 
-        {/* Practice button + sign out */}
+        {/* Practice button + settings */}
         <div className="p-2 border-t border-border space-y-1 shrink-0">
           <Link
             to="/studio"
@@ -159,11 +155,12 @@ export function AppShell() {
             {dueCount > 0 ? `Practice · ${dueCount} due` : 'Practice'}
           </Link>
           <button
-            onClick={handleSignOut}
+            type="button"
+            onClick={() => setSettingsOpen(true)}
             className="flex items-center gap-2 w-full px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
           >
-            <LogOut size={13} className="shrink-0" />
-            <span className="truncate flex-1 text-left">{userEmail ?? 'Sign out'}</span>
+            <Settings size={13} className="shrink-0" />
+            <span className="truncate flex-1 text-left">Settings</span>
           </button>
         </div>
       </aside>
@@ -171,13 +168,21 @@ export function AppShell() {
       {/* ── Main area ───────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <header
-          className="md:hidden flex items-center px-4 border-b border-border bg-background/95 backdrop-blur-sm shrink-0 z-10"
+          className="md:hidden flex items-center justify-between gap-2 px-4 border-b border-border bg-background/95 backdrop-blur-sm shrink-0 z-10"
           style={{
             height: 'calc(48px + env(safe-area-inset-top, 0px))',
             paddingTop: 'env(safe-area-inset-top, 0px)',
           }}
         >
           <BrandLogo className="h-8 max-w-[168px]" />
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="flex items-center justify-center size-9 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            aria-label="Settings"
+          >
+            <Settings size={18} />
+          </button>
         </header>
 
         <main className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain">
@@ -249,6 +254,12 @@ export function AppShell() {
           </NavLink>
         </nav>
       </div>
+
+      <SettingsSheet
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        email={userEmail}
+      />
     </div>
   )
 }

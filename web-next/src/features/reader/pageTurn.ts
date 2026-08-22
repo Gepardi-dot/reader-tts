@@ -87,6 +87,22 @@ export function pageRestY(pageTop: number): number {
   return y === 0 ? 0 : -y
 }
 
+/** Desktop click: left half of the screen → previous, right half → next. */
+export function pageTurnClickDir(clientX: number, viewportWidth: number): -1 | 1 {
+  const width = Math.max(1, viewportWidth)
+  return clientX < width / 2 ? -1 : 1
+}
+
+export function isFinePointerClick(event?: Event | { pointerType?: string } | null): boolean {
+  const pointerType = event && 'pointerType' in event
+    ? event.pointerType
+    : undefined
+  if (pointerType === 'touch') return false
+  if (pointerType === 'mouse' || pointerType === 'pen') return true
+  return typeof matchMedia === 'function'
+    && matchMedia('(hover: hover) and (pointer: fine)').matches
+}
+
 export async function animateTransform(
   element: HTMLElement,
   to: string,
