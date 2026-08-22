@@ -236,6 +236,22 @@
   background-position: center top;
 }
 
+/* Continuous must stay a real scrollport even if a sheet lock left
+   overflow:hidden on the node. Paginated keeps overflow clipped. */
+[data-reader-layout="continuous"]:not([data-reader-sheet-lock]) [data-reader-scroll] {
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  touch-action: pan-y !important;
+  -webkit-overflow-scrolling: touch;
+}
+[data-reader-layout="continuous"] [data-reader-text] {
+  clip-path: none !important;
+}
+[data-reader-layout="continuous"] .reader-page-inner,
+[data-reader-layout="continuous"] .reader-page-current {
+  transform: none !important;
+}
+
 /* Paginated page-turn: GPU layers, Apple-like slide. */
 .reader-page-stage {
   transform: translateZ(0);

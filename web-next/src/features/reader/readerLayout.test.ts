@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyReaderScrollerStyle,
   clampPageIndex,
   normalizeReaderLayout,
   pageBreaksFromLineBoxes,
   pageClipRange,
   pageIndexForOffset,
   pageIndexForY,
+  readerScrollerStyle,
 } from './readerLayout'
 
 describe('normalizeReaderLayout', () => {
@@ -20,27 +22,67 @@ describe('normalizeReaderLayout', () => {
   })
 })
 
+describe('readerScrollerStyle', () => {
+  it('keeps continuous vertically scrollable', () => {
+    expect(readerScrollerStyle('continuous')).toEqual({
+      overflowX: 'hidden',
+      overflowY: 'auto',
+      touchAction: 'pan-y',
+    })
+  })
+
+  it('locks paginated to page-turn gestures', () => {
+    expect(readerScrollerStyle('paginated')).toEqual({
+      overflowX: 'hidden',
+      overflowY: 'hidden',
+      touchAction: 'none',
+    })
+  })
+
+  it('clears a leaked overflow shorthand so continuous can scroll after the sheet closes', () => {
+    const el = {
+      style: {
+        overflow: 'hidden',
+        overflowX: 'hidden',
+        overflowY: 'hidden',
+        touchAction: 'none',
+      },
+    }
+    applyReaderScrollerStyle(el, 'continuous')
+    expect(el.style.overflow).toBe('')
+    expect(el.style.overflowY).toBe('auto')
+    expect(el.style.overflowX).toBe('hidden')
+    expect(el.style.touchAction).toBe('pan-y')
+  })
+})
+
 describe('pageBreaksFromLineBoxes', () => {
   it('returns a single empty page when there are no lines', () => {
     expect(pageBreaksFromLineBoxes([], 400)).toEqual([{ top: 0, bottom: 400, startOffset: 0 }])
   })
 
   it('keeps a short chapter on one page', () => {
-    const pages = pageBreaksFromLineBoxes([
-      { top: 0, bottom: 20, startOffset: 0 },
-      { top: 24, bottom: 44, startOffset: 40 },
-      { top: 48, bottom: 68, startOffset: 80 },
-    ], 400)
+    const pages = pageBreaksFromLineBoxes(
+      [
+        { top: 0, bottom: 20, startOffset: 0 },
+        { top: 24, bottom: 44, startOffset: 40 },
+        { top: 48, bottom: 68, startOffset: 80 },
+      ],
+      400,
+    )
     expect(pages).toEqual([{ top: 0, bottom: 68, startOffset: 0 }])
   })
 
   it('starts the next page at the first line that no longer fits', () => {
-    const pages = pageBreaksFromLineBoxes([
-      { top: 0, bottom: 90, startOffset: 0 },
-      { top: 100, bottom: 190, startOffset: 200 },
-      { top: 200, bottom: 290, startOffset: 400 },
-      { top: 300, bottom: 390, startOffset: 600 },
-    ], 200)
+    const pages = pageBreaksFromLineBoxes(
+      [
+        { top: 0, bottom: 90, startOffset: 0 },
+        { top: 100, bottom: 190, startOffset: 200 },
+        { top: 200, bottom: 290, startOffset: 400 },
+        { top: 300, bottom: 390, startOffset: 600 },
+      ],
+      200,
+    )
     expect(pages).toEqual([
       { top: 0, bottom: 200, startOffset: 0 },
       { top: 200, bottom: 390, startOffset: 400 },
@@ -48,10 +90,13 @@ describe('pageBreaksFromLineBoxes', () => {
   })
 
   it('advances a line taller than the viewport on its own page', () => {
-    const pages = pageBreaksFromLineBoxes([
-      { top: 0, bottom: 500, startOffset: 0 },
-      { top: 520, bottom: 540, startOffset: 80 },
-    ], 200)
+    const pages = pageBreaksFromLineBoxes(
+      [
+        { top: 0, bottom: 500, startOffset: 0 },
+        { top: 520, bottom: 540, startOffset: 80 },
+      ],
+      200,
+    )
     expect(pages).toEqual([
       { top: 0, bottom: 520, startOffset: 0 },
       { top: 520, bottom: 540, startOffset: 80 },

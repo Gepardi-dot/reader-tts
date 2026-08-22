@@ -17,6 +17,41 @@ export function normalizeReaderLayout(value: unknown): ReaderLayout {
   return value === 'paginated' ? 'paginated' : 'continuous'
 }
 
+export type ReaderScrollerStyle = {
+  overflowX: 'hidden'
+  overflowY: 'hidden' | 'auto'
+  touchAction: 'none' | 'pan-y'
+}
+
+/** Axis-specific overflow so a sheet lock cannot leave `overflow: hidden` stuck. */
+export function readerScrollerStyle(layout: ReaderLayout): ReaderScrollerStyle {
+  const paginated = layout === 'paginated'
+  return {
+    overflowX: 'hidden',
+    overflowY: paginated ? 'hidden' : 'auto',
+    touchAction: paginated ? 'none' : 'pan-y',
+  }
+}
+
+export function applyReaderScrollerStyle(
+  el: {
+    style: {
+      overflow: string
+      overflowX: string
+      overflowY: string
+      touchAction: string
+    }
+  },
+  layout: ReaderLayout,
+): void {
+  const next = readerScrollerStyle(layout)
+  // Clear the shorthand first: `overflow: hidden` would override overflowY.
+  el.style.overflow = ''
+  el.style.overflowX = next.overflowX
+  el.style.overflowY = next.overflowY
+  el.style.touchAction = next.touchAction
+}
+
 export function pageBreaksFromLineBoxes(
   lines: ReaderLineBox[],
   viewportHeight: number,
@@ -58,10 +93,7 @@ export function pageIndexForY(pages: Array<{ top: number }>, y: number): number 
   return index
 }
 
-export function pageIndexForOffset(
-  pages: Array<{ startOffset: number }>,
-  offset: number,
-): number {
+export function pageIndexForOffset(pages: Array<{ startOffset: number }>, offset: number): number {
   if (pages.length === 0) return 0
   let index = 0
   for (let i = 0; i < pages.length; i += 1) {
@@ -88,10 +120,11 @@ export function pageClipRange(
   const top = Math.max(0, page.top)
   const listedBottom = page.bottom
   const nextTop = pages[i + 1]?.top
-  const bottom = listedBottom != null && listedBottom > top
-    ? listedBottom
-    : nextTop != null
-      ? Math.max(top, nextTop)
-      : top + Math.max(1, viewH)
+  const bottom =
+    listedBottom != null && listedBottom > top
+      ? listedBottom
+      : nextTop != null
+        ? Math.max(top, nextTop)
+        : top + Math.max(1, viewH)
   return { top, bottom }
 }
