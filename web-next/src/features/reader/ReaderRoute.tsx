@@ -72,11 +72,13 @@ import {
 } from './tts-engine/useTtsSessionController'
 import { expandToReadingPhrase } from './readingPhrase'
 import {
+  applyReaderScrollerStyle,
   clampPageIndex,
   pageBreaksFromLineBoxes,
   pageClipRange,
   pageIndexForOffset,
   pageIndexForY,
+  readerScrollerStyle,
   type ReaderLayout,
   type ReaderLineBox,
   type ReaderPageBreak,
@@ -2931,6 +2933,7 @@ export function ReaderRoute() {
   }
 
   function clipReaderText(root: HTMLElement | null, pageIndex: number) {
+    if (layoutRef.current !== 'paginated') return
     if (!root) return
     const text = root.hasAttribute('data-reader-text')
       ? root
@@ -2961,7 +2964,21 @@ export function ReaderRoute() {
     incoming.dataset.dir = ''
   }
 
+  function abortPageTurns() {
+    const turn = pageTurnRef.current
+    turn.tracking = false
+    turn.animating = false
+    turn.axis = null
+    turn.offset = 0
+    turn.incomingDir = 0
+    turn.gen += 1
+    pageLayerRef.current?.getAnimations().forEach((animation) => animation.cancel())
+    incomingPageRef.current?.getAnimations().forEach((animation) => animation.cancel())
+    pageInnerRef.current?.getAnimations().forEach((animation) => animation.cancel())
+  }
+
   function applyRestingPageTransform(page?: ReaderPageBreak) {
+    if (layoutRef.current !== 'paginated') return
     const scroller = readerScrollRef.current
     if (scroller) scroller.scrollTop = 0
     const index = pageIndexRef.current
@@ -3133,6 +3150,7 @@ export function ReaderRoute() {
     reason: 'user' | 'follow' | 'restore' = 'user',
     axis: 'x' | 'y' = 'x',
   ) {
+    if (layoutRef.current !== 'paginated') return
     const pages = pageBreaksRef.current
     if (pages.length === 0) return
     const next = clampPageIndex(index, pages.length)
@@ -3181,7 +3199,7 @@ export function ReaderRoute() {
           animateTransform(layer, `translate3d(${-dir * width}px, 0, 0)`, duration),
           animateTransform(incoming, 'translate3d(0, 0, 0)', duration),
         ])
-        if (pageTurnRef.current.gen !== gen) return
+        if (pageTurnRef.current.gen !== gen || layoutRef.current !== 'paginated') return
       } else {
         const stage = pageStageRef.current
         const layer = pageLayerRef.current
@@ -3199,9 +3217,10 @@ export function ReaderRoute() {
           animateTransform(layer, `translate3d(0, ${-dir * height}px, 0)`, duration),
           animateTransform(incoming, 'translate3d(0, 0, 0)', duration),
         ])
-        if (pageTurnRef.current.gen !== gen) return
+        if (pageTurnRef.current.gen !== gen || layoutRef.current !== 'paginated') return
       }
 
+      if (layoutRef.current !== 'paginated') return
       commitPageIndex(next, reason)
       applyRestingPageTransform(page)
     } finally {
@@ -3221,6 +3240,10 @@ export function ReaderRoute() {
   }
 
   function measurePagedLayout() {
+    if (layoutRef.current !== 'paginated') {
+      clearPagedTransforms()
+      return
+    }
     const root = readerTextRef.current
     if (!root || !payload?.text) return
 
@@ -3284,11 +3307,16 @@ export function ReaderRoute() {
     const scrollY = window.scrollY
 
     const scroller = readerScrollRef.current
-    const prevScrollerOverflow = scroller?.style.overflow ?? ''
     html.style.overflow = 'hidden'
     body.style.overflow = 'hidden'
     body.style.touchAction = 'none'
-    if (scroller) scroller.style.overflow = 'hidden'
+    // Lock only overflowY so restoring continuous does not inherit a leftover
+    // `overflow: hidden` shorthand from paginated mode.
+    if (scroller) {
+      scroller.style.overflow = ''
+      scroller.style.overflowY = 'hidden'
+      scroller.style.touchAction = 'none'
+    }
     // Freeze position so iOS doesn't jump when overflow is restored.
     body.style.position = 'fixed'
     body.style.top = `-${scrollY}px`
@@ -3316,7 +3344,7 @@ export function ReaderRoute() {
       html.style.overflow = prevHtmlOverflow
       body.style.overflow = prevBodyOverflow
       body.style.touchAction = prevBodyTouch
-      if (scroller) scroller.style.overflow = prevScrollerOverflow
+      if (scroller) applyReaderScrollerStyle(scroller, layoutRef.current)
       body.style.position = ''
       body.style.top = ''
       body.style.left = ''
@@ -3390,10 +3418,13 @@ export function ReaderRoute() {
     prevLayoutRef.current = appearance.layout
 
     if (appearance.layout !== 'paginated') {
+      abortPageTurns()
       if (pageBreaksRef.current.length > 0) {
         pageBreaksRef.current = []
       }
       clearPagedTransforms()
+      const scroller = readerScrollRef.current
+      if (scroller) applyReaderScrollerStyle(scroller, 'continuous')
       if (prev === 'paginated' && payload?.text) {
         const { max } = getReaderScrollMetrics()
         programmaticScrollRef.current = true
@@ -4279,6 +4310,7 @@ export function ReaderRoute() {
     <div
       data-reader-layout={appearance.layout}
       data-reader-theme={appearance.theme}
+      data-reader-sheet-lock={sheet === 'audio' || sheet === 'appearance' ? '' : undefined}
       className={cn(
         'h-svh flex flex-col overflow-hidden',
         appearance.theme === 'white' && 'reader-theme-kindle',
@@ -4399,16 +4431,16 @@ export function ReaderRoute() {
       {/* ── Scrollable / paged text ───────────────────────────────────── */}
       <div
         ref={readerScrollRef}
+        data-reader-scroll=""
         className={cn(
           'min-h-0 flex-1 overflow-x-hidden overscroll-y-contain',
           paginated ? 'overflow-y-hidden mb-24' : 'overflow-y-auto',
         )}
         style={{
-          touchAction: paginated ? 'none' : 'pan-y',
+          ...readerScrollerStyle(appearance.layout),
           WebkitOverflowScrolling: paginated ? 'auto' : 'touch',
-          overflow: paginated ? 'hidden' : undefined,
-          userSelect: paginated ? 'none' : undefined,
-          WebkitUserSelect: paginated ? 'none' : undefined,
+          userSelect: paginated ? 'none' : 'auto',
+          WebkitUserSelect: paginated ? 'none' : 'auto',
         }}
       >
       <div
