@@ -88,8 +88,10 @@ export function pageClipRange(
   const top = Math.max(0, page.top)
   const listedBottom = page.bottom
   const nextTop = pages[i + 1]?.top
-  const bottom = listedBottom > top
+  const bottom = listedBottom != null && listedBottom > top
     ? listedBottom
-    : (nextTop != null ? Math.max(top, nextTop) : top + Math.max(1, viewH))
+    : nextTop != null
+      ? Math.max(top, nextTop)
+      : top + Math.max(1, viewH)
   return { top, bottom }
 }
