@@ -4,8 +4,10 @@ import {
   PAGE_TURN_COMMIT_RATIO,
   PAGE_TURN_MIN_FLICK_PX,
   PAGE_TURN_VELOCITY_PX_MS,
+  isFinePointerClick,
   lockPageTurnAxis,
   pageRestY,
+  pageTurnClickDir,
   pageTurnDurationMs,
   prefersReducedMotion,
   resistPageTurnOffset,
@@ -99,6 +101,37 @@ describe('pageTurnDurationMs', () => {
     expect(slow).toBeLessThanOrEqual(520)
     expect(flick).toBeLessThan(slow)
     expect(flick).toBeGreaterThanOrEqual(260)
+  })
+})
+
+describe('pageTurnClickDir', () => {
+  it('turns back on the left half and forward on the right half', () => {
+    expect(pageTurnClickDir(0, 1000)).toBe(-1)
+    expect(pageTurnClickDir(499, 1000)).toBe(-1)
+    expect(pageTurnClickDir(500, 1000)).toBe(1)
+    expect(pageTurnClickDir(999, 1000)).toBe(1)
+  })
+})
+
+describe('isFinePointerClick', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('treats mouse and pen as desktop clicks', () => {
+    expect(isFinePointerClick({ pointerType: 'mouse' })).toBe(true)
+    expect(isFinePointerClick({ pointerType: 'pen' })).toBe(true)
+    expect(isFinePointerClick({ pointerType: 'touch' })).toBe(false)
+  })
+
+  it('falls back to hover + fine pointer media when type is missing', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('hover: hover') && query.includes('pointer: fine'),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+    expect(isFinePointerClick({})).toBe(true)
   })
 })
 

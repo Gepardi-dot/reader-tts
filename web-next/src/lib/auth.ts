@@ -135,6 +135,9 @@ function classifyAuthError(status: number, message: string): AuthApiError {
       'email_taken',
     )
   }
+  if (/password is incorrect/i.test(lower)) {
+    return new AuthApiError('Password is incorrect.', status || 401, 'invalid_credentials')
+  }
   if (status === 401 || /invalid email or password/i.test(lower)) {
     return new AuthApiError(
       'Invalid email or password. If you already have an account, use Sign in — do not create a new one.',
@@ -254,6 +257,23 @@ export async function signOut() {
     }).catch(() => undefined)
   }
   clearAuth({ keepLastEmail: true })
+}
+
+export async function deleteAccount(password: string) {
+  const token = getStoredAuthToken()
+  if (!token) {
+    throw new AuthApiError('Not signed in.', 401, 'auth_required')
+  }
+  const res = await authFetch('/api/auth/account', {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ password }),
+  })
+  if (!res.ok) throw classifyAuthError(res.status, await errorMessage(res))
+  clearAuth({ keepLastEmail: false })
 }
 
 export function clearAuth(options?: { keepLastEmail?: boolean }) {
