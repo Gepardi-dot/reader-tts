@@ -214,6 +214,13 @@
   box-decoration-break: clone;
 }
 
+/* Paginated clip-path can drop a mark that also covers clipped lines. Keep the
+   visible fragment on its own layer so the wash still paints. */
+[data-reader-layout="paginated"] .reader-playback-hl {
+  position: relative;
+  z-index: 1;
+}
+
 .prose-reader blockquote {
   border-left: 3px solid currentColor;
   opacity: 0.7;
