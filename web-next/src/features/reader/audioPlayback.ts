@@ -158,6 +158,59 @@ export function tapOffsetSeekSeconds(
   return seekCue ? Math.max(0, seekCue.timeStart) : 0
 }
 
+/** Hosted Kokoro often ships no word cues; ~16 chars/s is a stable English estimate. */
+export const FALLBACK_TTS_CHARS_PER_SEC = 16
+
+export type SpokenOffsetCue = {
+  start: number
+  end?: number
+  timeStart: number
+  timeEnd?: number
+}
+
+/**
+ * Map playback time inside a chunk to a source offset.
+ * Word cues win when present; otherwise interpolate through the chunk so
+ * paginated follow can turn the page before the next buffer starts.
+ */
+export function spokenOffsetAtTime(options: {
+  chunkStart: number
+  chunkEnd: number
+  currentTime: number
+  durationSec?: number | null
+  cues?: readonly SpokenOffsetCue[] | null
+}): number {
+  const start = Math.max(0, Math.floor(options.chunkStart))
+  const end = Math.max(start, Math.floor(options.chunkEnd))
+  const time = Number.isFinite(options.currentTime) ? Math.max(0, options.currentTime) : 0
+
+  const cues = (options.cues ?? []).filter((cue) => (
+    Number.isFinite(cue.start)
+    && Number.isFinite(cue.timeStart)
+    && (cue.end == null || cue.end > cue.start)
+  ))
+  if (cues.length > 0) {
+    const active = cues.find((cue, index) => {
+      const t0 = Math.max(0, cue.timeStart)
+      const next = cues[index + 1]
+      const t1 = Math.max(t0, cue.timeEnd ?? next?.timeStart ?? t0)
+      const last = index === cues.length - 1
+      return time >= t0 && (time < t1 || (last && time <= t1 + 0.2))
+    })
+    const chosen = active
+      ?? (time < cues[0]!.timeStart ? cues[0] : cues[cues.length - 1])
+    if (chosen) {
+      return Math.max(start, Math.min(end, Math.floor(chosen.start)))
+    }
+  }
+
+  const duration = options.durationSec && options.durationSec > 0
+    ? options.durationSec
+    : Math.max(0.25, (end - start) / FALLBACK_TTS_CHARS_PER_SEC)
+  const t = Math.min(1, time / duration)
+  return start + Math.floor((end - start) * t)
+}
+
 export function browserSpeechQueueTarget(activeIdx: number, chunkCount: number, ahead = 1): number {
   if (chunkCount <= 0) return -1
   const safeIdx = Math.max(0, Math.floor(activeIdx))

@@ -25,7 +25,9 @@ import {
   shouldPrimeNativeAudio,
   nativePrefetchStartIndexForFallback,
   tapOffsetSeekSeconds,
+  spokenOffsetAtTime,
 } from './audioPlayback'
+import { pageIndexForOffset } from './readerLayout'
 
 describe('audio playback chunking', () => {
   it('builds absolute-offset chunks and prefers sentence boundaries', () => {
@@ -346,6 +348,62 @@ describe('audio buffer scheduling', () => {
     expect(tapOffsetSeekSeconds(100, 130, cues)).toBe(1.2)
     expect(tapOffsetSeekSeconds(100, 99, cues)).toBe(0)
     expect(tapOffsetSeekSeconds(100, 230, cues)).toBe(0)
+  })
+
+  it('interpolates the spoken offset through a cue-less chunk', () => {
+    expect(spokenOffsetAtTime({
+      chunkStart: 100,
+      chunkEnd: 200,
+      currentTime: 0,
+      durationSec: 10,
+    })).toBe(100)
+    expect(spokenOffsetAtTime({
+      chunkStart: 100,
+      chunkEnd: 200,
+      currentTime: 5,
+      durationSec: 10,
+    })).toBe(150)
+    expect(spokenOffsetAtTime({
+      chunkStart: 100,
+      chunkEnd: 200,
+      currentTime: 10,
+      durationSec: 10,
+    })).toBe(200)
+  })
+
+  it('crosses a page boundary as spoken time moves through a spanning chunk', () => {
+    const pages = [
+      { startOffset: 0 },
+      { startOffset: 150 },
+    ]
+    const early = spokenOffsetAtTime({
+      chunkStart: 100,
+      chunkEnd: 200,
+      currentTime: 2,
+      durationSec: 10,
+    })
+    const later = spokenOffsetAtTime({
+      chunkStart: 100,
+      chunkEnd: 200,
+      currentTime: 6,
+      durationSec: 10,
+    })
+    expect(pageIndexForOffset(pages, early)).toBe(0)
+    expect(pageIndexForOffset(pages, later)).toBe(1)
+  })
+
+  it('uses the active word cue when timing is present', () => {
+    expect(spokenOffsetAtTime({
+      chunkStart: 100,
+      chunkEnd: 200,
+      currentTime: 1.3,
+      durationSec: 4,
+      cues: [
+        { start: 100, end: 120, timeStart: 0, timeEnd: 1 },
+        { start: 140, end: 160, timeStart: 1, timeEnd: 2 },
+        { start: 180, end: 200, timeStart: 2, timeEnd: 4 },
+      ],
+    })).toBe(140)
   })
 })
 
