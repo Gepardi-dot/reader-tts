@@ -3,6 +3,7 @@ export type ReaderLayout = 'continuous' | 'paginated'
 export type ReaderLineBox = {
   top: number
   bottom: number
+  /** Source offset of the first character on this visual line. */
   startOffset: number
 }
 
@@ -10,6 +11,7 @@ export type ReaderPageBreak = {
   top: number
   /** Exclusive end in document Y — the next page's first line top. */
   bottom: number
+  /** Source offset of the first character that starts on this page. */
   startOffset: number
 }
 
@@ -83,6 +85,40 @@ export function pageBreaksFromLineBoxes(
   return pages
 }
 
+/**
+ * Source offset of the first character on each visual line in one paragraph.
+ * `charTop(localOffset)` is Y relative to the same origin as `lines[i].top`
+ * and must be non-decreasing through the paragraph.
+ */
+export function assignLineStartOffsets(
+  lines: ReadonlyArray<{ top: number }>,
+  paragraphStart: number,
+  textLength: number,
+  charTop: (localOffset: number) => number | null,
+): number[] {
+  const paraStart = Math.max(0, Math.floor(paragraphStart))
+  const length = Math.max(0, Math.floor(textLength))
+  if (lines.length === 0) return []
+  const offsets = lines.map(() => paraStart)
+  if (lines.length === 1 || length <= 0) return offsets
+
+  let lo = 0
+  for (let i = 1; i < lines.length; i += 1) {
+    const lineTop = lines[i]!.top
+    let left = lo
+    let right = length
+    while (left < right) {
+      const mid = (left + right) >> 1
+      const y = charTop(mid)
+      if (y == null || y >= lineTop - 1) right = mid
+      else left = mid + 1
+    }
+    offsets[i] = paraStart + left
+    lo = left
+  }
+  return offsets
+}
+
 export function pageIndexForY(pages: Array<{ top: number }>, y: number): number {
   if (pages.length === 0) return 0
   let index = 0
@@ -93,6 +129,7 @@ export function pageIndexForY(pages: Array<{ top: number }>, y: number): number 
   return index
 }
 
+/** Last page whose first character is at or before `offset`. Pages must use the first character on that page, not the enclosing paragraph start. */
 export function pageIndexForOffset(pages: Array<{ startOffset: number }>, offset: number): number {
   if (pages.length === 0) return 0
   let index = 0
