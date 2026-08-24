@@ -42,6 +42,7 @@ import {
   CHUNK_CHARS,
   audioSliceStart,
   pacingFor,
+  spokenOffsetAtTime,
 } from './audioPlayback'
 import {
   primeBrowserSpeechVoices,
@@ -4041,7 +4042,22 @@ export function ReaderRoute() {
     audioFollowPausedRef.current = false
     setAudioFollowPaused(false)
     const range = activeAudioCueRangeRef.current
-    if (range) showAudioFollow(range.start, range.end, true)
+    if (!range) return
+    if (layoutRef.current === 'paginated') {
+      setPlaybackRange(range)
+      followPaginatedSpokenOffset(range.start)
+      return
+    }
+    showAudioFollow(range.start, range.end, true)
+  }
+
+  function followPaginatedSpokenOffset(offset: number) {
+    if (layoutRef.current !== 'paginated') return
+    if (audioFollowPausedRef.current) return
+    const pages = pageBreaksRef.current
+    if (pages.length === 0) return
+    const next = pageIndexForOffset(pages, Math.max(0, offset))
+    if (next !== pageIndexRef.current) goToPage(next, 'follow')
   }
 
   function showAudioFollow(startOffset: number, endOffset: number, follow: boolean) {
@@ -4049,6 +4065,10 @@ export function ReaderRoute() {
 
     const root = readerTextRef.current
     if (!root) return
+
+    if (layoutRef.current === 'paginated') {
+      return
+    }
 
     const range = domRangeForSourceOffsets(startOffset, endOffset, root)
     if (!range) return
@@ -4060,15 +4080,6 @@ export function ReaderRoute() {
 
     // Respect user scroll: highlight still updates, viewport stays put.
     if (!follow || audioFollowPausedRef.current || rects.length === 0) return
-
-    if (layoutRef.current === 'paginated') {
-      const pages = pageBreaksRef.current
-      if (pages.length === 0) return
-      const y = Math.min(...rects.map((rect) => rect.top)) - root.getBoundingClientRect().top
-      const next = pageIndexForY(pages, y + 0.5)
-      if (next !== pageIndexRef.current) goToPage(next, 'follow')
-      return
-    }
 
     const top = Math.min(...rects.map((rect) => rect.top))
     const bottom = Math.max(...rects.map((rect) => rect.top + rect.height))
@@ -4091,6 +4102,13 @@ export function ReaderRoute() {
   }
 
   function syncAudioFollowCue(chunk: TtsAudioChunk, currentTime: number, follow: boolean) {
+    const spoken = spokenOffsetAtTime({
+      chunkStart: chunk.start,
+      chunkEnd: chunk.end,
+      currentTime,
+      durationSec: chunk.durationSec ?? chunk.buffer?.duration ?? null,
+      cues: chunk.cues,
+    })
     const cues = (chunk.cues ?? []).filter((cue) => cue.end > cue.start)
     const activeCue = cues.find((cue, index) => {
       const cueStart = Math.max(0, cue.timeStart)
@@ -4101,16 +4119,22 @@ export function ReaderRoute() {
       ? (currentTime < cues[0].timeStart ? cues[0] : cues[cues.length - 1])
       : null)
 
-    const cueStart = activeCue?.start ?? chunk.start
-    const cueEnd = activeCue?.end ?? chunk.end
+    const cueStart = activeCue?.start ?? spoken
+    const cueEnd = activeCue?.end ?? Math.max(cueStart + 1, spoken)
     const phrase = expandToReadingPhrase(cueStart, cueEnd, payload?.text ?? '')
     const nextKey = `${phrase.start}:${phrase.end}`
 
     activeAudioCueRangeRef.current = { start: phrase.start, end: phrase.end }
-    if (activeAudioCueKeyRef.current === nextKey) return
+    if (activeAudioCueKeyRef.current !== nextKey) {
+      activeAudioCueKeyRef.current = nextKey
+      showAudioFollow(phrase.start, phrase.end, follow && !audioFollowPausedRef.current)
+    }
 
-    activeAudioCueKeyRef.current = nextKey
-    showAudioFollow(phrase.start, phrase.end, follow && !audioFollowPausedRef.current)
+    // Paginated clip-path hides the next page, so visual Y cannot drive turns.
+    // Walk the spoken offset on every clock tick until the user pauses follow.
+    if (layoutRef.current === 'paginated' && !audioFollowPausedRef.current) {
+      followPaginatedSpokenOffset(spoken)
+    }
   }
   // ── Derived ───────────────────────────────────────────────────────────────
 
