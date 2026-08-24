@@ -108,6 +108,28 @@ export function clampPageIndex(index: number, pageCount: number): number {
   return Math.max(0, Math.min(pageCount - 1, index))
 }
 
+/**
+ * Keep a playback highlight inside one page. A `<mark>` that straddles the
+ * paginated clip-path often paints nothing (clip + box-decoration-break).
+ */
+export function clipRangeToPage(
+  start: number,
+  end: number,
+  pages: Array<{ startOffset: number }>,
+  pageIndex: number,
+  textLength: number,
+): { start: number; end: number } | null {
+  const lo = Math.min(start, end)
+  const hi = Math.max(start, end)
+  if (pages.length === 0) return hi > lo ? { start: lo, end: hi } : null
+  const i = clampPageIndex(pageIndex, pages.length)
+  const pageStart = Math.max(0, pages[i]!.startOffset)
+  const pageEnd = pages[i + 1]?.startOffset ?? Math.max(pageStart, textLength)
+  const clippedStart = Math.max(lo, pageStart)
+  const clippedEnd = Math.min(hi, pageEnd)
+  return clippedEnd > clippedStart ? { start: clippedStart, end: clippedEnd } : null
+}
+
 /** Visible Y-span of one page in the laid-out document. */
 export function pageClipRange(
   pages: Array<{ top: number; bottom?: number }>,

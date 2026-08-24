@@ -75,6 +75,7 @@ import { expandToReadingPhrase } from './readingPhrase'
 import {
   applyReaderScrollerStyle,
   clampPageIndex,
+  clipRangeToPage,
   pageBreaksFromLineBoxes,
   pageClipRange,
   pageIndexForOffset,
@@ -4122,19 +4123,40 @@ export function ReaderRoute() {
     const cueStart = activeCue?.start ?? spoken
     const cueEnd = activeCue?.end ?? Math.max(cueStart + 1, spoken)
     const phrase = expandToReadingPhrase(cueStart, cueEnd, payload?.text ?? '')
-    const nextKey = `${phrase.start}:${phrase.end}`
 
-    activeAudioCueRangeRef.current = { start: phrase.start, end: phrase.end }
-    if (activeAudioCueKeyRef.current !== nextKey) {
-      activeAudioCueKeyRef.current = nextKey
-      showAudioFollow(phrase.start, phrase.end, follow && !audioFollowPausedRef.current)
-    }
-
-    // Paginated clip-path hides the next page, so visual Y cannot drive turns.
-    // Walk the spoken offset on every clock tick until the user pauses follow.
+    // Turn first so the highlight can be clipped to the page now on screen.
     if (layoutRef.current === 'paginated' && !audioFollowPausedRef.current) {
       followPaginatedSpokenOffset(spoken)
     }
+
+    let start = phrase.start
+    let end = phrase.end
+    if (layoutRef.current === 'paginated') {
+      const textLen = payload?.text.length ?? end
+      const visible = clipRangeToPage(
+        phrase.start,
+        phrase.end,
+        pageBreaksRef.current,
+        pageIndexRef.current,
+        textLen,
+      ) ?? clipRangeToPage(
+        spoken,
+        Math.max(spoken + 1, phrase.end),
+        pageBreaksRef.current,
+        pageIndexRef.current,
+        textLen,
+      )
+      if (visible) {
+        start = visible.start
+        end = visible.end
+      }
+    }
+
+    const nextKey = `${start}:${end}`
+    activeAudioCueRangeRef.current = { start, end }
+    if (activeAudioCueKeyRef.current === nextKey) return
+    activeAudioCueKeyRef.current = nextKey
+    showAudioFollow(start, end, follow && !audioFollowPausedRef.current)
   }
   // ── Derived ───────────────────────────────────────────────────────────────
 

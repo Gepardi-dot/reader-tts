@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyReaderScrollerStyle,
   clampPageIndex,
+  clipRangeToPage,
   normalizeReaderLayout,
   pageBreaksFromLineBoxes,
   pageClipRange,
@@ -131,6 +132,27 @@ describe('page lookup', () => {
     expect(clampPageIndex(3, 12)).toBe(3)
     expect(clampPageIndex(40, 12)).toBe(11)
     expect(clampPageIndex(2, 0)).toBe(0)
+  })
+})
+
+describe('clipRangeToPage', () => {
+  const pages = [
+    { startOffset: 0 },
+    { startOffset: 900 },
+    { startOffset: 1800 },
+  ]
+
+  it('keeps a phrase that already sits on the page', () => {
+    expect(clipRangeToPage(100, 200, pages, 0, 2500)).toEqual({ start: 100, end: 200 })
+  })
+
+  it('cuts a spanning phrase to the visible page so the mark is not clipped away', () => {
+    expect(clipRangeToPage(800, 1000, pages, 0, 2500)).toEqual({ start: 800, end: 900 })
+    expect(clipRangeToPage(800, 1000, pages, 1, 2500)).toEqual({ start: 900, end: 1000 })
+  })
+
+  it('returns null when the phrase is entirely on another page', () => {
+    expect(clipRangeToPage(100, 200, pages, 1, 2500)).toBeNull()
   })
 })
 
