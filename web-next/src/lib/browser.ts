@@ -66,5 +66,9 @@ export function createAudioContext(): AudioContext {
   }
   const Ctor = win.AudioContext ?? win.webkitAudioContext
   if (!Ctor) throw new Error('Web Audio is not available in this browser.')
-  return new Ctor()
+  try {
+    return new Ctor({ latencyHint: 'playback' })
+  } catch {
+    return new Ctor()
+  }
 }

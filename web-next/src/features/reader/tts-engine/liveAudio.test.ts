@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   audioErrorMessage,
+  LIVE_AUDIO_FETCH_TIMEOUT_MS,
   liveAudioCooldownRemainingMs,
   requestLiveAudio,
   resetLiveAudioCooldownForTests,
@@ -90,6 +91,27 @@ describe('live audio quota backoff', () => {
     await requestLiveAudio('book-1', { ...payload(), voice: 'Puck' })
 
     expect(requestMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('times out a hung live-audio request so a later Play is not stuck on it', async () => {
+    vi.useFakeTimers()
+    requestMock.mockImplementation(() => new Promise(() => {}))
+
+    const pending = requestLiveAudio('book-1', { ...payload(), provider: 'kokoro' })
+    const expectation = expect(pending).rejects.toThrow(/timed out/i)
+    await vi.advanceTimersByTimeAsync(LIVE_AUDIO_FETCH_TIMEOUT_MS + 10)
+    await expectation
+
+    requestMock.mockReset()
+    requestMock.mockResolvedValue({
+      url: 'data:audio/wav;base64,test',
+      duration: 1,
+    })
+    await expect(requestLiveAudio('book-1', { ...payload(), provider: 'kokoro' })).resolves.toMatchObject({
+      duration: 1,
+    })
+    expect(requestMock).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
   })
 
   it('serves IndexedDB hits without calling the network (survives refresh)', async () => {

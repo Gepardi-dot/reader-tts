@@ -77,6 +77,7 @@ export class TtsRuntime {
   private loadingChunkIndexes = new Set<number>()
   private usingKokoroEngine = false
   private kokoroSegmentStarts: number[] = []
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null
   private hooks: TtsRuntimeHooks = {
     syncAudioFollowCue: () => undefined,
     clearAudioFollow: () => undefined,
@@ -218,8 +219,13 @@ export class TtsRuntime {
     })
   }
 
+  unlockAudio() {
+    this.clock.unlock()
+  }
+
   stop() {
     this.generation += 1
+    this.stopWatchdog()
     this.controller?.abort()
     this.controller = null
     this.clock.stop()
@@ -288,6 +294,9 @@ export class TtsRuntime {
 
   async start(params: TtsRuntimeStartParams) {
     this.stop()
+    // Must run in the originating tap/keydown stack — before any await —
+    // or Safari/Chrome will refuse ctx.resume() and playback stays silent.
+    this.clock.unlock()
     const generation = this.generation
     const sessionId = generation
     this.sessionId = sessionId
@@ -380,6 +389,7 @@ export class TtsRuntime {
           this.markFirstAudio(chunk)
           this.hooks.syncAudioFollowCue(chunk, 0, true)
         }
+        this.releasePlayedChunks(unit.chunkIndex)
         const ahead = PREFETCH_AHEAD_TARGET[this.provider] ?? DEFAULT_PREFETCH_AHEAD
         void pool.prefetchFrom(unit.chunkIndex + 1, ahead, controller.signal)
         this.emit()
@@ -482,6 +492,7 @@ export class TtsRuntime {
 
     try {
       this.clock.setExpectMore(true)
+      this.startWatchdog(generation)
       this.loadingChunkIndexes.add(0)
 
       // Sequential first: Fly Kokoro is single-CPU; dual synths used to freeze
@@ -504,6 +515,89 @@ export class TtsRuntime {
       if (controller.signal.aborted || generation !== this.generation) return
       this.hooks.showToast(audioErrorMessage(error))
       this.stop()
+    }
+  }
+
+  private startWatchdog(generation: number) {
+    this.stopWatchdog()
+    this.watchdogTimer = setInterval(() => {
+      this.recoverIfStalled(generation)
+    }, 800)
+  }
+
+  private stopWatchdog() {
+    if (this.watchdogTimer === null) return
+    clearInterval(this.watchdogTimer)
+    this.watchdogTimer = null
+  }
+
+  /**
+   * If the clock goes dry (missed onended, suspended context, hung prefetch)
+   * keep pulling the next chunk instead of sitting in a silent "playing" state.
+   */
+  private recoverIfStalled(generation: number) {
+    if (generation !== this.generation) return
+    if (this.phase === 'idle' || this.phase === 'paused') return
+    const state = this.clock.contextState as string
+    if (state !== 'running') this.clock.unlock()
+    if (this.clock.bufferedAheadSeconds() > 0.08) return
+    if (!this.pool || !this.controller) return
+
+    let next = this.currentIndex
+    if (this.clock.scheduledCount === 0) {
+      const current = this.chunks[next]
+      const alreadyPlayed = Boolean(
+        current?.buffer && this.scheduledBuffers.has(current.buffer) && current.status === 'ready',
+      )
+      if (alreadyPlayed) next += 1
+    } else {
+      next = this.currentIndex + 1
+    }
+    if (next >= this.chunks.length) return
+
+    if (this.scheduleReadyFrom(next) > 0) {
+      this.phase = 'playing'
+      this.lane = 'native'
+      this.emit()
+      return
+    }
+
+    const chunk = this.chunks[next]
+    if (!chunk || chunk.status === 'fetching' || this.loadingChunkIndexes.has(next)) return
+
+    this.phase = 'buffering'
+    this.loadingChunkIndexes.add(next)
+    this.emit()
+    void this.pool.ensure(next, this.controller.signal, false)
+      .then(() => {
+        this.loadingChunkIndexes.delete(next)
+        if (generation !== this.generation) return
+        if (this.scheduleReadyFrom(next) > 0) {
+          this.phase = 'playing'
+          this.lane = 'native'
+        }
+        this.refreshExpectMore(next)
+        this.emit()
+      })
+      .catch((error) => {
+        this.loadingChunkIndexes.delete(next)
+        if (generation !== this.generation) return
+        this.hooks.showToast(audioErrorMessage(error))
+        this.stop()
+      })
+  }
+
+  private releasePlayedChunks(currentIndex: number) {
+    const dropUntil = currentIndex - 1
+    for (let i = 0; i < dropUntil; i += 1) {
+      const chunk = this.chunks[i]
+      if (!chunk) continue
+      if (chunk.url && chunk.url.startsWith('blob:')) {
+        URL.revokeObjectURL(chunk.url)
+        this.objectUrls.delete(chunk.url)
+      }
+      chunk.buffer = null
+      chunk.url = null
     }
   }
 

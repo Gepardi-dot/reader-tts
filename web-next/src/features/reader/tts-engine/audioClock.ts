@@ -59,6 +59,15 @@ export class AudioClock {
   private nextUnitId = 1
   private rafId: number | null = null
   private expectMore = false
+  private horizon = 0
+  private keepAlive: { source: AudioScheduledSourceNode; gain: GainNode } | null = null
+  private detachCtxListeners: (() => void) | null = null
+  private visibilityBound = false
+  private readonly onVisibility = () => {
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return
+    if (!this.active || this.paused) return
+    void this.resume()
+  }
 
   /** HTML pitch-preserving lane */
   private htmlAudio: HTMLAudioElement | null = null
@@ -84,7 +93,11 @@ export class AudioClock {
   get lastScheduledEnd() {
     if (this.useHtmlLane()) return null
     const last = this.scheduled[this.scheduled.length - 1]
-    return last?.endAt ?? null
+    return last?.endAt ?? (this.horizon || null)
+  }
+
+  get contextState() {
+    return this.ctx?.state ?? 'closed'
   }
 
   bufferedAheadSeconds() {
@@ -104,16 +117,32 @@ export class AudioClock {
     }
     const ctx = this.ctx
     const last = this.scheduled[this.scheduled.length - 1]
-    if (!ctx || !last) return 0
-    return Math.max(0, last.endAt - ctx.currentTime)
+    const endAt = last?.endAt ?? this.horizon
+    if (!ctx || endAt <= 0) return 0
+    return Math.max(0, endAt - ctx.currentTime)
   }
 
   ensureContext() {
     if (!this.ctx || this.ctx.state === 'closed') {
+      this.detachContextListeners()
+      this.keepAlive = null
       this.ctx = createAudioContext()
       this.activeUnitId = null
+      this.horizon = 0
     }
+    this.attachContextListeners(this.ctx)
     return this.ctx
+  }
+
+  /**
+   * Call from a user-gesture stack (tap / keydown) before any await.
+   * Keeps one AudioContext unlocked for the session so a slow Kokoro fetch
+   * cannot lose autoplay permission and go silently stuck.
+   */
+  unlock() {
+    const ctx = this.ensureContext()
+    this.ensureKeepAlive(ctx)
+    if (ctx.state !== 'running') void ctx.resume().catch(() => undefined)
   }
 
   setHandlers(handlers: AudioClockHandlers) {
@@ -198,6 +227,7 @@ export class AudioClock {
     this.sessionToken += 1
     this.htmlPlayGeneration += 1
     this.stopProgress()
+    this.stopKeepAlive()
     for (const source of this.sources) {
       try {
         source.onended = null
@@ -209,6 +239,7 @@ export class AudioClock {
     }
     this.sources = []
     this.scheduled = []
+    this.horizon = 0
     this.stopHtmlLane(true)
     this.activeUnitId = null
     this.active = false
@@ -219,6 +250,8 @@ export class AudioClock {
 
   close() {
     this.stop()
+    this.detachContextListeners()
+    this.unbindVisibility()
     void this.ctx?.close().catch(() => undefined)
     this.ctx = null
   }
@@ -235,11 +268,13 @@ export class AudioClock {
 
   private appendWebAudio(buffer: AudioBuffer, meta: ClockUnitMeta): ScheduledClockUnit | null {
     const ctx = this.ensureContext()
-    if (ctx.state === 'suspended' && !this.paused) void ctx.resume()
+    this.ensureKeepAlive(ctx)
+    if (ctx.state !== 'running' && !this.paused) void ctx.resume().catch(() => undefined)
 
     const seekSeconds = Math.max(0, Math.min(buffer.duration, meta.seekSeconds ?? 0))
-    const previousEnd = this.scheduled[this.scheduled.length - 1]?.endAt
-    const startAt = audioBufferSourceStartTime(ctx.currentTime, previousEnd ?? ctx.currentTime)
+    const chainedEnd = this.scheduled[this.scheduled.length - 1]?.endAt
+      ?? (this.horizon > ctx.currentTime ? this.horizon : ctx.currentTime)
+    const startAt = audioBufferSourceStartTime(ctx.currentTime, chainedEnd)
     // Always schedule as rate 1 on Web Audio — pitch stays natural.
     const endAt = audioBufferScheduledEndTime({
       startAt,
@@ -269,6 +304,7 @@ export class AudioClock {
 
     this.scheduled.push(unit)
     this.sources.push(source)
+    this.horizon = endAt
     this.active = true
 
     if (this.rafId === null) this.startWebProgress()
@@ -446,6 +482,7 @@ export class AudioClock {
     }
     this.sources = []
     this.scheduled = []
+    this.horizon = 0
     this.stopHtmlLane(true)
     this.activeUnitId = null
 
@@ -472,6 +509,8 @@ export class AudioClock {
     if (!last || unit.unitId !== last.unitId) return
 
     this.stopProgress()
+    // Drop the finished tail so a missed-onended poll cannot re-fire.
+    this.scheduled = this.scheduled.filter((item) => item.unitId !== unit.unitId)
     if (this.expectMore) {
       this.handlers.onUnderrun?.(unit.chunkIndex + 1)
       return
@@ -489,6 +528,20 @@ export class AudioClock {
         return
       }
       const now = ctx.currentTime
+      if ((ctx.state as string) !== 'running' && !this.paused) {
+        void ctx.resume().catch(() => undefined)
+      }
+      if (this.scheduled.length > 2) {
+        const tail = this.scheduled[this.scheduled.length - 1]!
+        this.scheduled = this.scheduled.filter((item) => item.unitId === tail.unitId || item.endAt > now)
+      }
+      const last = this.scheduled[this.scheduled.length - 1]
+      const pastEnd = Boolean(last && now >= last.endAt + 0.04)
+      const drySources = this.sources.length === 0 && Boolean(last && now >= last.endAt - 0.001)
+      if (last && (pastEnd || drySources)) {
+        this.handleWebEnded(last, this.sessionToken)
+        return
+      }
       const unit = this.scheduled.find((item) => now >= item.startAt && now < item.endAt)
       if (unit) {
         if (this.activeUnitId !== unit.unitId) {
@@ -521,6 +574,9 @@ export class AudioClock {
           this.handlers.onUnitStart?.(unit)
         }
         this.handlers.onProgress?.(unit, this.htmlAudio.currentTime)
+      } else if (unit && this.htmlAudio && (this.htmlAudio.ended || this.htmlAudio.error)) {
+        void this.playHtmlAt(this.htmlQueueIndex + 1)
+        return
       }
       this.rafId = requestAnimationFrame(tick)
     }
@@ -532,6 +588,91 @@ export class AudioClock {
       cancelAnimationFrame(this.rafId)
       this.rafId = null
     }
+  }
+
+  private ensureKeepAlive(ctx: AudioContext) {
+    if (this.keepAlive) return
+    if (typeof ctx.createGain !== 'function') return
+    try {
+      const gain = ctx.createGain()
+      gain.gain.value = 0
+      gain.connect(ctx.destination)
+      let source: AudioScheduledSourceNode
+      if (typeof ctx.createConstantSource === 'function') {
+        const constant = ctx.createConstantSource()
+        constant.offset.value = 0
+        constant.connect(gain)
+        constant.start()
+        source = constant
+      } else {
+        const silence = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * 0.5) || 1), ctx.sampleRate || 24_000)
+        const loop = ctx.createBufferSource()
+        loop.buffer = silence
+        loop.loop = true
+        loop.connect(gain)
+        loop.start()
+        source = loop
+      }
+      this.keepAlive = { source, gain }
+    } catch {
+      this.keepAlive = null
+    }
+  }
+
+  private stopKeepAlive() {
+    if (!this.keepAlive) return
+    try {
+      this.keepAlive.source.stop()
+    } catch {
+      // already stopped
+    }
+    try {
+      this.keepAlive.source.disconnect()
+      this.keepAlive.gain.disconnect()
+    } catch {
+      // ignore
+    }
+    this.keepAlive = null
+  }
+
+  private attachContextListeners(ctx: AudioContext) {
+    if (this.detachCtxListeners) return
+    const onState = () => {
+      if (!this.active || this.paused) return
+      const state = ctx.state as string
+      if (state === 'suspended' || state === 'interrupted') {
+        void ctx.resume().catch(() => undefined)
+      }
+    }
+    if (typeof ctx.addEventListener === 'function') {
+      ctx.addEventListener('statechange', onState)
+      this.detachCtxListeners = () => {
+        ctx.removeEventListener('statechange', onState)
+      }
+    } else {
+      ctx.onstatechange = onState
+      this.detachCtxListeners = () => {
+        ctx.onstatechange = null
+      }
+    }
+    this.bindVisibility()
+  }
+
+  private detachContextListeners() {
+    this.detachCtxListeners?.()
+    this.detachCtxListeners = null
+  }
+
+  private bindVisibility() {
+    if (this.visibilityBound || typeof document === 'undefined') return
+    this.visibilityBound = true
+    document.addEventListener('visibilitychange', this.onVisibility)
+  }
+
+  private unbindVisibility() {
+    if (!this.visibilityBound || typeof document === 'undefined') return
+    this.visibilityBound = false
+    document.removeEventListener('visibilitychange', this.onVisibility)
   }
 }
 

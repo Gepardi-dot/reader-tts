@@ -39,6 +39,8 @@ export const LIVE_CLIENT_CACHE_VERSION = 2
 
 const LIVE_AUDIO_MEMORY_TTL_MS = 10 * 60_000
 const LIVE_AUDIO_RATE_LIMIT_FALLBACK_MS = 60_000
+/** Client wall-clock cap so a hung Fly/Worker request cannot deadlock Play. */
+export const LIVE_AUDIO_FETCH_TIMEOUT_MS = 50_000
 const liveAudioMemoryCache = new Map<string, { expiresAt: number; promise: Promise<LiveAudioResult> }>()
 let liveAudioCooldownUntil = 0
 
@@ -157,10 +159,58 @@ async function persistClientLiveAudio(
  * Fetch live audio for a book range.
  * Lookup order: in-memory → IndexedDB (survives refresh) → network (Worker edge/R2/synth).
  */
-export async function requestLiveAudio(bookId: string, payload: LiveAudioPayload) {
+async function fetchLiveAudioJson(
+  bookId: string,
+  payload: LiveAudioPayload,
+  signal?: AbortSignal,
+): Promise<LiveAudioResult> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), LIVE_AUDIO_FETCH_TIMEOUT_MS)
+  const onParentAbort = () => ctrl.abort()
+  signal?.addEventListener('abort', onParentAbort, { once: true })
+  const timeoutError = payload.provider === 'kokoro'
+    ? 'Hosted Kokoro timed out'
+    : 'Live audio timed out. Try Play again.'
+  try {
+    if (signal?.aborted) throw new Error('Audio request aborted.')
+    return await new Promise<LiveAudioResult>((resolve, reject) => {
+      const onAbort = () => {
+        reject(new Error(signal?.aborted ? 'Audio request aborted.' : timeoutError))
+      }
+      ctrl.signal.addEventListener('abort', onAbort, { once: true })
+      request<LiveAudioResult>(`/api/books/${bookId}/live-audio`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        signal: ctrl.signal,
+      }).then((value) => {
+        ctrl.signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      }).catch((error) => {
+        ctrl.signal.removeEventListener('abort', onAbort)
+        if (ctrl.signal.aborted && !signal?.aborted) {
+          reject(new Error(timeoutError))
+          return
+        }
+        reject(error)
+      })
+    })
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onParentAbort)
+  }
+}
+
+export async function requestLiveAudio(
+  bookId: string,
+  payload: LiveAudioPayload,
+  signal?: AbortSignal,
+) {
   const cooldownMs = liveAudioCooldownRemainingMs(payload.provider)
   if (cooldownMs > 0) {
     return Promise.reject(new Error(`Gemini TTS is cooling down after a rate limit. Retry in ${Math.ceil(cooldownMs / 1000)}s.`))
+  }
+  if (signal?.aborted) {
+    return Promise.reject(new Error('Audio request aborted.'))
   }
 
   const key = liveAudioCacheKey(bookId, payload)
@@ -187,10 +237,7 @@ export async function requestLiveAudio(bookId: string, payload: LiveAudioPayload
       }
     }
 
-    const result = await request<LiveAudioResult>(`/api/books/${bookId}/live-audio`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })
+    const result = await fetchLiveAudioJson(bookId, payload, signal)
 
     // Fire-and-forget durable write so the next session/refresh is instant.
     void persistClientLiveAudio(clientKey, result)

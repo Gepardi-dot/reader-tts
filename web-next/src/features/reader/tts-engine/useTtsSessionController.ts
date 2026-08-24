@@ -96,11 +96,22 @@ export function useTtsSessionController({
     runtimeRef.current = null
   }, [])
 
+  useEffect(() => {
+    const unlock = () => ensureRuntime().unlockAudio()
+    window.addEventListener('pointerdown', unlock, { once: true, passive: true })
+    window.addEventListener('keydown', unlock, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+  }, [])
+
   const playWord = useCallback(async (
     word: string,
     startOffset: number,
     reason?: 'voice-switch',
   ) => {
+    ensureRuntime().unlockAudio()
     await ensureRuntime().start({
       word,
       startOffset,

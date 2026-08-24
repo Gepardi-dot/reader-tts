@@ -11,11 +11,12 @@ Book open / scroll
   └── KokoroEngine.preheat()  → fills SegmentCache (12 segments)
 
 Tap to play
-  └── KokoroEngine.start()
-        ├── model not ready → status "Downloading…" → auto-start when ready
+  └── TtsRuntime.start() (hosted Kokoro / Gemini)
+        ├── unlock AudioContext on the tap (before any await)
+        ├── chunk from tap offset through end of book
         ├── cache hit → schedule AudioBuffer immediately
-        ├── cache miss → stream PCM frames (first frame starts audio)
-        └── fill loop keeps ~2.2s on the WebAudio timeline
+        ├── cache miss → live-audio fetch with timeout + one retry
+        └── AudioClock keep-alive + underrun watchdog until user stops
 ```
 
 **Product rule:** Instant is a **cache property**, not a synth-latency hope.

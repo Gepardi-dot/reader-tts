@@ -88,11 +88,12 @@ import {
   isFinePointerClick,
   lockPageTurnAxis,
   pageRestY,
-  pageTurnClickDir,
   pageTurnDurationMs,
+  pageTurnGutterDir,
   prefersReducedMotion,
   resistPageTurnOffset,
   shouldCommitPageTurn,
+  shouldTrackPageTurnPointer,
 } from './pageTurn'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -3327,6 +3328,11 @@ export function ReaderRoute() {
         turn.tracking = false
         return
       }
+      // Mouse/pen turn via gutter clicks. Touch swipes turn from anywhere.
+      if (!shouldTrackPageTurnPointer(e)) {
+        turn.tracking = false
+        return
+      }
       turn.tracking = true
       turn.axis = null
       turn.startX = e.clientX
@@ -3685,23 +3691,7 @@ export function ReaderRoute() {
     warmCloudAtOffset,
   ])
 
-  // Unlock AudioContext on first gesture so Play doesn't stall on autoplay policy.
-  useEffect(() => {
-    const unlock = () => {
-      try {
-        const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-        if (!Ctx) return
-        const ctx = new Ctx()
-        void ctx.resume().finally(() => { void ctx.close().catch(() => undefined) })
-      } catch { /* ignore */ }
-    }
-    window.addEventListener('pointerdown', unlock, { once: true, passive: true })
-    window.addEventListener('keydown', unlock, { once: true })
-    return () => {
-      window.removeEventListener('pointerdown', unlock)
-      window.removeEventListener('keydown', unlock)
-    }
-  }, [])
+
 
   function patchAppearance(patch: Partial<Appearance>) {
     setAppearance(a => ({ ...a, ...patch }))
@@ -3867,7 +3857,11 @@ export function ReaderRoute() {
     if (!isFinePointerClick(e.nativeEvent)) return
     const target = e.target
     if (target instanceof Element && target.closest('button, a, input, textarea, [data-reader-sheet]')) return
-    const dir = pageTurnClickDir(e.clientX, window.innerWidth)
+    const inner = pageInnerRef.current
+    if (inner && target instanceof Node && inner.contains(target)) return
+    const rect = inner?.getBoundingClientRect()
+    const dir = pageTurnGutterDir(e.clientX, rect?.left ?? 0, rect?.right ?? 0)
+    if (dir === 0) return
     goToPage(pageIndexRef.current + dir, 'user')
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sheet, panel])
@@ -3882,19 +3876,11 @@ export function ReaderRoute() {
       return
     }
 
-    if (layoutRef.current === 'paginated' && isFinePointerClick(e.nativeEvent)) {
-      // Desktop: left/right click-to-turn is handled on the full-width surface.
-      return
-    }
-
-    // Single click → expand to word
+    // Single click → expand to word. Paginated desktop still uses this path;
+    // page turns happen on the empty left/right gutters, not on the text.
     const word = getWordAtPoint(e.clientX, e.clientY)
     if (!word) {
-      if (layoutRef.current === 'paginated' && !selection) {
-        const x = e.clientX
-        if (x < window.innerWidth * 0.18) goToPage(pageIndexRef.current - 1, 'user')
-        else if (x > window.innerWidth * 0.82) goToPage(pageIndexRef.current + 1, 'user')
-      }
+      e.stopPropagation()
       return
     }
 
@@ -3904,6 +3890,7 @@ export function ReaderRoute() {
 
     const state = buildStateFromRange(word.range, 'word', word.text)
     if (!state) return
+    e.stopPropagation()
 
     // Show selection menu only — TTS starts from the Play action, not on tap.
     // Speculatively warm hosted Kokoro/Gemini so Play is often a cache hit.
@@ -3926,6 +3913,12 @@ export function ReaderRoute() {
   const [isDragSelecting, setIsDragSelecting] = useState(false)
 
   const handleTouchStart = useCallback((ev: React.TouchEvent<HTMLDivElement>) => {
+    // Paginated: horizontal swipes turn the page. Don't steal them for
+    // drag-to-select — a tap with no movement still selects via onClick.
+    if (layoutRef.current === 'paginated') {
+      dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
+      return
+    }
     if (ev.touches.length !== 1) {
       dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
       return
@@ -3975,6 +3968,7 @@ export function ReaderRoute() {
     if (!el) return
 
     const onMove = (e: TouchEvent) => {
+      if (layoutRef.current === 'paginated') return
       const r = dragRef.current
       if (!r.startRange || e.touches.length !== 1) return
       const t = e.touches[0]
@@ -3984,9 +3978,10 @@ export function ReaderRoute() {
       if (r.mode === 'deciding') {
         const dist = Math.hypot(dx, dy)
         if (dist < 8) return
-        // If the gesture is mostly vertical, defer to scroll — or page-turn in paginated.
+        // Paginated swipes are handled by the page-turn pointer tracker.
+        // Vertical drags in continuous mode fall through to native scroll.
         if (Math.abs(dy) > Math.abs(dx) * 1.4 && Math.abs(dy) > 8) {
-          r.mode = layoutRef.current === 'paginated' ? 'paging' : 'scrolling'
+          r.mode = 'scrolling'
           return
         }
         r.mode = 'selecting'
@@ -4305,11 +4300,15 @@ export function ReaderRoute() {
           'reader-page-inner mx-auto px-5',
           paginated ? 'pb-4' : 'pb-36 transition-[max-width,padding] duration-200',
         )}
+        data-reader-page-column={paginated ? '' : undefined}
         style={{
           paddingTop: paginated ? 0 : 'calc(72px + env(safe-area-inset-top, 0px))',
           maxWidth: `${WIDTH_PX[appearance.width]}px`,
           WebkitTouchCallout: 'none',  // suppress iOS long-press callout
           touchAction: paginated ? 'none' : 'pan-y',
+          // Keep caret hit-testing so word taps work; native selection is cleared in onClick.
+          userSelect: 'auto',
+          WebkitUserSelect: 'auto',
         }}
         onMouseUp={handleMouseUp}
         onClick={handleClick}

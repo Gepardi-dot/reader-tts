@@ -87,10 +87,20 @@ export function pageRestY(pageTop: number): number {
   return y === 0 ? 0 : -y
 }
 
-/** Desktop click: left half of the screen → previous, right half → next. */
-export function pageTurnClickDir(clientX: number, viewportWidth: number): -1 | 1 {
-  const width = Math.max(1, viewportWidth)
-  return clientX < width / 2 ? -1 : 1
+/**
+ * Desktop paginated: only the empty gutters beside the written column turn
+ * the page. Clicks on the text itself never do.
+ * Left of the column → previous, right of the column → next.
+ */
+export function pageTurnGutterDir(
+  clientX: number,
+  contentLeft: number,
+  contentRight: number,
+): -1 | 0 | 1 {
+  if (!(contentRight > contentLeft)) return 0
+  if (clientX < contentLeft) return -1
+  if (clientX > contentRight) return 1
+  return 0
 }
 
 export function isFinePointerClick(event?: Event | { pointerType?: string } | null): boolean {
@@ -101,6 +111,13 @@ export function isFinePointerClick(event?: Event | { pointerType?: string } | nu
   if (pointerType === 'mouse' || pointerType === 'pen') return true
   return typeof matchMedia === 'function'
     && matchMedia('(hover: hover) and (pointer: fine)').matches
+}
+
+/** Swipe-to-turn is for touch. Mouse/pen use gutter clicks instead. */
+export function shouldTrackPageTurnPointer(
+  event?: Event | { pointerType?: string } | null,
+): boolean {
+  return !isFinePointerClick(event)
 }
 
 export async function animateTransform(

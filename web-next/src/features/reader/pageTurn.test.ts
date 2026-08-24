@@ -7,12 +7,13 @@ import {
   isFinePointerClick,
   lockPageTurnAxis,
   pageRestY,
-  pageTurnClickDir,
   pageTurnDurationMs,
+  pageTurnGutterDir,
   prefersReducedMotion,
   resistPageTurnOffset,
   rubberBandOffset,
   shouldCommitPageTurn,
+  shouldTrackPageTurnPointer,
 } from './pageTurn'
 
 describe('rubberBandOffset', () => {
@@ -104,12 +105,25 @@ describe('pageTurnDurationMs', () => {
   })
 })
 
-describe('pageTurnClickDir', () => {
-  it('turns back on the left half and forward on the right half', () => {
-    expect(pageTurnClickDir(0, 1000)).toBe(-1)
-    expect(pageTurnClickDir(499, 1000)).toBe(-1)
-    expect(pageTurnClickDir(500, 1000)).toBe(1)
-    expect(pageTurnClickDir(999, 1000)).toBe(1)
+describe('pageTurnGutterDir', () => {
+  it('turns only from the empty sides beside the written column', () => {
+    expect(pageTurnGutterDir(40, 200, 800)).toBe(-1)
+    expect(pageTurnGutterDir(199, 200, 800)).toBe(-1)
+    expect(pageTurnGutterDir(200, 200, 800)).toBe(0)
+    expect(pageTurnGutterDir(500, 200, 800)).toBe(0)
+    expect(pageTurnGutterDir(800, 200, 800)).toBe(0)
+    expect(pageTurnGutterDir(801, 200, 800)).toBe(1)
+    expect(pageTurnGutterDir(980, 200, 800)).toBe(1)
+  })
+
+  it('does not turn when the column fills the viewport', () => {
+    expect(pageTurnGutterDir(10, 0, 1000)).toBe(0)
+    expect(pageTurnGutterDir(990, 0, 1000)).toBe(0)
+  })
+
+  it('ignores an empty column rect', () => {
+    expect(pageTurnGutterDir(100, 0, 0)).toBe(0)
+    expect(pageTurnGutterDir(100, 400, 400)).toBe(0)
   })
 })
 
@@ -132,6 +146,14 @@ describe('isFinePointerClick', () => {
       removeEventListener: () => {},
     }))
     expect(isFinePointerClick({})).toBe(true)
+  })
+})
+
+describe('shouldTrackPageTurnPointer', () => {
+  it('tracks touch swipes and ignores mouse clicks', () => {
+    expect(shouldTrackPageTurnPointer({ pointerType: 'touch' })).toBe(true)
+    expect(shouldTrackPageTurnPointer({ pointerType: 'mouse' })).toBe(false)
+    expect(shouldTrackPageTurnPointer({ pointerType: 'pen' })).toBe(false)
   })
 })
 

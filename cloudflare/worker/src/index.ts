@@ -94,6 +94,7 @@ const R2_COVER_PREFIX = 'book-covers'
 const MAX_COVER_STORE_BYTES = 400_000
 const MAX_COVER_FETCH_BYTES = 2_500_000
 const COVER_FETCH_TIMEOUT_MS = 7000
+const KOKORO_REMOTE_TIMEOUT_MS = 45_000
 const ALLOWED_COVER_HOSTS = new Set([
   'covers.openlibrary.org',
   'books.google.com',
@@ -1594,7 +1595,7 @@ async function synthesizeKokoroRemote(
         voice,
         speed,
       }),
-      signal: AbortSignal.timeout(25_000),
+      signal: AbortSignal.timeout(KOKORO_REMOTE_TIMEOUT_MS),
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

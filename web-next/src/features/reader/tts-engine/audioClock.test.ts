@@ -160,6 +160,39 @@ describe('AudioClock', () => {
     expect(ended).toHaveBeenCalledTimes(1)
   })
 
+  it('recovers an underrun if BufferSource onended never fires', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      return setTimeout(() => cb(0), 16) as unknown as number
+    })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      clearTimeout(id)
+    })
+
+    const clock = new AudioClock()
+    const underrun = vi.fn()
+    clock.setHandlers({ onUnderrun: underrun })
+    clock.setExpectMore(true)
+    clock.append(audioBuffer(0.5), { chunkIndex: 2 })
+
+    contexts[0]!.currentTime = 10.6
+    await vi.advanceTimersByTimeAsync(32)
+
+    expect(underrun).toHaveBeenCalledWith(3)
+    clock.stop()
+    vi.useRealTimers()
+  })
+
+  it('unlocks a suspended context without waiting for a later append', () => {
+    const clock = new AudioClock()
+    clock.unlock()
+    expect(contexts).toHaveLength(1)
+    contexts[0]!.state = 'suspended'
+    clock.unlock()
+    expect(contexts[0]!.resume).toHaveBeenCalled()
+    clock.close()
+  })
+
   it('uses HTMLAudio with preservesPitch for non-1.0 rates (no chipmunk)', async () => {
     const fake = new FakeHtmlAudio()
     vi.stubGlobal('Audio', class {

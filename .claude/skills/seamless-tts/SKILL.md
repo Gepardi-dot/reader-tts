@@ -56,12 +56,15 @@ New element at `z-[6x]` or higher: add it to this table AND verify against sheet
 If a user reports a quality problem, suspect the implementation before defending it. Each item below is a choice that was made, not a law of nature.
 
 - **TTS v3 runtime** (`tts-engine/ttsRuntime.ts`): imperative producer/consumer. React only observes snapshots. See `docs/tts-v3-runtime.md`.
-- **AudioClock** appends WebAudio buffers end-to-end; underruns wait for the producer instead of stop/restarting the graph.
+- **Playback window**: hosted Kokoro/Gemini chunk from the tap through the rest of the book. `AUDIO_SLICE_CHARS` is only the scroll-warmup window, not session length.
+- **AudioClock** appends WebAudio buffers end-to-end; underruns wait for the producer instead of stop/restarting the graph. A silent keep-alive keeps the context running; missed `onended` is recovered from the timeline; a watchdog retries the next chunk if the clock goes dry.
+- **Gesture unlock**: `AudioClock.unlock()` runs on pointerdown/keydown and again synchronously at Play, before any live-audio await.
 - **Kokoro streams sentence PCM** via `synthesizeLocalStreaming` → `pcmToAudioBuffer` → clock.append as each frame arrives (first-audio no longer waits for full WAV). Full WAV still cached to IndexedDB on complete.
 - **Gemini** loads full live-audio chunks (edge/R2 cache) and appends when decoded; cold miss shows buffering, never silent browser-speech mask.
+- **Live-audio fetch** has a 50s client timeout and one retry on 502/timeout so a hung Fly request cannot occupy the in-memory cache forever.
 - **Browser speech** is a selected provider only (`browser`), not a hidden fallback for native voices.
 - **On-device Kokoro model path** unchanged: worker + `kokoro-model-v1` SW cache + COOP/COEP for WASM threads.
-- **Chunk sizes** (approx): Kokoro first ~48 / follow ~120; Gemini first ~140 / follow ~280; Kokoro prefetch ahead ~4, Gemini ~1.
+- **Chunk sizes** (approx): Kokoro first ~95 / mid ~160 / steady ~280; Gemini first ~110 / follow ~280; Kokoro prefetch ahead 2, Gemini 1.
 
 ---
 
@@ -73,7 +76,6 @@ These are *not* "things to work around" — they are signals that the architectu
 |---------|-------------------|
 | Gemini cold-start latency on every fresh chunk | Warm first 1–2 chunks on book open / play intent; keep edge+R2 cache hot |
 | Voice switch re-warms whole book (single-provider marker) | Marker keyed per `provider+voice`; warm caches stay warm |
-| `ctx.resume()` gesture unlock fragile on iOS Safari | Persistent unlocked AudioContext on first user gesture |
 | Non-1.0 rate still uses `playbackRate` (pitch shift) | Pitch-preserving path for rate ≠ 1 (HTMLAudio or time-stretch) |
 | Preview panel may still use a separate audio path | Route preview through `TtsRuntime` with a short text range |
 
