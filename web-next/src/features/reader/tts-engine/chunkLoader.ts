@@ -31,6 +31,8 @@ import type { NativeAudioResult, TtsAudioChunk } from './types'
 import type { ChunkLoader } from './bufferPool'
 
 const KOKORO_SYNTH_TIMEOUT_MS = 45_000
+const LIVE_AUDIO_ATTEMPTS = 2
+const LIVE_AUDIO_RETRY_MS = 500
 
 export interface ChunkLoaderConfig {
   bookId?: string
@@ -245,7 +247,65 @@ async function loadKokoroStreaming(
   })
 }
 
+function isRetryableLiveAudioError(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error)
+  if (/429|RESOURCE_EXHAUSTED|quota|rate limit|cooling down|Invalid live audio|does not match|not configured|Authentication|Unauthorized|Open a book/i.test(raw)) {
+    return false
+  }
+  return /502|503|504|timeout|timed out|unreachable|Failed to fetch|NetworkError|Audio fetch failed|decode|empty audio/i.test(raw)
+}
+
+function sleep(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    const timer = setTimeout(resolve, ms)
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer)
+      resolve()
+    }, { once: true })
+  })
+}
+
 async function loadLiveProviderChunk(
+  chunk: TtsAudioChunk,
+  signal: AbortSignal,
+  opts: {
+    bookId: string
+    provider: string
+    voice: string | null
+    rate: number
+    background: boolean
+    stale: () => boolean
+    ensureAudioContext: () => AudioContext
+    trackObjectUrl: (url: string) => void
+    onFrame: (frame: NativeAudioResult & { buffer: AudioBuffer }) => void
+  },
+) {
+  let lastError: unknown
+  for (let attempt = 0; attempt < LIVE_AUDIO_ATTEMPTS; attempt += 1) {
+    try {
+      await loadLiveProviderChunkOnce(chunk, signal, opts)
+      return
+    } catch (error) {
+      lastError = error
+      if (
+        signal.aborted
+        || opts.stale()
+        || !isRetryableLiveAudioError(error)
+        || attempt === LIVE_AUDIO_ATTEMPTS - 1
+      ) {
+        throw error
+      }
+      await sleep(LIVE_AUDIO_RETRY_MS * (attempt + 1), signal)
+    }
+  }
+  throw lastError
+}
+
+async function loadLiveProviderChunkOnce(
   chunk: TtsAudioChunk,
   signal: AbortSignal,
   opts: {
@@ -302,7 +362,7 @@ async function loadLiveProviderChunk(
   const fetchStartedAt = performanceNow()
   let liveAudio
   try {
-    liveAudio = await requestLiveAudio(opts.bookId, payload)
+    liveAudio = await requestLiveAudio(opts.bookId, payload, signal)
   } catch (error) {
     queuePerformanceTelemetry({
       eventName: 'tts.live_audio_error_v2',

@@ -79,7 +79,7 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
       text: chunk.text,
     }
     try {
-      await requestLiveAudio(bookId, payload)
+      await requestLiveAudio(bookId, payload, signal)
     } catch {
       // Warm is best-effort; Play will surface real errors.
       return

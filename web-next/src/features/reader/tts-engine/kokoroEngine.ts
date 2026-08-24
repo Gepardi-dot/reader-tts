@@ -253,7 +253,7 @@ export class KokoroEngine {
     this.hooks.onSnapshot()
 
     startWarmup()
-    void this.clock.ensureContext().resume()
+    this.clock.unlock()
 
     if (!isModelReady()) {
       this.pendingPlay = req

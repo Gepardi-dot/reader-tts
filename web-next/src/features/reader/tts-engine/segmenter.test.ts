@@ -63,6 +63,24 @@ describe('tts v2 segmenter', () => {
     expect(warmChunks.map((chunk) => chunk.text).join('')).toContain('second boundary.')
   })
 
+  it('chunks from the tap through the rest of the book, not a short slice', () => {
+    const text = `${'Once upon a time there was a long passage. '.repeat(80)}The end.`
+    expect(text.length).toBeGreaterThan(2200)
+
+    const chunks = buildTtsChunks({
+      bookText: text,
+      startOffset: 0,
+      provider: 'kokoro',
+      presynthGrid: null,
+      kokoroModelReady: true,
+    })
+
+    expect(chunks.length).toBeGreaterThan(8)
+    expect(chunks[0]?.start).toBe(0)
+    expect(chunks.at(-1)?.end).toBe(text.length)
+    expect(chunks.map((chunk) => chunk.text).join('')).toBe(text)
+  })
+
   it('returns no chunks when the tapped position has no readable text', () => {
     expect(buildTtsChunks({
       bookText: 'Readable text.      ',

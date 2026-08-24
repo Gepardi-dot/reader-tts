@@ -34,6 +34,7 @@ export const DEFAULT_FIRST_AUDIO_CHARS = 180
 export const DEFAULT_SECOND_AUDIO_CHARS = 220
 export const DEFAULT_AUDIO_CHARS = 800
 export const PREFETCH_CHUNK_LIMIT = 3
+/** Scroll-warmup window only. Playback sessions chunk from the tap to EOF. */
 export const AUDIO_SLICE_CHARS = 2200
 // Slight lead hides scheduling jitter between concatenated PCM frames.
 export const AUDIO_CONTEXT_START_LEAD_SEC = 0.008

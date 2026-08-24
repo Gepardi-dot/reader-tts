@@ -1,5 +1,4 @@
 import {
-  AUDIO_SLICE_CHARS,
   CHUNK_CHARS,
   DEFAULT_AUDIO_CHARS,
   DEFAULT_FIRST_AUDIO_CHARS,
@@ -56,11 +55,12 @@ export function buildTtsChunks({
   if (useGrid) {
     const grid = [...presynthGrid]
     const chunkIdx = findGridChunk(grid, start)
+    const remaining = Math.max(1, grid.length - chunkIdx)
     const raw = buildAudioChunksFromGridWindow({
       fullText: bookText,
       grid,
       start,
-      windowChunks: 50,
+      windowChunks: remaining,
       targetChars: chunkSize,
       firstTargetChars: firstChunkSize,
       secondTargetChars: secondChunkSize,
@@ -68,7 +68,7 @@ export function buildTtsChunks({
 
     const fallback = raw.length > 0
       ? raw
-      : grid.slice(chunkIdx, chunkIdx + 50)
+      : grid.slice(chunkIdx)
         .map((item) => ({
           start: Math.max(item.start, start),
           end: item.end,
@@ -79,8 +79,9 @@ export function buildTtsChunks({
     return fallback.map(toTtsChunk)
   }
 
-  const end = Math.min(bookText.length, start + AUDIO_SLICE_CHARS)
-  const snippet = bookText.slice(start, end)
+  // Play through the rest of the book. AUDIO_SLICE_CHARS is only for
+  // scroll-based warmup, not the listening session.
+  const snippet = bookText.slice(start)
   return buildAudioChunks(snippet, start, chunkSize, firstChunkSize, secondChunkSize).map(toTtsChunk)
 }
 
