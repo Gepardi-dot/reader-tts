@@ -4174,39 +4174,47 @@ export function ReaderRoute() {
   // Paginated clip-path swallows inline <mark> backgrounds. Paint the wash as
   // a fixed overlay (same trick as word selection) clipped to the page frame.
   useLayoutEffect(() => {
-    if (appearance.layout !== 'paginated' || !playbackRange) {
-      setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
-      return
-    }
-    const root = readerTextRef.current
-    const frame = pageStageRef.current ?? readerScrollRef.current
-    if (!root || !frame) {
-      setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
-      return
-    }
-    const range = domRangeForSourceOffsets(playbackRange.start, playbackRange.end, root)
-    if (!range) {
-      setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
-      return
-    }
-    const text = root.hasAttribute('data-reader-text')
-      ? root
-      : root.querySelector<HTMLElement>('[data-reader-text]')
-    const prevClip = text?.style.clipPath ?? ''
-    if (text && prevClip) text.style.clipPath = 'none'
-    const fallbackRect = range.getBoundingClientRect()
-    const raw = fallbackRect.width === 0 && fallbackRect.height === 0
-      ? []
-      : selectionRectsFromRange(range, fallbackRect)
-    if (text) text.style.clipPath = prevClip
-    const frameRect = frame.getBoundingClientRect()
-    const next = clipRectsToBounds(raw, {
-      left: frameRect.left,
-      top: frameRect.top,
-      width: frameRect.width,
-      height: frameRect.height,
+    let cancelled = false
+    const frameId = window.requestAnimationFrame(() => {
+      if (cancelled) return
+      if (appearance.layout !== 'paginated' || !playbackRange) {
+        setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
+        return
+      }
+      const root = readerTextRef.current
+      const frame = pageStageRef.current ?? readerScrollRef.current
+      if (!root || !frame) {
+        setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
+        return
+      }
+      const range = domRangeForSourceOffsets(playbackRange.start, playbackRange.end, root)
+      if (!range) {
+        setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
+        return
+      }
+      const text = root.hasAttribute('data-reader-text')
+        ? root
+        : root.querySelector<HTMLElement>('[data-reader-text]')
+      const prevClip = text?.style.clipPath ?? ''
+      if (text && prevClip) text.style.clipPath = 'none'
+      const fallbackRect = range.getBoundingClientRect()
+      const raw = fallbackRect.width === 0 && fallbackRect.height === 0
+        ? []
+        : selectionRectsFromRange(range, fallbackRect)
+      if (text) text.style.clipPath = prevClip
+      const frameRect = frame.getBoundingClientRect()
+      const next = clipRectsToBounds(raw, {
+        left: frameRect.left,
+        top: frameRect.top,
+        width: frameRect.width,
+        height: frameRect.height,
+      })
+      setPlaybackOverlayRects((current) => (overlayRectsEqual(current, next) ? current : next))
     })
-    setPlaybackOverlayRects((current) => (overlayRectsEqual(current, next) ? current : next))
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(frameId)
+    }
   }, [
     appearance.layout,
     appearance.fontSize,
