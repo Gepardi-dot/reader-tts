@@ -38,7 +38,7 @@ Per-process dicts/sets only persist within one lambda invocation. Any cache must
 
 | z-index | Element | Notes |
 |--------:|---------|-------|
-| `z-[54]` | Paginated playback overlay | `pointer-events-none`; continuous still uses an inline `mark` |
+| `z-[54]` | *(unused)* | Paginated spoken wash is an absolute overlay inside the page inner |
 | `z-[55]` | Selection overlay | `pointer-events-none` |
 | `z-[60]` | Selection action menu | Vocab/dictionary/play popup |
 | `z-[65]` | BottomSheet | Container + backdrop |

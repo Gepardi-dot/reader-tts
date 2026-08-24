@@ -168,6 +168,19 @@ export function overlayRectsEqual(a: readonly OverlayRect[], b: readonly Overlay
   })
 }
 
+/** Map viewport boxes onto a transformed page inner. */
+export function clientRectsToLocal(
+  rects: readonly OverlayRect[],
+  origin: { left: number; top: number },
+): OverlayRect[] {
+  return rects.map((rect) => ({
+    left: rect.left - origin.left,
+    top: rect.top - origin.top,
+    width: rect.width,
+    height: rect.height,
+  })).filter((rect) => rect.width >= 1 && rect.height >= 1)
+}
+
 /** Visible Y-span of one page in the laid-out document. */
 export function pageClipRange(
   pages: Array<{ top: number; bottom?: number }>,
