@@ -65,6 +65,7 @@ If a user reports a quality problem, suspect the implementation before defending
 - **Browser speech** is a selected provider only (`browser`), not a hidden fallback for native voices.
 - **On-device Kokoro model path** unchanged: worker + `kokoro-model-v1` SW cache + COOP/COEP for WASM threads.
 - **Chunk sizes** (approx): Kokoro first ~95 / mid ~160 / steady ~280; Gemini first ~110 / follow ~280; Kokoro prefetch ahead 2, Gemini 1.
+- **Paginated follow**: each visual line stores the first source character on that line. Reusing the paragraph start on every wrapped line made `pageIndexForOffset` jump to the last page of the paragraph.
 
 ---
 

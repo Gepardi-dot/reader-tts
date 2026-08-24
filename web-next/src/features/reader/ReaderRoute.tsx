@@ -74,6 +74,7 @@ import {
 import { expandToReadingPhrase } from './readingPhrase'
 import {
   applyReaderScrollerStyle,
+  assignLineStartOffsets,
   clampPageIndex,
   clipRangeToPage,
   clientRectsToLocal,
@@ -2971,12 +2972,49 @@ export function ReaderRoute() {
           merged.push({ top, bottom })
         }
       }
-      for (const line of merged) {
-        lines.push({ ...line, startOffset: paraStart })
+      if (merged.length === 0) continue
+      // Wrapped lines need their own offsets. Reusing paraStart makes every
+      // page of a long paragraph share one startOffset, and TTS follow jumps
+      // to the last of those pages.
+      const textLength = (para.textContent ?? '').length
+      const starts = assignLineStartOffsets(merged, paraStart, textLength, (localOffset) =>
+        charTopInParagraph(para, localOffset, rootRect.top),
+      )
+      for (let i = 0; i < merged.length; i += 1) {
+        lines.push({ ...merged[i]!, startOffset: starts[i] ?? paraStart })
       }
     }
 
     return lines
+  }
+
+  function charTopInParagraph(
+    para: HTMLElement,
+    localOffset: number,
+    rootRectTop: number,
+  ): number | null {
+    const textLen = (para.textContent ?? '').length
+    if (textLen <= 0) return null
+    const point = findDomPointAtOffset(para, Math.max(0, Math.min(localOffset, textLen - 1)))
+    if (!point) return null
+    const probe = document.createRange()
+    try {
+      const nodeLen = (point.node.textContent ?? '').length
+      if (point.offset < nodeLen) {
+        probe.setStart(point.node, point.offset)
+        probe.setEnd(point.node, point.offset + 1)
+      } else if (point.offset > 0) {
+        probe.setStart(point.node, point.offset - 1)
+        probe.setEnd(point.node, point.offset)
+      } else {
+        probe.selectNode(point.node)
+      }
+    } catch {
+      return null
+    }
+    const rect = probe.getBoundingClientRect()
+    if (rect.width === 0 && rect.height === 0) return null
+    return Math.floor(rect.top - rootRectTop)
   }
 
   function yForSourceOffset(offset: number): number | null {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyReaderScrollerStyle,
+  assignLineStartOffsets,
   clampPageIndex,
   clipRangeToPage,
   clipRectsToBounds,
@@ -105,6 +106,56 @@ describe('pageBreaksFromLineBoxes', () => {
       { top: 520, bottom: 540, startOffset: 80 },
     ])
   })
+
+  it('starts a wrapped-paragraph page at the first character on that page', () => {
+    const pages = pageBreaksFromLineBoxes(
+      [
+        { top: 0, bottom: 20, startOffset: 0 },
+        { top: 24, bottom: 44, startOffset: 40 },
+        { top: 200, bottom: 220, startOffset: 80 },
+        { top: 224, bottom: 244, startOffset: 120 },
+        { top: 400, bottom: 420, startOffset: 160 },
+      ],
+      180,
+    )
+    expect(pages.map((page) => page.startOffset)).toEqual([0, 80, 160])
+    expect(pageIndexForOffset(pages, 79)).toBe(0)
+    expect(pageIndexForOffset(pages, 80)).toBe(1)
+    expect(pageIndexForOffset(pages, 159)).toBe(1)
+    expect(pageIndexForOffset(pages, 160)).toBe(2)
+  })
+})
+
+describe('assignLineStartOffsets', () => {
+  it('keeps a single line at the paragraph start', () => {
+    expect(assignLineStartOffsets([{ top: 0 }], 100, 50, () => 0)).toEqual([100])
+  })
+
+  it('gives later wrapped lines their own source offsets', () => {
+    const charTop = (offset: number) => Math.floor(offset / 10) * 20
+    expect(
+      assignLineStartOffsets([{ top: 0 }, { top: 20 }, { top: 40 }], 500, 30, charTop),
+    ).toEqual([500, 510, 520])
+  })
+
+  it('does not map every wrapped line to the paragraph start', () => {
+    const charTop = (offset: number) => Math.floor(offset / 8) * 22
+    const offsets = assignLineStartOffsets([{ top: 0 }, { top: 22 }, { top: 44 }], 0, 24, charTop)
+    expect(offsets[0]).toBe(0)
+    expect(offsets[1]).toBe(8)
+    expect(offsets[2]).toBe(16)
+    const pages = pageBreaksFromLineBoxes(
+      [
+        { top: 0, bottom: 20, startOffset: offsets[0]! },
+        { top: 22, bottom: 42, startOffset: offsets[1]! },
+        { top: 200, bottom: 220, startOffset: offsets[2]! },
+      ],
+      180,
+    )
+    expect(pageIndexForOffset(pages, 0)).toBe(0)
+    expect(pageIndexForOffset(pages, 8)).toBe(0)
+    expect(pageIndexForOffset(pages, 16)).toBe(1)
+  })
 })
 
 describe('page lookup', () => {
@@ -127,6 +178,20 @@ describe('page lookup', () => {
     expect(pageIndexForOffset(pages, 899)).toBe(0)
     expect(pageIndexForOffset(pages, 900)).toBe(1)
     expect(pageIndexForOffset(pages, 2500)).toBe(2)
+  })
+
+  it('stays on the spoken page of a wrapping paragraph when line offsets increase', () => {
+    const wrapping = [{ startOffset: 0 }, { startOffset: 400 }, { startOffset: 800 }]
+    expect(pageIndexForOffset(wrapping, 399)).toBe(0)
+    expect(pageIndexForOffset(wrapping, 400)).toBe(1)
+    expect(pageIndexForOffset(wrapping, 799)).toBe(1)
+    expect(pageIndexForOffset(wrapping, 800)).toBe(2)
+  })
+
+  it('skips ahead when wrapped pages reuse the paragraph start', () => {
+    expect(
+      pageIndexForOffset([{ startOffset: 0 }, { startOffset: 0 }, { startOffset: 0 }], 10),
+    ).toBe(2)
   })
 
   it('clamps page turns to the book', () => {
