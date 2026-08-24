@@ -3,6 +3,7 @@ import {
   applyReaderScrollerStyle,
   clampPageIndex,
   clipRangeToPage,
+  clipRectsToBounds,
   normalizeReaderLayout,
   pageBreaksFromLineBoxes,
   pageClipRange,
@@ -153,6 +154,27 @@ describe('clipRangeToPage', () => {
 
   it('returns null when the phrase is entirely on another page', () => {
     expect(clipRangeToPage(100, 200, pages, 1, 2500)).toBeNull()
+  })
+})
+
+describe('clipRectsToBounds', () => {
+  const bounds = { left: 100, top: 80, width: 400, height: 500 }
+
+  it('keeps rects that already sit in the page frame', () => {
+    expect(clipRectsToBounds(
+      [{ left: 120, top: 100, width: 200, height: 20 }],
+      bounds,
+    )).toEqual([{ left: 120, top: 100, width: 200, height: 20 }])
+  })
+
+  it('crops a line that hangs off the page and drops ones fully outside', () => {
+    expect(clipRectsToBounds(
+      [
+        { left: 80, top: 90, width: 80, height: 18 },
+        { left: 120, top: 600, width: 200, height: 18 },
+      ],
+      bounds,
+    )).toEqual([{ left: 100, top: 90, width: 60, height: 18 }])
   })
 })
 
