@@ -4,6 +4,7 @@ import {
   clampPageIndex,
   clipRangeToPage,
   clipRectsToBounds,
+  clientRectsToLocal,
   normalizeReaderLayout,
   pageBreaksFromLineBoxes,
   pageClipRange,
@@ -175,6 +176,15 @@ describe('clipRectsToBounds', () => {
       ],
       bounds,
     )).toEqual([{ left: 100, top: 90, width: 60, height: 18 }])
+  })
+})
+
+describe('clientRectsToLocal', () => {
+  it('rewrites viewport boxes into the page inner', () => {
+    expect(clientRectsToLocal(
+      [{ left: 140, top: 220, width: 80, height: 18 }],
+      { left: 100, top: 80 },
+    )).toEqual([{ left: 40, top: 140, width: 80, height: 18 }])
   })
 })
 

@@ -76,7 +76,7 @@ import {
   applyReaderScrollerStyle,
   clampPageIndex,
   clipRangeToPage,
-  clipRectsToBounds,
+  clientRectsToLocal,
   overlayRectsEqual,
   pageBreaksFromLineBoxes,
   pageClipRange,
@@ -4057,8 +4057,8 @@ export function ReaderRoute() {
     const range = activeAudioCueRangeRef.current
     if (!range) return
     if (layoutRef.current === 'paginated') {
-      setPlaybackRange(range)
       followPaginatedSpokenOffset(range.start)
+      updatePaginatedPlaybackOverlay(range.start, range.end)
       return
     }
     showAudioFollow(range.start, range.end, true)
@@ -4073,6 +4073,30 @@ export function ReaderRoute() {
     if (next !== pageIndexRef.current) goToPage(next, 'follow')
   }
 
+  function updatePaginatedPlaybackOverlay(startOffset: number, endOffset: number) {
+    const root = readerTextRef.current
+    const inner = pageInnerRef.current
+    if (!root || !inner || endOffset <= startOffset) return
+    const range = domRangeForSourceOffsets(startOffset, endOffset, root)
+    if (!range) return
+    const measure = () => {
+      const fallbackRect = range.getBoundingClientRect()
+      if (fallbackRect.width === 0 && fallbackRect.height === 0) return []
+      return selectionRectsFromRange(range, fallbackRect)
+    }
+    let raw = measure()
+    if (raw.length === 0 && root.style.clipPath) {
+      const prevClip = root.style.clipPath
+      root.style.clipPath = 'none'
+      raw = measure()
+      root.style.clipPath = prevClip
+    }
+    if (raw.length === 0) return
+    const next = clientRectsToLocal(raw, inner.getBoundingClientRect())
+    if (next.length === 0) return
+    setPlaybackOverlayRects((current) => (overlayRectsEqual(current, next) ? current : next))
+  }
+
   function showAudioFollow(startOffset: number, endOffset: number, follow: boolean) {
     setPlaybackRange({ start: startOffset, end: endOffset })
 
@@ -4080,6 +4104,7 @@ export function ReaderRoute() {
     if (!root) return
 
     if (layoutRef.current === 'paginated') {
+      updatePaginatedPlaybackOverlay(startOffset, endOffset)
       return
     }
 
@@ -4141,10 +4166,8 @@ export function ReaderRoute() {
       followPaginatedSpokenOffset(spoken)
     }
 
-    let start = phrase.start
-    let end = phrase.end
     if (layoutRef.current === 'paginated') {
-      const textLen = payload?.text.length ?? end
+      const textLen = payload?.text.length ?? phrase.end
       const visible = clipRangeToPage(
         phrase.start,
         phrase.end,
@@ -4158,74 +4181,18 @@ export function ReaderRoute() {
         pageIndexRef.current,
         textLen,
       )
-      if (visible) {
-        start = visible.start
-        end = visible.end
-      }
+      if (!visible) return
+      activeAudioCueRangeRef.current = visible
+      updatePaginatedPlaybackOverlay(visible.start, visible.end)
+      return
     }
 
-    const nextKey = `${start}:${end}`
-    activeAudioCueRangeRef.current = { start, end }
+    const nextKey = `${phrase.start}:${phrase.end}`
+    activeAudioCueRangeRef.current = { start: phrase.start, end: phrase.end }
     if (activeAudioCueKeyRef.current === nextKey) return
     activeAudioCueKeyRef.current = nextKey
-    showAudioFollow(start, end, follow && !audioFollowPausedRef.current)
+    showAudioFollow(phrase.start, phrase.end, follow && !audioFollowPausedRef.current)
   }
-
-  // Paginated clip-path swallows inline <mark> backgrounds. Paint the wash as
-  // a fixed overlay (same trick as word selection) clipped to the page frame.
-  useLayoutEffect(() => {
-    let cancelled = false
-    const frameId = window.requestAnimationFrame(() => {
-      if (cancelled) return
-      if (appearance.layout !== 'paginated' || !playbackRange) {
-        setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
-        return
-      }
-      const root = readerTextRef.current
-      const frame = pageStageRef.current ?? readerScrollRef.current
-      if (!root || !frame) {
-        setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
-        return
-      }
-      const range = domRangeForSourceOffsets(playbackRange.start, playbackRange.end, root)
-      if (!range) {
-        setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
-        return
-      }
-      const text = root.hasAttribute('data-reader-text')
-        ? root
-        : root.querySelector<HTMLElement>('[data-reader-text]')
-      const prevClip = text?.style.clipPath ?? ''
-      if (text && prevClip) text.style.clipPath = 'none'
-      const fallbackRect = range.getBoundingClientRect()
-      const raw = fallbackRect.width === 0 && fallbackRect.height === 0
-        ? []
-        : selectionRectsFromRange(range, fallbackRect)
-      if (text) text.style.clipPath = prevClip
-      const frameRect = frame.getBoundingClientRect()
-      const next = clipRectsToBounds(raw, {
-        left: frameRect.left,
-        top: frameRect.top,
-        width: frameRect.width,
-        height: frameRect.height,
-      })
-      setPlaybackOverlayRects((current) => (overlayRectsEqual(current, next) ? current : next))
-    })
-    return () => {
-      cancelled = true
-      window.cancelAnimationFrame(frameId)
-    }
-  }, [
-    appearance.layout,
-    appearance.fontSize,
-    appearance.lineHeight,
-    appearance.width,
-    appearance.font,
-    appearance.bionic,
-    appearance.align,
-    pageIndex,
-    playbackRange,
-  ])
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -4360,22 +4327,6 @@ export function ReaderRoute() {
         </div>
       </header>
 
-      {/* Paginated spoken wash — inline marks are clipped away with the page. */}
-      {paginated && playbackOverlayRects.map((rect, index) => (
-        <div
-          key={`pb-${Math.round(rect.top)}-${Math.round(rect.left)}-${index}`}
-          data-reader-playback-overlay="true"
-          className="fixed pointer-events-none z-[54] rounded-[3px]"
-          style={{
-            left: rect.left,
-            top: rect.top,
-            width: rect.width,
-            height: rect.height,
-            backgroundColor: colors.playback,
-          }}
-        />
-      ))}
-
       {/* ── Custom word highlight overlay (replaces browser selection highlight) ── */}
       {selection?.rects.map((rect, index) => (
         <div
@@ -4429,6 +4380,7 @@ export function ReaderRoute() {
         ref={pageInnerRef}
         className={cn(
           'reader-page-inner mx-auto px-5',
+          paginated && 'relative',
           paginated ? 'pb-4' : 'pb-36 transition-[max-width,padding] duration-200',
         )}
         data-reader-page-column={paginated ? '' : undefined}
@@ -4447,6 +4399,21 @@ export function ReaderRoute() {
         onTouchEnd={handleTouchEnd}
         onContextMenu={(e) => e.preventDefault()}
       >
+        {paginated && playbackOverlayRects.map((rect, index) => (
+          <div
+            key={`pb-${Math.round(rect.top)}-${Math.round(rect.left)}-${index}`}
+            data-reader-playback-overlay="true"
+            className="absolute pointer-events-none rounded-[3px]"
+            style={{
+              left: rect.left,
+              top: rect.top,
+              width: rect.width,
+              height: rect.height,
+              backgroundColor: colors.playback,
+              zIndex: 1,
+            }}
+          />
+        ))}
         {isLoading ? (
           <div className="pt-12 space-y-3 animate-pulse">
             {Array.from({ length: 22 }).map((_, i) => (
