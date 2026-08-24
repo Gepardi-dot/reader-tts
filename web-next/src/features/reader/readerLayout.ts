@@ -130,6 +130,44 @@ export function clipRangeToPage(
   return clippedEnd > clippedStart ? { start: clippedStart, end: clippedEnd } : null
 }
 
+export type OverlayRect = {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+/** Keep overlay boxes inside the visible page frame. */
+export function clipRectsToBounds(
+  rects: readonly OverlayRect[],
+  bounds: OverlayRect,
+): OverlayRect[] {
+  const right = bounds.left + bounds.width
+  const bottom = bounds.top + bounds.height
+  const out: OverlayRect[] = []
+  for (const rect of rects) {
+    const left = Math.max(rect.left, bounds.left)
+    const top = Math.max(rect.top, bounds.top)
+    const r = Math.min(rect.left + rect.width, right)
+    const b = Math.min(rect.top + rect.height, bottom)
+    const width = r - left
+    const height = b - top
+    if (width >= 1 && height >= 1) out.push({ left, top, width, height })
+  }
+  return out
+}
+
+export function overlayRectsEqual(a: readonly OverlayRect[], b: readonly OverlayRect[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((rect, i) => {
+    const other = b[i]!
+    return rect.left === other.left
+      && rect.top === other.top
+      && rect.width === other.width
+      && rect.height === other.height
+  })
+}
+
 /** Visible Y-span of one page in the laid-out document. */
 export function pageClipRange(
   pages: Array<{ top: number; bottom?: number }>,

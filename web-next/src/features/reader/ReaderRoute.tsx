@@ -76,11 +76,14 @@ import {
   applyReaderScrollerStyle,
   clampPageIndex,
   clipRangeToPage,
+  clipRectsToBounds,
+  overlayRectsEqual,
   pageBreaksFromLineBoxes,
   pageClipRange,
   pageIndexForOffset,
   pageIndexForY,
   readerScrollerStyle,
+  type OverlayRect,
   type ReaderLayout,
   type ReaderLineBox,
   type ReaderPageBreak,
@@ -329,6 +332,7 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
   playback,
   playbackColor,
   virtualize = true,
+  paintPlaybackInline = true,
 }: {
   paragraphs: ReaderParagraph[]
   bionic: boolean
@@ -336,6 +340,7 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
   playback: { start: number; end: number } | null
   playbackColor: string
   virtualize?: boolean
+  paintPlaybackInline?: boolean
 }) {
   return (
     <>
@@ -355,17 +360,22 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
               if (!part.color && !part.playback) {
                 return <span key={part.key}>{content}</span>
               }
+              const playbackWash = part.playback && paintPlaybackInline
               return (
                 <mark
                   key={part.key}
                   data-reader-highlight={part.color ? 'true' : undefined}
                   data-reader-playback={part.playback ? 'true' : undefined}
-                  className={part.playback ? 'reader-playback-hl' : undefined}
+                  className={playbackWash ? 'reader-playback-hl' : undefined}
                   style={{
-                    backgroundColor: part.playback ? playbackColor : HIGHLIGHT_BG[part.color!],
+                    backgroundColor: playbackWash
+                      ? playbackColor
+                      : part.color
+                        ? HIGHLIGHT_BG[part.color]
+                        : 'transparent',
                     color: 'inherit',
-                    borderRadius: part.playback ? 1 : 2,
-                    padding: part.playback && virtualize ? '0.18em 0.16em' : '0 0.04em',
+                    borderRadius: playbackWash ? 1 : 2,
+                    padding: playbackWash && virtualize ? '0.18em 0.16em' : '0 0.04em',
                   }}
                 >
                   {content}
@@ -2590,6 +2600,7 @@ export function ReaderRoute() {
   const [panel,         setPanel]         = useState<SecondaryPanel | null>(null)
   const [toast,         setToast]         = useState<string | null>(null)
   const [playbackRange, setPlaybackRange] = useState<{ start: number; end: number } | null>(null)
+  const [playbackOverlayRects, setPlaybackOverlayRects] = useState<OverlayRect[]>([])
   const [rollingCacheState, setRollingCacheState] = useState<RollingCacheState>(() => getRollingCacheState())
   const [audioPrefs, setAudioPrefs] = useState(() => loadBookSettings(bookId).audioPrefs)
   const [audioRate,     setAudioRate]     = useState(() => loadBookSettings(bookId).audioRate)
@@ -4035,6 +4046,7 @@ export function ReaderRoute() {
     activeAudioCueKeyRef.current = null
     activeAudioCueRangeRef.current = null
     setPlaybackRange(null)
+    setPlaybackOverlayRects([])
     audioFollowPausedRef.current = false
     setAudioFollowPaused(false)
   }
@@ -4158,6 +4170,55 @@ export function ReaderRoute() {
     activeAudioCueKeyRef.current = nextKey
     showAudioFollow(start, end, follow && !audioFollowPausedRef.current)
   }
+
+  // Paginated clip-path swallows inline <mark> backgrounds. Paint the wash as
+  // a fixed overlay (same trick as word selection) clipped to the page frame.
+  useLayoutEffect(() => {
+    if (appearance.layout !== 'paginated' || !playbackRange) {
+      setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
+      return
+    }
+    const root = readerTextRef.current
+    const frame = pageStageRef.current ?? readerScrollRef.current
+    if (!root || !frame) {
+      setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
+      return
+    }
+    const range = domRangeForSourceOffsets(playbackRange.start, playbackRange.end, root)
+    if (!range) {
+      setPlaybackOverlayRects((current) => (current.length === 0 ? current : []))
+      return
+    }
+    const text = root.hasAttribute('data-reader-text')
+      ? root
+      : root.querySelector<HTMLElement>('[data-reader-text]')
+    const prevClip = text?.style.clipPath ?? ''
+    if (text && prevClip) text.style.clipPath = 'none'
+    const fallbackRect = range.getBoundingClientRect()
+    const raw = fallbackRect.width === 0 && fallbackRect.height === 0
+      ? []
+      : selectionRectsFromRange(range, fallbackRect)
+    if (text) text.style.clipPath = prevClip
+    const frameRect = frame.getBoundingClientRect()
+    const next = clipRectsToBounds(raw, {
+      left: frameRect.left,
+      top: frameRect.top,
+      width: frameRect.width,
+      height: frameRect.height,
+    })
+    setPlaybackOverlayRects((current) => (overlayRectsEqual(current, next) ? current : next))
+  }, [
+    appearance.layout,
+    appearance.fontSize,
+    appearance.lineHeight,
+    appearance.width,
+    appearance.font,
+    appearance.bionic,
+    appearance.align,
+    pageIndex,
+    playbackRange,
+  ])
+
   // ── Derived ───────────────────────────────────────────────────────────────
 
   const colors     = THEMES[appearance.theme]
@@ -4291,6 +4352,22 @@ export function ReaderRoute() {
         </div>
       </header>
 
+      {/* Paginated spoken wash — inline marks are clipped away with the page. */}
+      {paginated && playbackOverlayRects.map((rect, index) => (
+        <div
+          key={`pb-${Math.round(rect.top)}-${Math.round(rect.left)}-${index}`}
+          data-reader-playback-overlay="true"
+          className="fixed pointer-events-none z-[54] rounded-[3px]"
+          style={{
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+            backgroundColor: colors.playback,
+          }}
+        />
+      ))}
+
       {/* ── Custom word highlight overlay (replaces browser selection highlight) ── */}
       {selection?.rects.map((rect, index) => (
         <div
@@ -4378,6 +4455,7 @@ export function ReaderRoute() {
               playback={playbackRange}
               playbackColor={colors.playback}
               virtualize={!paginated}
+              paintPlaybackInline={!paginated}
             />
           </div>
         )}
