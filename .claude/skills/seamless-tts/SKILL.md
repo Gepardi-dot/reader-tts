@@ -66,6 +66,7 @@ If a user reports a quality problem, suspect the implementation before defending
 - **On-device Kokoro model path** unchanged: worker + `kokoro-model-v1` SW cache + COOP/COEP for WASM threads.
 - **Chunk sizes** (approx): Kokoro first ~95 / mid ~160 / steady ~280; Gemini first ~110 / follow ~280; Kokoro prefetch ahead 2, Gemini 1.
 - **Paginated follow**: each visual line stores the first source character on that line. Reusing the paragraph start on every wrapped line made `pageIndexForOffset` jump to the last page of the paragraph.
+- **Layout switch**: paginated ↔ continuous keep the same column (fixed header, same padding) so line wrapping does not change. Continuous → paginated freezes the live Y in the same frame — it does not relayout the whole book.
 
 ---
 

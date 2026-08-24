@@ -54,6 +54,48 @@ export function applyReaderScrollerStyle(
   el.style.touchAction = next.touchAction
 }
 
+/** Floating progress pill: 18px offset + 44px bar + gap. Not inner `pb-36`. */
+export const PAGINATED_BOTTOM_CLEARANCE = 96
+
+export function paginatedTextViewHeight(
+  scrollerHeight: number,
+  paddingTop: number,
+  bottomClearance = PAGINATED_BOTTOM_CLEARANCE,
+): number {
+  return Math.max(
+    120,
+    Math.floor(scrollerHeight) - Math.max(0, paddingTop) - Math.max(0, bottomClearance),
+  )
+}
+
+/** One page of complete lines. Never clip through a line. */
+export function snapPageToLines(
+  lines: ReadonlyArray<{ top: number; bottom: number }>,
+  y: number,
+  viewportHeight: number,
+): { top: number; bottom: number } {
+  const height = Math.max(1, viewportHeight)
+  const target = Math.max(0, y)
+  if (lines.length === 0) return { top: target, bottom: target + height }
+
+  let start = 0
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i]!.top <= target + 0.5) start = i
+    else break
+  }
+  const top = lines[start]!.top
+  const limit = top + height
+  let end = start
+  for (let i = start; i < lines.length; i += 1) {
+    if (lines[i]!.bottom <= limit + 0.5) end = i
+    else break
+  }
+  const last = lines[end]!
+  const following = lines[end + 1]
+  const bottom = following ? following.top : last.bottom
+  return { top, bottom: Math.max(top + 1, bottom) }
+}
+
 export function pageBreaksFromLineBoxes(
   lines: ReaderLineBox[],
   viewportHeight: number,
@@ -130,7 +172,7 @@ export function pageIndexForY(pages: Array<{ top: number }>, y: number): number 
 }
 
 /** Last page whose first character is at or before `offset`. Pages must use the first character on that page, not the enclosing paragraph start. */
-export function pageIndexForOffset(pages: Array<{ startOffset: number }>, offset: number): number {
+export function pageIndexForOffset(pages: ReadonlyArray<{ startOffset: number }>, offset: number): number {
   if (pages.length === 0) return 0
   let index = 0
   for (let i = 0; i < pages.length; i += 1) {
@@ -237,4 +279,97 @@ export function pageClipRange(
         ? Math.max(top, nextTop)
         : top + Math.max(1, viewH)
   return { top, bottom }
+}
+
+export function clampReadOffset(offset: number, textLength: number): number {
+  if (!Number.isFinite(offset) || textLength <= 0) return 0
+  return Math.max(0, Math.min(textLength - 1, Math.floor(offset)))
+}
+
+export function scrollPctFromOffset(offset: number, textLength: number): number {
+  if (textLength <= 0) return 0
+  return Math.min(1, Math.max(0, offset / textLength))
+}
+
+/**
+ * Paginated and continuous don't share a pixel coordinate system. Always move
+ * by source offset: live spoken text while following playback, otherwise the
+ * character currently at the reading position.
+ */
+export function resolveLayoutSwitchOffset(options: {
+  spokenStart: number | null
+  viewportOffset: number
+  textLength: number
+  followPlayback: boolean
+}): number {
+  const viewport = clampReadOffset(options.viewportOffset, options.textLength)
+  if (
+    options.followPlayback
+    && options.spokenStart != null
+    && Number.isFinite(options.spokenStart)
+  ) {
+    return clampReadOffset(options.spokenStart, options.textLength)
+  }
+  return viewport
+}
+
+export function scrollDeltaToPinRect(rectTop: number, pinY: number, minDelta = 4): number {
+  if (!Number.isFinite(rectTop) || !Number.isFinite(pinY)) return 0
+  const delta = rectTop - pinY
+  return Math.abs(delta) < minDelta ? 0 : delta
+}
+
+/** Inner scrollTop → source-Y of the first line below the column padding. */
+export function pageTopFromInnerScroll(scrollTop: number, paddingTop: number): number {
+  if (!Number.isFinite(scrollTop) || !Number.isFinite(paddingTop)) return 0
+  return Math.max(0, scrollTop - Math.max(0, paddingTop))
+}
+
+export type PagedLayoutCacheKey = {
+  viewH: number
+  fontSize: number
+  lineHeight: number
+  width: string
+  font: string
+  bionic: boolean
+  align: string
+  textLength: number
+}
+
+export function pagedLayoutCacheKeyEqual(
+  a: PagedLayoutCacheKey | null | undefined,
+  b: PagedLayoutCacheKey | null | undefined,
+): boolean {
+  if (!a || !b) return false
+  return Math.abs(a.viewH - b.viewH) <= 2
+    && a.fontSize === b.fontSize
+    && Math.abs(a.lineHeight - b.lineHeight) < 0.05
+    && a.width === b.width
+    && a.font === b.font
+    && a.bionic === b.bionic
+    && a.align === b.align
+    && a.textLength === b.textLength
+}
+
+/** Current page plus neighbors so page-turn clones have real boxes without laying out the book. */
+export function pagedParagraphWindow(options: {
+  pages: ReadonlyArray<{ startOffset: number }>
+  offset: number
+  textLength: number
+}): { start: number; end: number } {
+  const textLength = Math.max(0, options.textLength)
+  const offset = clampReadOffset(options.offset, textLength)
+  if (options.pages.length === 0) {
+    return {
+      start: Math.max(0, offset - 200),
+      end: textLength > 0 ? Math.min(textLength, offset + 4500) : offset + 4500,
+    }
+  }
+  const i = pageIndexForOffset(options.pages, offset)
+  const start = options.pages[Math.max(0, i - 1)]!.startOffset
+  const endIndex = i + 2
+  const end = endIndex < options.pages.length
+    ? options.pages[endIndex]!.startOffset
+    : Math.max(start + 1, textLength)
+  return { start, end }
 }

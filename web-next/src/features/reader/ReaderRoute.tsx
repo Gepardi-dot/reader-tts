@@ -76,14 +76,23 @@ import {
   applyReaderScrollerStyle,
   assignLineStartOffsets,
   clampPageIndex,
+  clampReadOffset,
   clipRangeToPage,
   clientRectsToLocal,
   overlayRectsEqual,
   pageBreaksFromLineBoxes,
   pageClipRange,
   pageIndexForOffset,
-  pageIndexForY,
+  PAGINATED_BOTTOM_CLEARANCE,
+  pagedParagraphWindow,
+  pageTopFromInnerScroll,
+  paginatedTextViewHeight,
   readerScrollerStyle,
+  snapPageToLines,
+  resolveLayoutSwitchOffset,
+  scrollDeltaToPinRect,
+  scrollPctFromOffset,
+  type PagedLayoutCacheKey,
   type OverlayRect,
   type ReaderLayout,
   type ReaderLineBox,
@@ -333,6 +342,8 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
   playback,
   playbackColor,
   virtualize = true,
+  layoutStart = 0,
+  layoutEnd = 0,
   paintPlaybackInline = true,
 }: {
   paragraphs: ReaderParagraph[]
@@ -341,20 +352,28 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
   playback: { start: number; end: number } | null
   playbackColor: string
   virtualize?: boolean
+  layoutStart?: number
+  layoutEnd?: number
   paintPlaybackInline?: boolean
 }) {
   return (
     <>
       {paragraphs.map((p, i) => {
         const parts = splitParagraphByHighlights(p.text, p.startOffset, highlights, playback)
+        const skipLayout = virtualize && (
+          layoutEnd <= layoutStart
+          || p.startOffset + p.text.length < layoutStart
+          || p.startOffset > layoutEnd
+        )
         return (
           <p
             key={`${p.startOffset}-${i}`}
             className={cn(
               'mb-[1.4em]',
-              virtualize && '[content-visibility:auto] [contain-intrinsic-size:auto_6em]',
+              skipLayout && '[content-visibility:auto] [contain-intrinsic-size:auto_6em]',
             )}
             data-reader-paragraph-start={p.startOffset}
+            data-reader-layout-skip={skipLayout ? '' : undefined}
           >
             {parts.map((part) => {
               const content = bionic ? toBionicNodes(part.text) : part.text
@@ -2596,6 +2615,11 @@ export function ReaderRoute() {
   const [scrollPct,     setScrollPct]     = useState(0)
   const [pageIndex,     setPageIndex]     = useState(0)
   const [pageBreaks,    setPageBreaks]    = useState<ReaderPageBreak[]>([])
+  const [pagedLayoutAll, setPagedLayoutAll] = useState(false)
+  const pagedLayoutAllRef = useRef(false)
+  if (appearance.layout !== 'paginated' && pagedLayoutAll) {
+    setPagedLayoutAll(false)
+  }
   const [barVisible,    setBarVisible]    = useState(true)
   const [selection,     setSelection]     = useState<SelectionState | null>(null)
   const [panel,         setPanel]         = useState<SecondaryPanel | null>(null)
@@ -2610,6 +2634,8 @@ export function ReaderRoute() {
 
   const lastScrollY           = useRef(0)
   const latestScrollPct       = useRef(0)
+  const readOffsetRef         = useRef(0)
+  const spokenOffsetRef       = useRef<number | null>(null)
   const scrollTimer           = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveTimer             = useRef<ReturnType<typeof setTimeout> | null>(null)
   const justShowedMenu        = useRef(false)
@@ -2631,6 +2657,8 @@ export function ReaderRoute() {
   const layoutRef             = useRef<ReaderLayout>(appearance.layout)
   const pageIndexRef          = useRef(0)
   const pageBreaksRef         = useRef<ReaderPageBreak[]>([])
+  const lastPagedBreaksRef    = useRef<ReaderPageBreak[]>([])
+  const lastPagedKeyRef       = useRef<PagedLayoutCacheKey | null>(null)
   const pendingPageOffsetRef  = useRef<number | null>(null)
   const prevLayoutRef         = useRef<ReaderLayout>(appearance.layout)
   const pageTurnRef           = useRef({
@@ -2651,6 +2679,7 @@ export function ReaderRoute() {
   layoutRef.current = appearance.layout
   pageIndexRef.current = pageIndex
   pageBreaksRef.current = pageBreaks
+  pagedLayoutAllRef.current = pagedLayoutAll
   const panelSnapshotRef      = useRef<SecondaryPanel | null>(null)
   const openPanel = useCallback((nextPanel: SecondaryPanel) => {
     panelSnapshotRef.current = nextPanel
@@ -2760,19 +2789,22 @@ export function ReaderRoute() {
   }
 
   function scrollReaderBy(delta: number, behavior: ScrollBehavior = 'auto') {
-    const el = readerScrollRef.current
-    if (el) el.scrollBy({ top: delta, behavior })
-    else window.scrollBy({ top: delta, behavior })
+    const { y } = getReaderScrollMetrics()
+    scrollReaderTo(y + delta, behavior)
   }
 
   function getPagedChrome() {
-    const frame = pageLayerRef.current ?? pageStageRef.current ?? readerScrollRef.current
-    if (!frame) {
+    const scroller = readerScrollRef.current
+    const inner = pageInnerRef.current
+    if (!scroller) {
       return { headerH: READER_HEADER_HEIGHT, top: 0, viewH: Math.max(120, window.innerHeight - 140) }
     }
-    const cs = getComputedStyle(frame)
-    const pad = Number.parseFloat(cs.paddingTop || '0') + Number.parseFloat(cs.paddingBottom || '0')
-    const viewH = Math.max(120, frame.clientHeight - pad)
+    const padTop = inner ? Number.parseFloat(getComputedStyle(inner).paddingTop || '0') : 0
+    const viewH = paginatedTextViewHeight(
+      scroller.clientHeight,
+      padTop,
+      PAGINATED_BOTTOM_CLEARANCE,
+    )
     return { headerH: READER_HEADER_HEIGHT, top: 0, viewH }
   }
 
@@ -2933,7 +2965,11 @@ export function ReaderRoute() {
     setPageIndex(next)
 
     const textLen = payload?.text.length ?? 0
-    const pct = textLen > 0 ? Math.min(1, page.startOffset / textLen) : 0
+    if (reason !== 'follow') readOffsetRef.current = page.startOffset
+    const pct = scrollPctFromOffset(
+      reason === 'follow' ? readOffsetRef.current : page.startOffset,
+      textLen,
+    )
     latestScrollPct.current = pct
     setScrollPct(pct)
     setBarVisible(true)
@@ -2954,6 +2990,7 @@ export function ReaderRoute() {
     const lines: ReaderLineBox[] = []
 
     for (const para of paragraphs) {
+      if (para.hasAttribute('data-reader-layout-skip')) continue
       const paraStart = Number(para.dataset.readerParagraphStart)
       if (!Number.isFinite(paraStart)) continue
       const range = document.createRange()
@@ -3028,6 +3065,158 @@ export function ReaderRoute() {
     const rect = range.getBoundingClientRect()
     if (rect.width === 0 && rect.height === 0) return null
     return rect.top - root.getBoundingClientRect().top
+  }
+
+  function continuousReadingPinY(): number {
+    const header = document.querySelector('[data-reader-header]')
+    const bottom = header?.getBoundingClientRect().bottom
+    return (bottom ?? READER_HEADER_HEIGHT) + 16
+  }
+
+  function sourceOffsetAtViewportPin(): number | null {
+    const scroller = readerScrollRef.current
+    const root = readerTextRef.current
+    const text = payload?.text
+    if (!scroller || !root || !text) return null
+    const rect = scroller.getBoundingClientRect()
+    if (rect.height <= 0 || rect.width <= 0) return null
+    const y = Math.max(rect.top + 8, Math.min(continuousReadingPinY(), rect.bottom - 8))
+    const x = rect.left + rect.width / 2
+    const caret = caretRangeAt(x, y)
+    if (!caret) return null
+    const offset = sourceOffsetForDomPoint(caret.startContainer, caret.startOffset, root)
+    return offset == null ? null : clampReadOffset(offset, text.length)
+  }
+
+  function scrollContinuousToOffset(offset: number, pin: 'start' | 'center') {
+    const root = readerTextRef.current
+    const text = payload?.text ?? ''
+    if (!root || !text) return
+    const start = clampReadOffset(offset, text.length)
+    const end = Math.min(text.length, start + 1)
+    const range = domRangeForSourceOffsets(start, end, root)
+    const node = range?.startContainer
+    const el = node
+      ? (node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement)
+      : null
+
+    const tryPin = (): boolean => {
+      const live = domRangeForSourceOffsets(start, end, root)
+      if (!live) return false
+      const rect = live.getBoundingClientRect()
+      if (rect.width === 0 && rect.height === 0) return false
+      const pinY = pin === 'center'
+        ? getReaderScrollMetrics().view * 0.42
+        : continuousReadingPinY()
+      const delta = scrollDeltaToPinRect(rect.top, pinY)
+      if (delta === 0) return true
+      programmaticScrollRef.current = true
+      scrollReaderBy(delta, 'auto')
+      return true
+    }
+
+    // Force content-visibility to lay out this paragraph before measuring.
+    programmaticScrollRef.current = true
+    el?.scrollIntoView({ block: pin === 'center' ? 'center' : 'start', behavior: 'auto' })
+    tryPin()
+    requestAnimationFrame(() => {
+      tryPin()
+      window.setTimeout(() => { programmaticScrollRef.current = false }, 80)
+    })
+  }
+
+  function captureViewportReadOffset(fromLayout: ReaderLayout): number {
+    if (fromLayout === 'continuous') {
+      return sourceOffsetAtViewportPin() ?? readOffsetRef.current
+    }
+    const page = pageBreaksRef.current[pageIndexRef.current]
+      ?? lastPagedBreaksRef.current[pageIndexRef.current]
+    return page?.startOffset ?? readOffsetRef.current
+  }
+
+  function currentPagedLayoutKey(): PagedLayoutCacheKey {
+    return {
+      viewH: getPageViewHeight(),
+      fontSize: appearance.fontSize,
+      lineHeight: appearance.lineHeight,
+      width: appearance.width,
+      font: appearance.font,
+      bionic: appearance.bionic,
+      align: appearance.align,
+      textLength: payload?.text.length ?? 0,
+    }
+  }
+
+  function applyPagedOffsetFast(offset: number): boolean {
+    const inner = pageInnerRef.current
+    const scroller = readerScrollRef.current
+    const root = readerTextRef.current
+    const padTop = inner ? Number.parseFloat(getComputedStyle(inner).paddingTop || '0') : 0
+    const liveY = yForSourceOffset(offset)
+    const rawTop = liveY != null
+      ? Math.max(0, liveY)
+      : pageTopFromInnerScroll(scroller?.scrollTop ?? 0, padTop)
+    const viewH = getPageViewHeight()
+    let lines: Array<{ top: number; bottom: number }> = []
+    if (root) {
+      const prevClip = root.style.clipPath
+      root.style.clipPath = 'none'
+      lines = collectReaderLineBoxes(root)
+      root.style.clipPath = prevClip
+    }
+    const snapped = snapPageToLines(lines, rawTop, viewH)
+    const cached = lastPagedBreaksRef.current.length > 0
+      ? lastPagedBreaksRef.current
+      : pageBreaksRef.current
+    if (cached.length > 0) {
+      const index = pageIndexForOffset(cached, offset)
+      const pages = cached.map((page, i) => (
+        i === index
+          ? { ...page, top: snapped.top, bottom: snapped.bottom }
+          : page
+      ))
+      pageBreaksRef.current = pages
+      goToPage(index, 'restore')
+      return true
+    }
+    const page = {
+      top: snapped.top,
+      bottom: snapped.bottom,
+      startOffset: offset,
+    }
+    pageBreaksRef.current = [page]
+    pageIndexRef.current = 0
+    applyRestingPageTransform(page)
+    return true
+  }
+
+  function revealPlaybackAfterLayoutSwitch(followPlayback: boolean) {
+    const cue = activeAudioCueRangeRef.current
+    if (!cue) {
+      if (layoutRef.current === 'paginated') setPlaybackOverlayRects([])
+      return
+    }
+    activeAudioCueKeyRef.current = null
+    if (layoutRef.current === 'paginated') {
+      setPlaybackRange(null)
+      const textLen = payload?.text.length ?? cue.end
+      if (followPlayback) followPaginatedSpokenOffset(cue.start)
+      const visible = clipRangeToPage(
+        cue.start,
+        cue.end,
+        pageBreaksRef.current,
+        pageIndexRef.current,
+        textLen,
+      )
+      if (!visible) {
+        setPlaybackOverlayRects([])
+        return
+      }
+      updatePaginatedPlaybackOverlay(visible.start, visible.end)
+      return
+    }
+    setPlaybackOverlayRects([])
+    showAudioFollow(cue.start, cue.end, followPlayback)
   }
 
   async function revealPage(
@@ -3148,16 +3337,17 @@ export function ReaderRoute() {
       pageBreaksRef.current = pages
       setPageBreaks(pages)
     }
+    lastPagedBreaksRef.current = pages
+    lastPagedKeyRef.current = currentPagedLayoutKey()
 
     const pending = pendingPageOffsetRef.current
     if (pending != null) pendingPageOffsetRef.current = null
+    const followPlayback = isAudioActive() && !audioFollowPausedRef.current
     const offset = pending
-      ?? activeAudioCueRangeRef.current?.start
+      ?? (followPlayback ? (spokenOffsetRef.current ?? activeAudioCueRangeRef.current?.start) : null)
+      ?? readOffsetRef.current
       ?? Math.round(latestScrollPct.current * payload.text.length)
-    const y = yForSourceOffset(offset)
-    const next = y == null
-      ? pageIndexForOffset(pages, offset)
-      : pageIndexForY(pages, y)
+    const next = pageIndexForOffset(pages, offset)
     if (pageTurnRef.current.tracking || pageTurnRef.current.animating) {
       if (prevClip) root.style.clipPath = prevClip
       return
@@ -3257,20 +3447,20 @@ export function ReaderRoute() {
     if (!payload?.text) return
 
     const applyOffset = (offset: number) => {
-      const pct = payload.text.length ? Math.min(1, Math.max(0, offset / payload.text.length)) : 0
+      const clamped = clampReadOffset(offset, payload.text.length)
+      readOffsetRef.current = clamped
+      const pct = scrollPctFromOffset(clamped, payload.text.length)
       latestScrollPct.current = pct
       setScrollPct(pct)
       if (appearance.layout === 'paginated') {
-        pendingPageOffsetRef.current = offset
+        pendingPageOffsetRef.current = clamped
         if (pageBreaksRef.current.length > 0) {
-          const y = yForSourceOffset(offset)
-          const next = y == null ? 0 : pageIndexForY(pageBreaksRef.current, y)
+          const next = pageIndexForOffset(pageBreaksRef.current, clamped)
           goToPage(next, 'restore')
         }
         return
       }
-      const { max } = getReaderScrollMetrics()
-      scrollReaderTo(pct * max, 'auto')
+      scrollContinuousToOffset(clamped, 'start')
     }
 
     if (!scrolledToOffsetRef.current) {
@@ -3300,36 +3490,87 @@ export function ReaderRoute() {
   // synchronously in this effect body (react-hooks/set-state-in-effect).
   useLayoutEffect(() => {
     const prev = prevLayoutRef.current
-    prevLayoutRef.current = appearance.layout
+    const nextLayout = appearance.layout
+    prevLayoutRef.current = nextLayout
+    const switched = prev !== nextLayout
+    const textLength = payload?.text.length ?? 0
+    const followPlayback = switched && isAudioActive() && !audioFollowPausedRef.current
+    const switchOffset = switched && textLength > 0
+      ? resolveLayoutSwitchOffset({
+        spokenStart: spokenOffsetRef.current ?? activeAudioCueRangeRef.current?.start ?? null,
+        viewportOffset: captureViewportReadOffset(prev),
+        textLength,
+        followPlayback,
+      })
+      : null
+    if (switchOffset != null) {
+      readOffsetRef.current = switchOffset
+      latestScrollPct.current = scrollPctFromOffset(switchOffset, textLength)
+      if (nextLayout === 'paginated') pendingPageOffsetRef.current = switchOffset
+    }
 
-    if (appearance.layout !== 'paginated') {
+    if (nextLayout !== 'paginated') {
       abortPageTurns()
-      if (pageBreaksRef.current.length > 0) {
-        pageBreaksRef.current = []
-      }
       clearPagedTransforms()
       const scroller = readerScrollRef.current
       if (scroller) applyReaderScrollerStyle(scroller, 'continuous')
-      if (prev === 'paginated' && payload?.text) {
-        const { max } = getReaderScrollMetrics()
+      if (switchOffset != null) {
         programmaticScrollRef.current = true
-        scrollReaderTo(latestScrollPct.current * max, 'auto')
-        window.setTimeout(() => { programmaticScrollRef.current = false }, 80)
+        const pin = followPlayback ? 'center' : 'start'
+        scrollContinuousToOffset(switchOffset, pin)
+        if (activeAudioCueRangeRef.current) revealPlaybackAfterLayoutSwitch(followPlayback)
+        requestAnimationFrame(() => {
+          if (layoutRef.current !== 'continuous') return
+          scrollContinuousToOffset(switchOffset, pin)
+          if (followPlayback && activeAudioCueRangeRef.current) {
+            revealPlaybackAfterLayoutSwitch(true)
+          }
+          setScrollPct(latestScrollPct.current)
+          window.setTimeout(() => { programmaticScrollRef.current = false }, 80)
+        })
       }
       return
     }
 
     const scroller = readerScrollRef.current
-    const text = readerTextRef.current
+    const textEl = readerTextRef.current
     if (!scroller) return
-    const ro = new ResizeObserver(() => measurePagedLayout())
+    if (switched && switchOffset != null) {
+      applyPagedOffsetFast(switchOffset)
+      revealPlaybackAfterLayoutSwitch(followPlayback)
+    }
+
+    let ignoreRo = switched
+    const ro = new ResizeObserver(() => {
+      if (ignoreRo) return
+      if (layoutRef.current !== 'paginated') return
+      if (pagedLayoutAllRef.current) measurePagedLayout()
+    })
     ro.observe(scroller)
-    if (text) ro.observe(text)
+    if (textEl) ro.observe(textEl)
     const fonts = document.fonts
-    const onFonts = () => measurePagedLayout()
-    fonts?.addEventListener?.('loadingdone', onFonts)
-    void fonts?.ready?.then(onFonts)
+    const onFonts = () => {
+      if (layoutRef.current !== 'paginated') return
+      if (pagedLayoutAllRef.current) measurePagedLayout()
+    }
+    const waitForFonts = Boolean(fonts && fonts.status !== 'loaded')
+    if (waitForFonts) fonts?.addEventListener?.('loadingdone', onFonts)
+
+    let paintFrame = 0
+    if (switched) {
+      paintFrame = requestAnimationFrame(() => { ignoreRo = false })
+    } else if (!pagedLayoutAll) {
+      paintFrame = requestAnimationFrame(() => {
+        ignoreRo = false
+        if (layoutRef.current === 'paginated') setPagedLayoutAll(true)
+      })
+    } else {
+      ignoreRo = false
+      measurePagedLayout()
+    }
+
     return () => {
+      if (paintFrame) cancelAnimationFrame(paintFrame)
       ro.disconnect()
       fonts?.removeEventListener?.('loadingdone', onFonts)
     }
@@ -3343,6 +3584,7 @@ export function ReaderRoute() {
     appearance.align,
     appearance.theme,
     payload?.text,
+    pagedLayoutAll,
   ])
 
   useEffect(() => {
@@ -3751,7 +3993,7 @@ export function ReaderRoute() {
   function saveProgress(pct: number) {
     if (!payload?.text || !bookId) return
     const textLength = payload.text.length
-    const textStart  = Math.round(pct * textLength)
+    const textStart = clampReadOffset(readOffsetRef.current, textLength)
     const paged = layoutRef.current === 'paginated' && pageBreaksRef.current.length > 0
     const reading: ReadingProgress = {
       pageNumber: paged
@@ -3798,6 +4040,11 @@ export function ReaderRoute() {
       const pct = max > 0 ? Math.min(1, y / max) : 0
       latestScrollPct.current = pct
       setScrollPct(pct)
+      if (!(isAudioActive() && !audioFollowPausedRef.current)) {
+        const pinOffset = sourceOffsetAtViewportPin()
+        if (pinOffset != null) readOffsetRef.current = pinOffset
+        else if (payload?.text) readOffsetRef.current = Math.round(pct * payload.text.length)
+      }
       const activeCueRange = activeAudioCueRangeRef.current
       if (activeCueRange) {
         // Inline playback mark scrolls with the page — do not re-layout on scroll.
@@ -4083,6 +4330,7 @@ export function ReaderRoute() {
   function clearAudioFollow() {
     activeAudioCueKeyRef.current = null
     activeAudioCueRangeRef.current = null
+    spokenOffsetRef.current = null
     setPlaybackRange(null)
     setPlaybackOverlayRects([])
     audioFollowPausedRef.current = false
@@ -4185,6 +4433,8 @@ export function ReaderRoute() {
       durationSec: chunk.durationSec ?? chunk.buffer?.duration ?? null,
       cues: chunk.cues,
     })
+    spokenOffsetRef.current = spoken
+    if (!audioFollowPausedRef.current) readOffsetRef.current = spoken
     const cues = (chunk.cues ?? []).filter((cue) => cue.end > cue.start)
     const activeCue = cues.find((cue, index) => {
       const cueStart = Math.max(0, cue.timeStart)
@@ -4248,6 +4498,13 @@ export function ReaderRoute() {
   )
   const readPct = Math.round(scrollPct * 100)
   const paginated = appearance.layout === 'paginated'
+  const pagedWindow = paginated && !pagedLayoutAll
+    ? pagedParagraphWindow({
+      pages: pageBreaks.length > 0 ? pageBreaks : lastPagedBreaksRef.current,
+      offset: spokenOffsetRef.current ?? readOffsetRef.current,
+      textLength: payload?.text.length ?? 0,
+    })
+    : { start: 0, end: 0 }
   const pageCount = Math.max(1, pageBreaks.length)
   const pageLabel = pageBreaks.length > 0
     ? `${pageIndex + 1} / ${pageCount}`
@@ -4277,24 +4534,21 @@ export function ReaderRoute() {
       {/* ── Top bar (full-width) ──────────────────────────────────── */}
       <header
         data-reader-header=""
-        className={cn(
-          'z-40 flex items-center px-3 shrink-0 overflow-hidden',
-          paginated ? 'relative' : 'fixed top-0 left-0 right-0',
-        )}
+        className="z-40 flex items-center px-3 shrink-0 overflow-hidden fixed top-0 left-0 right-0"
         style={{
           height: 'calc(52px + env(safe-area-inset-top, 0px))',
           paddingTop: 'env(safe-area-inset-top, 0px)',
-          backgroundColor: appearance.theme === 'white' && !paginated
+          backgroundColor: appearance.theme === 'white'
             ? 'rgba(238,226,198,0.78)'
             : colors.bg,
           backgroundImage: 'none',
-          backdropFilter: paginated ? 'none' : 'blur(14px)',
-          WebkitBackdropFilter: paginated ? 'none' : 'blur(14px)',
+          backdropFilter: 'blur(14px)',
+          WebkitBackdropFilter: 'blur(14px)',
           isolation: 'isolate',
           borderBottom: `1px solid ${colors.text}12`,
           opacity: paginated || barVisible ? 1 : 0,
           transform: paginated || barVisible ? 'translateY(0)' : 'translateY(-14px)',
-          transition: 'opacity 200ms, transform 200ms',
+          transition: paginated ? 'none' : 'opacity 200ms, transform 200ms',
           pointerEvents: paginated || barVisible ? 'auto' : 'none',
         }}
       >
@@ -4387,7 +4641,7 @@ export function ReaderRoute() {
         data-reader-scroll=""
         className={cn(
           'min-h-0 flex-1 overflow-x-hidden overscroll-y-contain',
-          paginated ? 'overflow-y-hidden mb-24' : 'overflow-y-auto',
+          paginated ? 'overflow-y-hidden' : 'overflow-y-auto',
         )}
         style={{
           ...readerScrollerStyle(appearance.layout),
@@ -4417,13 +4671,13 @@ export function ReaderRoute() {
       <div
         ref={pageInnerRef}
         className={cn(
-          'reader-page-inner mx-auto px-5',
+          'reader-page-inner mx-auto px-5 pb-36',
           paginated && 'relative',
-          paginated ? 'pb-4' : 'pb-36 transition-[max-width,padding] duration-200',
+          !paginated && 'transition-[max-width] duration-200',
         )}
         data-reader-page-column={paginated ? '' : undefined}
         style={{
-          paddingTop: paginated ? 0 : 'calc(72px + env(safe-area-inset-top, 0px))',
+          paddingTop: 'calc(72px + env(safe-area-inset-top, 0px))',
           maxWidth: `${WIDTH_PX[appearance.width]}px`,
           WebkitTouchCallout: 'none',  // suppress iOS long-press callout
           touchAction: paginated ? 'none' : 'pan-y',
@@ -4467,7 +4721,9 @@ export function ReaderRoute() {
               highlights={readerHighlights}
               playback={playbackRange}
               playbackColor={colors.playback}
-              virtualize={!paginated}
+              virtualize={!paginated || !pagedLayoutAll}
+              layoutStart={pagedWindow.start}
+              layoutEnd={pagedWindow.end}
               paintPlaybackInline={!paginated}
             />
           </div>

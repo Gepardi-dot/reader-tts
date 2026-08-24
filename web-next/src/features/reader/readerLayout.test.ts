@@ -3,6 +3,7 @@ import {
   applyReaderScrollerStyle,
   assignLineStartOffsets,
   clampPageIndex,
+  clampReadOffset,
   clipRangeToPage,
   clipRectsToBounds,
   clientRectsToLocal,
@@ -11,7 +12,15 @@ import {
   pageClipRange,
   pageIndexForOffset,
   pageIndexForY,
+  pagedLayoutCacheKeyEqual,
+  pagedParagraphWindow,
+  pageTopFromInnerScroll,
+  paginatedTextViewHeight,
   readerScrollerStyle,
+  snapPageToLines,
+  resolveLayoutSwitchOffset,
+  scrollDeltaToPinRect,
+  scrollPctFromOffset,
 } from './readerLayout'
 
 describe('normalizeReaderLayout', () => {
@@ -57,6 +66,30 @@ describe('readerScrollerStyle', () => {
     expect(el.style.overflowY).toBe('auto')
     expect(el.style.overflowX).toBe('hidden')
     expect(el.style.touchAction).toBe('pan-y')
+  })
+})
+
+describe('paginated page height', () => {
+  it('reserves the progress pill, not continuous end-padding', () => {
+    expect(paginatedTextViewHeight(800, 72, 96)).toBe(632)
+    expect(paginatedTextViewHeight(800, 72, 144)).toBe(584)
+  })
+
+  it('clips a page to the last line that fully fits', () => {
+    const lines = [
+      { top: 0, bottom: 20 },
+      { top: 24, bottom: 44 },
+      { top: 48, bottom: 90 },
+    ]
+    expect(snapPageToLines(lines, 0, 80)).toEqual({ top: 0, bottom: 48 })
+  })
+
+  it('does not use viewport height as the clip when that would cut a line', () => {
+    expect(snapPageToLines(
+      [{ top: 100, bottom: 118 }, { top: 122, bottom: 140 }, { top: 144, bottom: 200 }],
+      110,
+      50,
+    )).toEqual({ top: 100, bottom: 144 })
   })
 })
 
@@ -267,5 +300,90 @@ describe('pageClipRange', () => {
 
   it('uses the stored bottom for the last page', () => {
     expect(pageClipRange(pages, 2, 500)).toEqual({ top: 720, bottom: 880 })
+  })
+})
+
+describe('layout switch offset', () => {
+  it('clamps a source offset into the book', () => {
+    expect(clampReadOffset(-4, 900)).toBe(0)
+    expect(clampReadOffset(440.9, 900)).toBe(440)
+    expect(clampReadOffset(1200, 900)).toBe(899)
+    expect(clampReadOffset(12, 0)).toBe(0)
+  })
+
+  it('does not treat scroll percent as interchangeable with character offset', () => {
+    expect(scrollPctFromOffset(900, 1800)).toBe(0.5)
+    expect(scrollPctFromOffset(0, 1800)).toBe(0)
+    expect(scrollPctFromOffset(1800, 1800)).toBe(1)
+  })
+
+  it('keeps the spoken character when playback is still following', () => {
+    expect(resolveLayoutSwitchOffset({
+      spokenStart: 1240,
+      viewportOffset: 80,
+      textLength: 5000,
+      followPlayback: true,
+    })).toBe(1240)
+  })
+
+  it('keeps the on-screen character when follow is paused or audio is idle', () => {
+    expect(resolveLayoutSwitchOffset({
+      spokenStart: 1240,
+      viewportOffset: 80,
+      textLength: 5000,
+      followPlayback: false,
+    })).toBe(80)
+    expect(resolveLayoutSwitchOffset({
+      spokenStart: null,
+      viewportOffset: 80,
+      textLength: 5000,
+      followPlayback: true,
+    })).toBe(80)
+  })
+
+  it('pins a line to the reading band instead of using document percent', () => {
+    expect(scrollDeltaToPinRect(420, 88)).toBe(332)
+    expect(scrollDeltaToPinRect(90, 88)).toBe(0)
+  })
+
+  it('reuses last paginated breaks when type and viewport have not changed', () => {
+    const key = {
+      viewH: 640,
+      fontSize: 17,
+      lineHeight: 1.8,
+      width: 'balanced',
+      font: 'serif',
+      bionic: false,
+      align: 'left',
+      textLength: 12_000,
+    }
+    expect(pagedLayoutCacheKeyEqual(key, { ...key, viewH: 641 })).toBe(true)
+    expect(pagedLayoutCacheKeyEqual(key, { ...key, fontSize: 18 })).toBe(false)
+    expect(pagedLayoutCacheKeyEqual(key, null)).toBe(false)
+  })
+
+  it('lays out only the current page and its neighbors', () => {
+    const pages = [{ startOffset: 0 }, { startOffset: 400 }, { startOffset: 800 }, { startOffset: 1200 }]
+    expect(pagedParagraphWindow({ pages, offset: 850, textLength: 2000 })).toEqual({
+      start: 400,
+      end: 2000,
+    })
+    expect(pagedParagraphWindow({ pages, offset: 400, textLength: 2000 })).toEqual({
+      start: 0,
+      end: 1200,
+    })
+  })
+
+  it('falls back to a short window around the offset when pages are not ready', () => {
+    expect(pagedParagraphWindow({ pages: [], offset: 2000, textLength: 9000 })).toEqual({
+      start: 1800,
+      end: 6500,
+    })
+  })
+
+  it('converts continuous scroll into a paginated page top without a jump', () => {
+    expect(pageTopFromInnerScroll(72, 72)).toBe(0)
+    expect(pageTopFromInnerScroll(2072, 72)).toBe(2000)
+    expect(pageTopFromInnerScroll(10, 72)).toBe(0)
   })
 })
