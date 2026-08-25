@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { coverSearchTermsForBook, findBookCover } from './coverLookup'
+import { coverSearchTermsForBook, findBookCover, titlesCompatible } from './coverLookup'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -50,6 +50,18 @@ describe('coverSearchTermsForBook', () => {
     expect(requestedUrls.some((url) => url.includes('googleapis.com'))).toBe(false)
   })
 
+  it('looks up Open Library by ISBN before searching titles', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ covers: [555] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(findBookCover({ title: 'Wrong Title', isbn: '978-0-14-118263-6' })).resolves.toBe(
+      'https://covers.openlibrary.org/b/id/555-L.jpg',
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/isbn/9780141182636.json')
+  })
+
   it('stops cover lookup after OpenLibrary returns a cover id', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ docs: [] }))
@@ -61,5 +73,15 @@ describe('coverSearchTermsForBook', () => {
     )
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('titlesCompatible', () => {
+  it('accepts the same work with a subtitle', () => {
+    expect(titlesCompatible('Influence', 'Influence: The Psychology of Persuasion')).toBe(true)
+  })
+
+  it('rejects an unrelated catalog hit', () => {
+    expect(titlesCompatible('Codex TTS Tuning Sample', 'The Very Hungry Caterpillar')).toBe(false)
   })
 })

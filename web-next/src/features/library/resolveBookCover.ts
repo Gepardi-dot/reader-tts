@@ -1,4 +1,5 @@
 import { api, requestBlob } from '@/shared/api/client'
+import { extractIsbnsFromText } from '@/shared/books/bookIdentifiers'
 import { blobToDataUrl, compressCover, dataUrlToBlob } from '@/shared/books/extractCover'
 import {
   getStoredCover,
@@ -8,7 +9,10 @@ import {
 import {
   coverSearchTermsForBook,
   findBookCover,
+  type CoverQuery,
 } from './coverLookup'
+
+export type CoverKind = 'package' | 'pdf-page'
 
 export interface ResolvedBookCover {
   dataUrl: string
@@ -28,8 +32,28 @@ function isPersistedCover(coverUrl?: string | null) {
   return 'ready' as const
 }
 
-async function searchCoverUrl(title: string, fileName?: string): Promise<string | null> {
-  const terms = coverSearchTermsForBook(title, fileName).slice(0, 3)
+async function searchCoverUrl(
+  query: CoverQuery,
+  options: { isbnOnly?: boolean } = {},
+): Promise<string | null> {
+  const isbn = query.isbn || extractIsbnsFromText(`${query.title} ${query.fileName ?? ''}`)[0]
+  if (isbn) {
+    try {
+      const found = await api.get<CoverSearchResponse>(
+        `/api/covers/search?${new URLSearchParams({ isbn }).toString()}`,
+      )
+      if (found.url) return found.url
+    } catch {
+      // Worker search is best-effort; fall through to the browser lookup.
+    }
+    const byIsbn = await findBookCover({ ...query, isbn }, undefined, { isbnOnly: true })
+    if (byIsbn) return byIsbn
+    if (options.isbnOnly) return null
+  } else if (options.isbnOnly) {
+    return null
+  }
+
+  const terms = coverSearchTermsForBook(query.title, query.fileName, query.author).slice(0, 3)
   for (const term of terms) {
     try {
       const params = new URLSearchParams({ title: term.title })
@@ -41,7 +65,7 @@ async function searchCoverUrl(title: string, fileName?: string): Promise<string 
     }
   }
 
-  return findBookCover(title, fileName)
+  return findBookCover({ ...query, isbn: undefined })
 }
 
 async function downloadCoverImage(url: string): Promise<Blob | null> {
@@ -62,8 +86,10 @@ async function downloadCoverImage(url: string): Promise<Blob | null> {
 export async function lookupRemoteCover(
   title: string,
   fileName?: string,
+  extras: Pick<CoverQuery, 'author' | 'isbn'> & { isbnOnly?: boolean } = {},
 ): Promise<ResolvedBookCover | null> {
-  const sourceUrl = await searchCoverUrl(title, fileName)
+  const { isbnOnly, ...queryExtras } = extras
+  const sourceUrl = await searchCoverUrl({ title, fileName, ...queryExtras }, { isbnOnly })
   if (!sourceUrl) return null
   const blob = await downloadCoverImage(sourceUrl)
   if (!blob || blob.size < 32) return null
@@ -91,21 +117,61 @@ export async function resolveCoverForUpload(
   file: File,
   title: string,
   embedded?: Blob | null,
+  options: {
+    author?: string
+    isbn?: string
+    coverKind?: CoverKind | null
+  } = {},
 ): Promise<ResolvedBookCover | null> {
-  if (embedded && embedded.size > 32) {
+  const packageCover = options.coverKind === 'package' && embedded && embedded.size > 32
+    ? embedded
+    : null
+  const pageCover = options.coverKind === 'pdf-page' && embedded && embedded.size > 32
+    ? embedded
+    : !options.coverKind && embedded && embedded.size > 32
+      ? embedded
+      : null
+
+  const extras = { author: options.author, isbn: options.isbn }
+  const byIsbn = await lookupRemoteCover(title, file.name, { ...extras, isbnOnly: true })
+  if (byIsbn) {
+    if (packageCover && byIsbn.dataUrl.length < 8_000) {
+      return {
+        dataUrl: await compressCover(packageCover),
+        sourceUrl: null,
+        source: 'embedded',
+      }
+    }
+    return byIsbn
+  }
+
+  if (packageCover) {
     return {
-      dataUrl: await compressCover(embedded),
+      dataUrl: await compressCover(packageCover),
       sourceUrl: null,
       source: 'embedded',
     }
   }
-  return lookupRemoteCover(title, file.name)
+
+  const byTitle = await lookupRemoteCover(title, file.name, { author: options.author })
+  if (byTitle) return byTitle
+
+  if (pageCover) {
+    return {
+      dataUrl: await compressCover(pageCover),
+      sourceUrl: null,
+      source: 'embedded',
+    }
+  }
+
+  return null
 }
 
 export async function loadLibraryCover(book: {
   id: string
   title: string
   fileName: string
+  excerpt?: string
   coverUrl?: string | null
 }): Promise<string | null> {
   const local = await getStoredCover(book.id)
@@ -140,7 +206,8 @@ export async function loadLibraryCover(book: {
   if (existing) return existing
 
   const task = (async () => {
-    const found = await lookupRemoteCover(book.title, book.fileName)
+    const isbn = extractIsbnsFromText(`${book.title} ${book.fileName} ${book.excerpt ?? ''}`)[0]
+    const found = await lookupRemoteCover(book.title, book.fileName, { isbn })
     if (!found) {
       await putEmptyCover(book.id)
       try {

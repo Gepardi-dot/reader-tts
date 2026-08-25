@@ -7,6 +7,7 @@
  */
 
 import { collectPdfTextItems } from '@/shared/books/pdfCompat'
+import { extractIsbnsFromText, looksLikeAuthorName, looksLikeBookTitle } from '@/shared/books/bookIdentifiers'
 import 'pdfjs-dist/legacy/build/pdf.worker.mjs'
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 
@@ -20,6 +21,42 @@ export interface ExtractedPdfDocument {
   pageCount: number
   cover?: ArrayBuffer
   coverType?: string
+  title?: string
+  author?: string
+  isbn?: string
+}
+
+const ISBN_SCAN_PAGES = 4
+
+async function readPdfMetadata(pdf: pdfjs.PDFDocumentProxy): Promise<{
+  title?: string
+  author?: string
+  isbn?: string
+}> {
+  try {
+    const data = await pdf.getMetadata()
+    const info = (data?.info ?? {}) as Record<string, unknown>
+    const chunks: string[] = []
+    const titleRaw = typeof info.Title === 'string' ? info.Title : ''
+    const authorRaw = typeof info.Author === 'string' ? info.Author : ''
+    for (const value of [info.Title, info.Author, info.Subject, info.Keywords]) {
+      if (typeof value === 'string' && value.trim()) chunks.push(value)
+    }
+    const metadata = data?.metadata as { get?: (name: string) => unknown } | undefined
+    if (typeof metadata?.get === 'function') {
+      for (const key of ['dc:title', 'dc:creator', 'dc:identifier', 'dc:subject']) {
+        const value = metadata.get(key)
+        if (typeof value === 'string' && value.trim()) chunks.push(value)
+      }
+    }
+    return {
+      title: looksLikeBookTitle(titleRaw) ? titleRaw.replace(/\s+/g, ' ').trim() : undefined,
+      author: looksLikeAuthorName(authorRaw) ? authorRaw.replace(/\s+/g, ' ').trim() : undefined,
+      isbn: extractIsbnsFromText(chunks.join('\n'))[0],
+    }
+  } catch {
+    return {}
+  }
 }
 
 function cleanPageText(raw: string) {
@@ -71,6 +108,8 @@ export async function extractPdfDocument(
     const pdf = await loadingTask.promise
     const pages: string[] = []
     let cover: ArrayBuffer | undefined
+    const meta = await readPdfMetadata(pdf)
+    let isbn = meta.isbn
 
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber)
@@ -82,7 +121,11 @@ export async function extractPdfDocument(
         }
       }
       const content = await page.getTextContent()
-      pages.push(cleanPageText(collectPdfTextItems(content.items)))
+      const pageText = cleanPageText(collectPdfTextItems(content.items))
+      pages.push(pageText)
+      if (!isbn && pageNumber <= ISBN_SCAN_PAGES) {
+        isbn = extractIsbnsFromText(pageText)[0]
+      }
       onProgress?.({ pageNumber, totalPages: pdf.numPages })
     }
 
@@ -96,6 +139,9 @@ export async function extractPdfDocument(
       pageCount: pdf.numPages,
       cover,
       coverType: cover ? 'image/jpeg' : undefined,
+      title: meta.title,
+      author: meta.author,
+      isbn,
     }
   } finally {
     try {

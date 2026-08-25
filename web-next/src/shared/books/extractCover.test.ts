@@ -4,6 +4,8 @@ import {
   extractCoverFromEpubZip,
   extractFb2Cover,
   findEpubCoverHref,
+  parseFb2Metadata,
+  parseOpfMetadata,
 } from './extractCover'
 
 describe('findEpubCoverHref', () => {
@@ -38,6 +40,48 @@ describe('extractCoverFromEpubZip', () => {
     expect(cover).not.toBeNull()
     expect(cover?.type).toBe('image/jpeg')
     expect((await cover!.arrayBuffer()).byteLength).toBe(4)
+  })
+})
+
+describe('parseOpfMetadata', () => {
+  it('reads title, author, and ISBN from Dublin Core tags', () => {
+    expect(parseOpfMetadata(`
+      <metadata>
+        <dc:title>The Art of Seduction</dc:title>
+        <dc:creator opf:role="aut">Robert Greene</dc:creator>
+        <dc:identifier opf:scheme="ISBN">978-0-14-118263-6</dc:identifier>
+      </metadata>
+    `)).toEqual({
+      title: 'The Art of Seduction',
+      author: 'Robert Greene',
+      isbn: '9780141182636',
+    })
+  })
+
+  it('ignores Calibre UUIDs', () => {
+    expect(parseOpfMetadata(`
+      <dc:title>Storyworthy</dc:title>
+      <dc:identifier opf:scheme="calibre">abc-uuid</dc:identifier>
+      <dc:identifier>urn:isbn:9781101984147</dc:identifier>
+    `).isbn).toBe('9781101984147')
+  })
+})
+
+describe('parseFb2Metadata', () => {
+  it('reads FictionBook title, author, and isbn', () => {
+    expect(parseFb2Metadata(`
+      <description>
+        <title-info>
+          <book-title>Influence</book-title>
+          <author><first-name>Robert</first-name><last-name>Cialdini</last-name></author>
+        </title-info>
+        <publish-info><isbn>978-0-06-124189-5</isbn></publish-info>
+      </description>
+    `)).toEqual({
+      title: 'Influence',
+      author: 'Robert Cialdini',
+      isbn: '9780061241895',
+    })
   })
 })
 

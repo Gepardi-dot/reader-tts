@@ -192,8 +192,12 @@ export async function uploadBook(
     pageCount: number
     sourceFormat: string
     cover?: Blob | null
+    coverKind?: 'package' | 'pdf-page'
+    isbn?: string
+    author?: string
   }
   let epubMeta: UploadBookResult['epub']
+  let resolvedCover: { dataUrl: string; sourceUrl: string | null; source: 'embedded' | 'lookup' | 'stored' } | null = null
 
   if (convert) {
     const { convertFileToEpub } = await import('@/shared/books/convertToEpub')
@@ -202,6 +206,7 @@ export async function uploadBook(
       onProgress: options.onProgress,
     })
     payload = result.book
+    resolvedCover = result.resolvedCover ?? null
     epubMeta = {
       fileName: result.epub.fileName,
       chapterCount: result.epub.chapterCount,
@@ -214,7 +219,11 @@ export async function uploadBook(
 
   options.onProgress?.({ phase: 'uploading', progress: 96, message: 'Saving cover...' })
   const { persistBookCover, resolveCoverForUpload } = await import('@/features/library/resolveBookCover')
-  const cover = await resolveCoverForUpload(file, payload.title, payload.cover)
+  const cover = resolvedCover ?? await resolveCoverForUpload(file, payload.title, payload.cover, {
+    author: payload.author,
+    isbn: payload.isbn,
+    coverKind: payload.coverKind,
+  })
 
   options.onProgress?.({ phase: 'uploading', progress: 100, message: 'Saving book...' })
 
