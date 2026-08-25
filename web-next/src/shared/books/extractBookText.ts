@@ -9,6 +9,11 @@ import {
   isPdfInfrastructureError,
 } from '@/shared/books/pdfCompat'
 import {
+  extractIsbnsFromText,
+  looksLikeAuthorName,
+  looksLikeBookTitle,
+} from '@/shared/books/bookIdentifiers'
+import {
   estimatePages,
   htmlToText,
   jsonToText,
@@ -16,6 +21,16 @@ import {
   rtfToText,
   xmlOrHtmlToText,
 } from '@/shared/books/textConverters'
+
+interface ExtractedKindResult {
+  text: string
+  pageCount: number
+  cover?: Blob | null
+  coverKind?: 'package' | 'pdf-page'
+  title?: string
+  author?: string
+  isbn?: string
+}
 
 export interface BookExtractionProgress {
   phase: 'reading' | 'extracting' | 'converting' | 'uploading'
@@ -29,8 +44,12 @@ export interface ExtractedBookPayload {
   text: string
   pageCount: number
   sourceFormat: string
-  /** Embedded cover from the original file (PDF page 1, EPUB/FB2 cover). */
+  /** Embedded cover from the original file (EPUB/FB2 package art, or PDF page 1). */
   cover?: Blob | null
+  /** Package art is the publisher jacket. PDF page 1 is only a fallback. */
+  coverKind?: 'package' | 'pdf-page'
+  isbn?: string
+  author?: string
 }
 
 interface ExtractBookOptions {
@@ -41,7 +60,7 @@ interface ExtractBookOptions {
 type PdfWorkerResponse =
   | { type: 'ready' }
   | { id: string; type: 'progress'; progress: number; pageNumber: number; totalPages: number }
-  | { id: string; type: 'complete'; text: string; pageCount: number; cover?: ArrayBuffer; coverType?: string }
+  | { id: string; type: 'complete'; text: string; pageCount: number; cover?: ArrayBuffer; coverType?: string; title?: string; author?: string; isbn?: string }
   | { id: string; type: 'error'; message: string }
 
 const PDF_WORKER_READY_MS = 20_000
@@ -103,6 +122,10 @@ async function extractPdfOnMainThread(
     cover: result.cover
       ? new Blob([result.cover], { type: result.coverType || 'image/jpeg' })
       : undefined,
+    coverKind: result.cover ? 'pdf-page' : undefined,
+    title: result.title,
+    author: result.author,
+    isbn: result.isbn,
   }
 }
 
@@ -122,7 +145,7 @@ async function extractPdfWithWorker(
 
   try {
     await waitForPdfWorkerReady(worker)
-    return await new Promise<{ text: string; pageCount: number; cover?: Blob }>((resolve, reject) => {
+    return await new Promise<ExtractedKindResult>((resolve, reject) => {
       const onMessage = (event: MessageEvent<PdfWorkerResponse>) => {
         const message = event.data
         if (!message || !('id' in message) || message.id !== id) return
@@ -141,6 +164,10 @@ async function extractPdfWithWorker(
             cover: message.cover
               ? new Blob([message.cover], { type: message.coverType || 'image/jpeg' })
               : undefined,
+            coverKind: message.cover ? 'pdf-page' : undefined,
+            title: message.title,
+            author: message.author,
+            isbn: message.isbn,
           })
           return
         }
@@ -225,10 +252,11 @@ async function extractEpub(file: File, options: ExtractBookOptions) {
   // Prefer spine order from package.opf when present
   const opfPath = Object.keys(zip.files).find((p) => p.toLowerCase().endsWith('.opf'))
   const orderedPaths: string[] = []
+  let opfXml = ''
 
   if (opfPath) {
     const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : ''
-    const opfXml = await zip.file(opfPath)!.async('string')
+    opfXml = await zip.file(opfPath)!.async('string')
     const hrefs = [...opfXml.matchAll(/idref=["']([^"']+)["']/gi)].map((m) => m[1])
     const idToHref = new Map<string, string>()
     for (const m of opfXml.matchAll(/<item\b[^>]*>/gi)) {
@@ -272,29 +300,54 @@ async function extractEpub(file: File, options: ExtractBookOptions) {
     })
   }
 
-  const { extractCoverFromEpubZip } = await import('@/shared/books/extractCover')
+  const { extractCoverFromEpubZip, parseOpfMetadata } = await import('@/shared/books/extractCover')
   const cover = await extractCoverFromEpubZip(zip, opfPath)
+  const meta = opfXml ? parseOpfMetadata(opfXml) : {}
 
-  return { text: normalizeText(chunks.join('\n\n')), cover }
+  return {
+    text: normalizeText(chunks.join('\n\n')),
+    cover,
+    coverKind: cover ? 'package' as const : undefined,
+    title: meta.title,
+    author: meta.author,
+    isbn: meta.isbn,
+  }
 }
 
 async function extractFb2(file: File, options: ExtractBookOptions) {
   emit(options, { phase: 'reading', progress: 15, message: 'Reading FictionBook...' })
   const raw = await file.text()
   emit(options, { phase: 'extracting', progress: 50, message: 'Extracting FB2 text...' })
-  const { extractFb2Cover } = await import('@/shared/books/extractCover')
-  return { text: normalizeText(xmlOrHtmlToText(raw)), cover: extractFb2Cover(raw) }
+  const { extractFb2Cover, parseFb2Metadata } = await import('@/shared/books/extractCover')
+  const cover = extractFb2Cover(raw)
+  const meta = parseFb2Metadata(raw)
+  return {
+    text: normalizeText(xmlOrHtmlToText(raw)),
+    cover,
+    coverKind: cover ? 'package' as const : undefined,
+    title: meta.title,
+    author: meta.author,
+    isbn: meta.isbn,
+  }
 }
 
 async function extractByKind(
   kind: BookFormatKind,
   file: File,
   options: ExtractBookOptions,
-): Promise<{ text: string; pageCount: number; cover?: Blob | null }> {
+): Promise<ExtractedKindResult> {
   switch (kind) {
     case 'pdf': {
       const pdf = await extractPdf(file, options)
-      return { text: normalizeText(pdf.text), pageCount: pdf.pageCount, cover: pdf.cover }
+      return {
+        text: normalizeText(pdf.text),
+        pageCount: pdf.pageCount,
+        cover: pdf.cover,
+        coverKind: pdf.coverKind ?? (pdf.cover ? 'pdf-page' : undefined),
+        title: pdf.title,
+        author: pdf.author,
+        isbn: pdf.isbn,
+      }
     }
     case 'plain': {
       emit(options, { phase: 'reading', progress: 25, message: 'Reading text...' })
@@ -319,11 +372,11 @@ async function extractByKind(
       }
     case 'epub': {
       const epub = await extractEpub(file, options)
-      return { text: epub.text, pageCount: 0, cover: epub.cover }
+      return { text: epub.text, pageCount: 0, cover: epub.cover, coverKind: epub.coverKind, title: epub.title, author: epub.author, isbn: epub.isbn }
     }
     case 'fb2': {
       const fb2 = await extractFb2(file, options)
-      return { text: fb2.text, pageCount: 0, cover: fb2.cover }
+      return { text: fb2.text, pageCount: 0, cover: fb2.cover, coverKind: fb2.coverKind, title: fb2.title, author: fb2.author, isbn: fb2.isbn }
     }
     case 'rtf': {
       emit(options, { phase: 'reading', progress: 20, message: 'Reading RTF...' })
@@ -350,11 +403,14 @@ export async function extractBookText(
   }
 
   const sourceFormat = extensionFor(file) || format.extensions[0]
-  const title = options.title?.trim() || titleFromFileName(file.name)
-
   const extracted = await extractByKind(format.kind, file, options)
   const text = extracted.text
   const pageCount = extracted.pageCount > 0 ? extracted.pageCount : estimatePages(text)
+  const isbn = extracted.isbn || extractIsbnsFromText(`${options.title ?? ''} ${file.name} ${text.slice(0, 4000)}`)[0]
+  const author = extracted.author && looksLikeAuthorName(extracted.author) ? extracted.author : undefined
+  const title = options.title?.trim()
+    || (extracted.title && looksLikeBookTitle(extracted.title) ? extracted.title : '')
+    || titleFromFileName(file.name)
 
   if (!text) {
     throw new Error(
@@ -364,5 +420,15 @@ export async function extractBookText(
   }
 
   emit(options, { phase: 'uploading', progress: 100, message: 'Saving book...' })
-  return { title, fileName: file.name, text, pageCount, sourceFormat, cover: extracted.cover }
+  return {
+    title,
+    fileName: file.name,
+    text,
+    pageCount,
+    sourceFormat,
+    cover: extracted.cover,
+    coverKind: extracted.coverKind,
+    isbn,
+    author,
+  }
 }

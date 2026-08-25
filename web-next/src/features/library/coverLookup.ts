@@ -1,6 +1,15 @@
+import { canonicalIsbn, extractIsbnsFromText } from '@/shared/books/bookIdentifiers'
+
 export interface CoverSearchTerms {
   title: string
   author?: string
+}
+
+export interface CoverQuery {
+  title: string
+  fileName?: string
+  author?: string
+  isbn?: string
 }
 
 const MAX_COVER_SEARCH_TERMS = 5
@@ -73,8 +82,13 @@ function uniqueTerms(terms: CoverSearchTerms[]) {
   })
 }
 
-export function coverSearchTermsForBook(title: string, fileName?: string): CoverSearchTerms[] {
+export function coverSearchTermsForBook(
+  title: string,
+  fileName?: string,
+  author?: string,
+): CoverSearchTerms[] {
   const sources = uniqueTerms([
+    author ? { title, author } : { title },
     { title },
     fileName ? { title: fileName } : { title: '' },
   ])
@@ -113,8 +127,29 @@ export function coverSearchTermsForBook(title: string, fileName?: string): Cover
   return uniqueTerms(candidates)
 }
 
-function coverCacheKey(title: string, fileName?: string) {
-  return `${COVER_CACHE_PREFIX}${JSON.stringify([title.trim(), fileName?.trim() ?? ''])}`
+function coverCacheKey(query: CoverQuery) {
+  return `${COVER_CACHE_PREFIX}${JSON.stringify([
+    query.title.trim(),
+    query.fileName?.trim() ?? '',
+    query.author?.trim() ?? '',
+    query.isbn?.trim() ?? '',
+  ])}`
+}
+
+function normalizeCoverTitle(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+export function titlesCompatible(query: string, found: string) {
+  const a = normalizeCoverTitle(query)
+  const b = normalizeCoverTitle(found)
+  if (!a || !b) return true
+  if (a === b || a.includes(b) || b.includes(a)) return true
+  const queryWords = a.split(' ').filter((word) => word.length > 2)
+  if (queryWords.length === 0) return true
+  const foundWords = new Set(b.split(' ').filter((word) => word.length > 2))
+  const hits = queryWords.filter((word) => foundWords.has(word)).length
+  return hits >= Math.ceil(Math.min(queryWords.length, 3) * 0.5)
 }
 
 function coverCacheStorage() {
@@ -168,28 +203,79 @@ async function fetchWithTimeout(url: string) {
   }
 }
 
+function coverIdUrl(coverId: number) {
+  return `https://covers.openlibrary.org/b/id/${coverId}-L.jpg`
+}
+
+export async function fetchOpenLibraryCoverByIsbn(isbn: string): Promise<string | null> {
+  const compact = canonicalIsbn(isbn) ?? compactIsbnFallback(isbn)
+  if (!compact) return null
+
+  const edition = await fetchWithTimeout(`https://openlibrary.org/isbn/${compact}.json`)
+  if (edition?.ok) {
+    const data = await edition.json() as { covers?: number[] }
+    const coverId = data.covers?.find((id) => id > 0)
+    if (coverId) return coverIdUrl(coverId)
+  }
+
+  const search = await fetchWithTimeout(
+    `https://openlibrary.org/search.json?isbn=${encodeURIComponent(compact)}&limit=1&fields=cover_i`,
+  )
+  if (!search?.ok) return null
+  const data = await search.json() as { docs?: { cover_i?: number }[] }
+  const coverId = data.docs?.[0]?.cover_i
+  return coverId ? coverIdUrl(coverId) : null
+}
+
+function compactIsbnFallback(raw: string) {
+  const compact = raw.replace(/[^0-9Xx]/g, '').toUpperCase()
+  return compact.length >= 10 ? compact : null
+}
+
 export async function fetchOpenLibraryCover({ title, author }: CoverSearchTerms): Promise<string | null> {
   const params = new URLSearchParams({
     title,
-    limit: '1',
-    fields: 'cover_i',
+    limit: '8',
+    fields: 'cover_i,title,author_name',
   })
   if (author) params.set('author', author)
 
   const res = await fetchWithTimeout(`https://openlibrary.org/search.json?${params.toString()}`)
   if (!res?.ok) return null
 
-  const data = await res.json() as { docs?: { cover_i?: number }[] }
-  const coverId = data.docs?.[0]?.cover_i
-  return coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : null
+  const data = await res.json() as { docs?: { cover_i?: number; title?: string }[] }
+  const docs = data.docs ?? []
+  const match = docs.find((doc) => doc.cover_i && titlesCompatible(title, doc.title ?? ''))
+  return match?.cover_i ? coverIdUrl(match.cover_i) : null
 }
 
-export async function findBookCover(title: string, fileName?: string): Promise<string | null> {
-  const cacheKey = coverCacheKey(title, fileName)
-  const cached = readCachedCover(cacheKey)
-  if (cached !== undefined) return cached
+function asCoverQuery(query: CoverQuery | string, fileName?: string): CoverQuery {
+  return typeof query === 'string' ? { title: query, fileName } : query
+}
 
-  const terms = coverSearchTermsForBook(title, fileName).slice(0, MAX_COVER_SEARCH_TERMS)
+export async function findBookCover(
+  query: CoverQuery | string,
+  fileName?: string,
+  options: { isbnOnly?: boolean } = {},
+): Promise<string | null> {
+  const q = asCoverQuery(query, fileName)
+  const isbn = q.isbn || extractIsbnsFromText(`${q.title} ${q.fileName ?? ''}`)[0]
+  const cacheKey = coverCacheKey({ ...q, isbn })
+  const cached = readCachedCover(cacheKey)
+  if (cached !== undefined && !options.isbnOnly) return cached
+
+  if (isbn) {
+    const byIsbn = await fetchOpenLibraryCoverByIsbn(isbn)
+    if (byIsbn) {
+      writeCachedCover(cacheKey, byIsbn)
+      return byIsbn
+    }
+    if (options.isbnOnly) return null
+  } else if (options.isbnOnly) {
+    return null
+  }
+
+  const terms = coverSearchTermsForBook(q.title, q.fileName, q.author).slice(0, MAX_COVER_SEARCH_TERMS)
   for (const term of terms) {
     const coverUrl = await fetchOpenLibraryCover(term)
     if (coverUrl) {

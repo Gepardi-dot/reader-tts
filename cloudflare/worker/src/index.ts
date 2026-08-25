@@ -1073,43 +1073,112 @@ async function fetchCoverBytes(rawUrl: string) {
   return { bytes: buffer, contentType }
 }
 
+function compactIsbn(raw: string) {
+  return raw.replace(/[^0-9Xx]/g, '').toUpperCase()
+}
+
+function coverIdUrl(coverId: number) {
+  return `https://covers.openlibrary.org/b/id/${coverId}-L.jpg`
+}
+
+function normalizeCoverTitle(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+function titlesCompatible(query: string, found: string) {
+  const a = normalizeCoverTitle(query)
+  const b = normalizeCoverTitle(found)
+  if (!a || !b) return true
+  if (a === b || a.includes(b) || b.includes(a)) return true
+  const queryWords = a.split(' ').filter((word) => word.length > 2)
+  if (queryWords.length === 0) return true
+  const foundWords = new Set(b.split(' ').filter((word) => word.length > 2))
+  const hits = queryWords.filter((word) => foundWords.has(word)).length
+  return hits >= Math.ceil(Math.min(queryWords.length, 3) * 0.5)
+}
+
+function upgradeGoogleCoverUrl(raw: string, volumeId?: string) {
+  if (volumeId) {
+    return `https://books.google.com/books/content?id=${encodeURIComponent(volumeId)}&printsec=frontcover&img=1&zoom=3&source=gbs_api`
+  }
+  return raw
+    .replace(/^http:\/\//i, 'https://')
+    .replace(/&edge=curl/gi, '')
+    .replace(/zoom=\d/gi, 'zoom=3')
+}
+
+async function searchOpenLibraryIsbn(isbn: string) {
+  const compact = compactIsbn(isbn)
+  if (compact.length < 10) return null
+  const edition = await fetchWithTimeout(`https://openlibrary.org/isbn/${compact}.json`)
+  if (edition?.ok) {
+    const data = await edition.json() as { covers?: number[] }
+    const coverId = data.covers?.find((id) => id > 0)
+    if (coverId) return coverIdUrl(coverId)
+  }
+  const search = await fetchWithTimeout(
+    `https://openlibrary.org/search.json?isbn=${encodeURIComponent(compact)}&limit=1&fields=cover_i`,
+  )
+  if (!search?.ok) return null
+  const data = await search.json() as { docs?: { cover_i?: number }[] }
+  const coverId = data.docs?.[0]?.cover_i
+  return coverId ? coverIdUrl(coverId) : null
+}
+
 async function searchOpenLibraryCover(title: string, author?: string) {
   const params = new URLSearchParams({
     title,
-    limit: '1',
-    fields: 'cover_i',
+    limit: '8',
+    fields: 'cover_i,title,author_name',
   })
   if (author) params.set('author', author)
   const res = await fetchWithTimeout(`https://openlibrary.org/search.json?${params.toString()}`)
   if (!res?.ok) return null
-  const data = await res.json() as { docs?: { cover_i?: number }[] }
-  const coverId = data.docs?.[0]?.cover_i
-  return coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : null
+  const data = await res.json() as { docs?: { cover_i?: number; title?: string }[] }
+  const docs = data.docs ?? []
+  const match = docs.find((doc) => doc.cover_i && titlesCompatible(title, doc.title ?? ''))
+  return match?.cover_i ? coverIdUrl(match.cover_i) : null
 }
 
-async function searchGoogleBooksCover(title: string, author?: string) {
-  const query = author ? `intitle:${title} inauthor:${author}` : `intitle:${title}`
+async function searchGoogleBooksCover(query: string) {
   const params = new URLSearchParams({
     q: query,
-    maxResults: '1',
-    fields: 'items(volumeInfo/imageLinks)',
+    maxResults: '5',
+    fields: 'items(id,volumeInfo/title,volumeInfo/imageLinks)',
   })
   const res = await fetchWithTimeout(`https://www.googleapis.com/books/v1/volumes?${params.toString()}`)
   if (!res?.ok) return null
   const data = await res.json() as {
-    items?: { volumeInfo?: { imageLinks?: Record<string, string> } }[]
+    items?: {
+      id?: string
+      volumeInfo?: { title?: string; imageLinks?: Record<string, string> }
+    }[]
   }
-  const links = data.items?.[0]?.volumeInfo?.imageLinks
+  const items = data.items ?? []
+  const match = items.find((item) => {
+    const links = item.volumeInfo?.imageLinks
+    return Boolean(links && (links.extraLarge || links.large || links.medium || links.thumbnail || links.smallThumbnail))
+  })
+  if (!match) return null
+  const links = match.volumeInfo?.imageLinks
   const raw = links?.extraLarge || links?.large || links?.medium || links?.thumbnail || links?.smallThumbnail
-  return raw ? raw.replace(/^http:\/\//i, 'https://') : null
+  if (!raw) return null
+  return upgradeGoogleCoverUrl(raw, match.id)
 }
 
 async function searchBookCover(url: URL) {
+  const isbn = url.searchParams.get('isbn')?.trim() ?? ''
   const title = url.searchParams.get('title')?.trim() ?? ''
   const author = url.searchParams.get('author')?.trim() ?? ''
+  if (isbn.length >= 10) {
+    const found = await searchOpenLibraryIsbn(isbn)
+      ?? await searchGoogleBooksCover(`isbn:${compactIsbn(isbn)}`)
+    return json({ url: found })
+  }
   if (title.length < 2) return json({ url: null })
+  const googleQuery = author ? `intitle:${title} inauthor:${author}` : `intitle:${title}`
   const found = await searchOpenLibraryCover(title, author || undefined)
-    ?? await searchGoogleBooksCover(title, author || undefined)
+    ?? await searchGoogleBooksCover(googleQuery)
   return json({ url: found })
 }
 

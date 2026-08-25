@@ -31,6 +31,11 @@ export interface ConvertToEpubResult {
   /** Original source kind label */
   sourceLabel: string
   cover?: Blob | null
+  resolvedCover?: {
+    dataUrl: string
+    sourceUrl: string | null
+    source: 'embedded' | 'lookup' | 'stored'
+  } | null
 }
 
 export interface ConvertToEpubOptions {
@@ -62,21 +67,27 @@ export async function convertFileToEpub(
     onProgress: options.onProgress,
   })
 
-  let cover = book.cover ?? null
-  if (!cover) {
-    options.onProgress?.({
-      phase: 'converting',
-      progress: 90,
-      message: 'Looking up book cover...',
+  let cover = book.coverKind === 'package' ? book.cover ?? null : null
+  let resolvedCover: ConvertToEpubResult['resolvedCover'] = null
+  options.onProgress?.({
+    phase: 'converting',
+    progress: 90,
+    message: 'Looking up original cover...',
+  })
+  try {
+    const { resolveCoverForUpload } = await import('@/features/library/resolveBookCover')
+    const { dataUrlToBlob } = await import('@/shared/books/extractCover')
+    const found = await resolveCoverForUpload(file, book.title, book.cover, {
+      author: book.author,
+      isbn: book.isbn,
+      coverKind: book.coverKind,
     })
-    try {
-      const { lookupRemoteCover } = await import('@/features/library/resolveBookCover')
-      const { dataUrlToBlob } = await import('@/shared/books/extractCover')
-      const found = await lookupRemoteCover(book.title, file.name)
-      if (found) cover = await dataUrlToBlob(found.dataUrl)
-    } catch {
-      cover = null
+    if (found) {
+      resolvedCover = found
+      cover = await dataUrlToBlob(found.dataUrl)
     }
+  } catch {
+    resolvedCover = null
   }
 
   options.onProgress?.({
@@ -88,7 +99,7 @@ export async function convertFileToEpub(
   const chapters = splitTextIntoChapters(book.text, book.title)
   const epub = await buildEpub({
     title: book.title,
-    author: options.author,
+    author: options.author || book.author,
     language: options.language,
     chapters,
     fileNameBase: book.fileName.replace(/\.[^.]+$/, '') || book.title,
@@ -112,5 +123,6 @@ export async function convertFileToEpub(
     epub,
     sourceLabel,
     cover,
+    resolvedCover,
   }
 }

@@ -4,6 +4,19 @@
  */
 
 import type JSZip from 'jszip'
+import {
+  canonicalIsbn,
+  decodeXmlText,
+  extractIsbnsFromText,
+  looksLikeAuthorName,
+  looksLikeBookTitle,
+} from './bookIdentifiers'
+
+export interface BookPackageMeta {
+  title?: string
+  author?: string
+  isbn?: string
+}
 
 export const COVER_MIME_BY_EXT: Record<string, string> = {
   jpg: 'image/jpeg',
@@ -43,6 +56,49 @@ export function findEpubCoverHref(opfXml: string): string | null {
   }
 
   return null
+}
+
+function firstXmlTagText(xml: string, tag: string): string {
+  const match = xml.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, 'i'))
+  return match ? decodeXmlText(match[1]) : ''
+}
+
+export function parseOpfMetadata(opfXml: string): BookPackageMeta {
+  const titleRaw = firstXmlTagText(opfXml, 'dc:title') || firstXmlTagText(opfXml, 'title')
+  const creatorRaw = firstXmlTagText(opfXml, 'dc:creator')
+  const identifiers = [...opfXml.matchAll(/<dc:identifier\b([^>]*)>([^<]*)<\/dc:identifier>/gi)]
+  const isbnCandidates: string[] = []
+  for (const match of identifiers) {
+    const attrs = match[1] ?? ''
+    const value = decodeXmlText(match[2] ?? '').replace(/^urn:isbn:/i, '')
+    const scheme = attrs.match(/scheme=["']([^"']+)["']/i)?.[1] ?? ''
+    if (/calibre|uuid|uri|url|asin/i.test(scheme) && !/isbn/i.test(scheme)) continue
+    if (/urn:uuid|uuid:/i.test(value)) continue
+    isbnCandidates.push(value)
+  }
+  isbnCandidates.push(...extractIsbnsFromText(opfXml))
+  const isbn = isbnCandidates.map((value) => canonicalIsbn(value)).find((value): value is string => Boolean(value))
+
+  return {
+    title: looksLikeBookTitle(titleRaw) ? titleRaw : undefined,
+    author: looksLikeAuthorName(creatorRaw) ? creatorRaw : undefined,
+    isbn,
+  }
+}
+
+export function parseFb2Metadata(xml: string): BookPackageMeta {
+  const titleInfo = xml.match(/<title-info\b[^>]*>([\s\S]*?)<\/title-info>/i)?.[1] ?? xml
+  const titleRaw = firstXmlTagText(titleInfo, 'book-title')
+  const firstName = firstXmlTagText(titleInfo, 'first-name')
+  const lastName = firstXmlTagText(titleInfo, 'last-name')
+  const nick = firstXmlTagText(titleInfo, 'nickname')
+  const authorRaw = [firstName, lastName].filter(Boolean).join(' ') || nick
+  const isbn = extractIsbnsFromText(xml)[0]
+  return {
+    title: looksLikeBookTitle(titleRaw) ? titleRaw : undefined,
+    author: looksLikeAuthorName(authorRaw) ? authorRaw : undefined,
+    isbn,
+  }
 }
 
 function zipFile(zip: JSZip, path: string) {
@@ -131,7 +187,7 @@ export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
   return response.blob()
 }
 
-export async function compressCover(blob: Blob, maxWidth = 280, maxHeight = 420): Promise<string> {
+export async function compressCover(blob: Blob, maxWidth = 560, maxHeight = 840): Promise<string> {
   if (typeof createImageBitmap === 'function') {
     try {
       const bitmap = await createImageBitmap(blob)
@@ -146,10 +202,10 @@ export async function compressCover(blob: Blob, maxWidth = 280, maxHeight = 420)
         ctx.drawImage(bitmap, 0, 0, width, height)
         bitmap.close()
         if ('convertToBlob' in canvas) {
-          const next = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.74 })
+          const next = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.84 })
           return blobToDataUrl(next)
         }
-        return (canvas as HTMLCanvasElement).toDataURL('image/jpeg', 0.74)
+        return (canvas as HTMLCanvasElement).toDataURL('image/jpeg', 0.84)
       }
       bitmap.close()
     } catch {

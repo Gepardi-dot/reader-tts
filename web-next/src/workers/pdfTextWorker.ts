@@ -10,7 +10,7 @@ interface ExtractPdfRequest {
 type ExtractPdfResponse =
   | { type: 'ready' }
   | { id: string; type: 'progress'; progress: number; pageNumber: number; totalPages: number }
-  | { id: string; type: 'complete'; text: string; pageCount: number; cover?: ArrayBuffer; coverType?: string }
+  | { id: string; type: 'complete'; text: string; pageCount: number; cover?: ArrayBuffer; coverType?: string; title?: string; author?: string; isbn?: string }
   | { id: string; type: 'error'; message: string }
 
 const ctx: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope
@@ -44,6 +44,9 @@ async function extract(message: ExtractPdfRequest) {
       pageCount: result.pageCount,
       cover: result.cover,
       coverType: result.coverType,
+      title: result.title,
+      author: result.author,
+      isbn: result.isbn,
     })
   } catch (error) {
     post({
