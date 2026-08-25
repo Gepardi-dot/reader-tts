@@ -343,7 +343,7 @@ async function extractByKind(
         text: normalizeText(pdf.text),
         pageCount: pdf.pageCount,
         cover: pdf.cover,
-        coverKind: pdf.coverKind ?? (pdf.cover ? 'pdf-page' : undefined),
+        coverKind: pdf.cover ? 'pdf-page' : undefined,
         title: pdf.title,
         author: pdf.author,
         isbn: pdf.isbn,
