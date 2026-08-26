@@ -3,6 +3,7 @@ import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/rea
 import { Link } from 'react-router-dom'
 import { FileText, LayoutGrid, List, GitBranch, Trash2 } from 'lucide-react'
 import { api } from '@/shared/api/client'
+import { NotionConnect } from '@/features/settings/NotionConnect'
 
 interface Book {
   id: string
@@ -323,6 +324,10 @@ export function NotesRoute() {
               />
             ))}
           </div>
+        </div>
+
+        <div className="mb-3.5">
+          <NotionConnect compact />
         </div>
 
         {/* Search */}
