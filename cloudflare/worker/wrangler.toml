@@ -22,6 +22,8 @@ GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 KOKORO_REMOTE_URL = "https://kokoro-reader.fly.dev"
 # Comma-separated browser origins allowed for CORS (cross-origin clients e.g. Vercel backup).
 APP_ORIGIN = "https://higgsread.com,https://www.higgsread.com,https://reader-tts-api.reader-tts-ari.workers.dev,https://readertts.vercel.app,http://localhost:5175,http://localhost:5173,http://127.0.0.1:5175"
+# Public OAuth client id (safe in vars). Secret stays in `wrangler secret put`.
+NOTION_CLIENT_ID = "3c8d872b-594c-813a-8bcb-083709ddb4dc"
 
 [[d1_databases]]
 binding = "DB"

@@ -50,8 +50,16 @@ export class NotionHttpError extends Error {
   }
 }
 
+export function cleanNotionCredential(value: string | undefined | null): string {
+  return (value ?? '')
+    .replace(/^\uFEFF/, '')
+    .replace(/[\r\n\t]+/g, '')
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+}
+
 export function notionConfigured(env: NotionEnv): boolean {
-  return Boolean(env.NOTION_CLIENT_ID?.trim() && env.NOTION_CLIENT_SECRET?.trim())
+  return Boolean(cleanNotionCredential(env.NOTION_CLIENT_ID) && cleanNotionCredential(env.NOTION_CLIENT_SECRET))
 }
 
 export function notionRedirectUri(env: NotionEnv, requestUrl: string): string {
@@ -280,7 +288,7 @@ export async function startNotionOAuth(
     'INSERT INTO notion_oauth_states (state, user_id, return_origin, created_at) VALUES (?, ?, ?, ?)',
   ).bind(state, user.id, returnOrigin, now).run()
   const params = new URLSearchParams({
-    client_id: env.NOTION_CLIENT_ID!.trim(),
+    client_id: cleanNotionCredential(env.NOTION_CLIENT_ID),
     response_type: 'code',
     owner: 'user',
     state,
@@ -290,7 +298,7 @@ export async function startNotionOAuth(
 }
 
 async function exchangeCode(env: NotionEnv, requestUrl: string, code: string) {
-  const basic = btoa(`${env.NOTION_CLIENT_ID!.trim()}:${env.NOTION_CLIENT_SECRET!.trim()}`)
+  const basic = btoa(`${cleanNotionCredential(env.NOTION_CLIENT_ID)}:${cleanNotionCredential(env.NOTION_CLIENT_SECRET)}`)
   const response = await fetch(NOTION_TOKEN, {
     method: 'POST',
     headers: {
