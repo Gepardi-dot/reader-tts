@@ -7,6 +7,7 @@ import {
   clipRangeToPage,
   clipRectsToBounds,
   clientRectsToLocal,
+  mergeRectsIntoLineWashes,
   normalizeReaderLayout,
   pageBreaksFromLineBoxes,
   pageClipRange,
@@ -21,6 +22,8 @@ import {
   resolveLayoutSwitchOffset,
   scrollDeltaToPinRect,
   scrollPctFromOffset,
+  continuousFollowBand,
+  continuousSpokenFollowDelta,
 } from './readerLayout'
 
 describe('normalizeReaderLayout', () => {
@@ -256,6 +259,28 @@ describe('clipRangeToPage', () => {
   })
 })
 
+describe('mergeRectsIntoLineWashes', () => {
+  it('joins word boxes on one line into a single wash', () => {
+    expect(mergeRectsIntoLineWashes([
+      { left: 40, top: 120, width: 36, height: 18 },
+      { left: 82, top: 121, width: 44, height: 18 },
+      { left: 132, top: 120, width: 50, height: 19 },
+    ])).toEqual([
+      { left: 40, top: 120, width: 142, height: 19 },
+    ])
+  })
+
+  it('keeps separate visual lines apart', () => {
+    expect(mergeRectsIntoLineWashes([
+      { left: 40, top: 120, width: 200, height: 18 },
+      { left: 40, top: 144, width: 160, height: 18 },
+    ])).toEqual([
+      { left: 40, top: 120, width: 200, height: 18 },
+      { left: 40, top: 144, width: 160, height: 18 },
+    ])
+  })
+})
+
 describe('clipRectsToBounds', () => {
   const bounds = { left: 100, top: 80, width: 400, height: 500 }
 
@@ -344,6 +369,39 @@ describe('layout switch offset', () => {
   it('pins a line to the reading band instead of using document percent', () => {
     expect(scrollDeltaToPinRect(420, 88)).toBe(332)
     expect(scrollDeltaToPinRect(90, 88)).toBe(0)
+  })
+
+  it('keeps continuous TTS still while the spoken line is around the middle', () => {
+    const band = continuousFollowBand(88, 736)
+    expect(continuousSpokenFollowDelta({
+      spokenTop: band.targetY - 10,
+      spokenBottom: band.targetY + 12,
+      ...band,
+    })).toBe(0)
+  })
+
+  it('recenters when the spoken line drifts too close to the bottom', () => {
+    const band = continuousFollowBand(88, 736)
+    const spokenTop = band.safeBottom + 40
+    const spokenBottom = spokenTop + 22
+    const spokenMid = (spokenTop + spokenBottom) / 2
+    expect(continuousSpokenFollowDelta({
+      spokenTop,
+      spokenBottom,
+      ...band,
+    })).toBeCloseTo(spokenMid - band.targetY, 5)
+  })
+
+  it('recenters when the spoken line sits too high under the header', () => {
+    const band = continuousFollowBand(88, 736)
+    const spokenTop = 100
+    const spokenBottom = 122
+    const spokenMid = (spokenTop + spokenBottom) / 2
+    expect(continuousSpokenFollowDelta({
+      spokenTop,
+      spokenBottom,
+      ...band,
+    })).toBeCloseTo(spokenMid - band.targetY, 5)
   })
 
   it('reuses last paginated breaks when type and viewport have not changed', () => {

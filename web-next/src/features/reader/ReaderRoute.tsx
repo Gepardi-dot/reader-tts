@@ -71,7 +71,11 @@ import {
   useTtsSessionController,
   type TtsAudioChunk,
 } from './tts-engine/useTtsSessionController'
-import { expandToReadingPhrase } from './readingPhrase'
+import { resolveReadingWindow } from './readingPhrase'
+import {
+  followScrollSettled,
+  stepFollowScrollSpring,
+} from './followScroll'
 import {
   applyReaderScrollerStyle,
   assignLineStartOffsets,
@@ -79,7 +83,10 @@ import {
   clampReadOffset,
   clipRangeToPage,
   clientRectsToLocal,
+  CONTINUOUS_FOLLOW_BOTTOM_CLEARANCE,
+  continuousFollowBand,
   overlayRectsEqual,
+  mergeRectsIntoLineWashes,
   pageBreaksFromLineBoxes,
   pageClipRange,
   pageIndexForOffset,
@@ -339,27 +346,21 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
   paragraphs,
   bionic,
   highlights,
-  playback,
-  playbackColor,
   virtualize = true,
   layoutStart = 0,
   layoutEnd = 0,
-  paintPlaybackInline = true,
 }: {
   paragraphs: ReaderParagraph[]
   bionic: boolean
   highlights: ReaderHighlight[]
-  playback: { start: number; end: number } | null
-  playbackColor: string
   virtualize?: boolean
   layoutStart?: number
   layoutEnd?: number
-  paintPlaybackInline?: boolean
 }) {
   return (
     <>
       {paragraphs.map((p, i) => {
-        const parts = splitParagraphByHighlights(p.text, p.startOffset, highlights, playback)
+        const parts = splitParagraphByHighlights(p.text, p.startOffset, highlights, null)
         const skipLayout = virtualize && (
           layoutEnd <= layoutStart
           || p.startOffset + p.text.length < layoutStart
@@ -377,25 +378,18 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
           >
             {parts.map((part) => {
               const content = bionic ? toBionicNodes(part.text) : part.text
-              if (!part.color && !part.playback) {
+              if (!part.color) {
                 return <span key={part.key}>{content}</span>
               }
-              const playbackWash = part.playback && paintPlaybackInline
               return (
                 <mark
                   key={part.key}
-                  data-reader-highlight={part.color ? 'true' : undefined}
-                  data-reader-playback={part.playback ? 'true' : undefined}
-                  className={playbackWash ? 'reader-playback-hl' : undefined}
+                  data-reader-highlight="true"
                   style={{
-                    backgroundColor: playbackWash
-                      ? playbackColor
-                      : part.color
-                        ? HIGHLIGHT_BG[part.color]
-                        : 'transparent',
+                    backgroundColor: HIGHLIGHT_BG[part.color],
                     color: 'inherit',
-                    borderRadius: playbackWash ? 1 : 2,
-                    padding: playbackWash && virtualize ? '0.18em 0.16em' : '0 0.04em',
+                    borderRadius: 2,
+                    padding: '0 0.04em',
                   }}
                 >
                   {content}
@@ -2624,7 +2618,6 @@ export function ReaderRoute() {
   const [selection,     setSelection]     = useState<SelectionState | null>(null)
   const [panel,         setPanel]         = useState<SecondaryPanel | null>(null)
   const [toast,         setToast]         = useState<string | null>(null)
-  const [playbackRange, setPlaybackRange] = useState<{ start: number; end: number } | null>(null)
   const [playbackOverlayRects, setPlaybackOverlayRects] = useState<OverlayRect[]>([])
   const [rollingCacheState, setRollingCacheState] = useState<RollingCacheState>(() => getRollingCacheState())
   const [audioPrefs, setAudioPrefs] = useState(() => loadBookSettings(bookId).audioPrefs)
@@ -2644,6 +2637,14 @@ export function ReaderRoute() {
   const activeAudioCueRangeRef  = useRef<{ start: number; end: number } | null>(null)
   /** True while we programmatically scroll to keep the cue in view — ignore for pause detection. */
   const programmaticScrollRef   = useRef(false)
+  const programmaticScrollClearRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const followSpringRef = useRef<{
+    raf: number | null
+    target: number | null
+    y: number
+    v: number
+    lastT: number
+  }>({ raf: null, target: null, y: 0, v: 0, lastT: 0 })
   /** User scrolled away during playback — stop yanking the viewport back to the highlight. */
   const audioFollowPausedRef    = useRef(false)
   const [audioFollowPaused, setAudioFollowPaused] = useState(false)
@@ -2791,6 +2792,89 @@ export function ReaderRoute() {
   function scrollReaderBy(delta: number, behavior: ScrollBehavior = 'auto') {
     const { y } = getReaderScrollMetrics()
     scrollReaderTo(y + delta, behavior)
+  }
+
+  function beginProgrammaticScroll(holdMs = 200) {
+    programmaticScrollRef.current = true
+    if (programmaticScrollClearRef.current) clearTimeout(programmaticScrollClearRef.current)
+    programmaticScrollClearRef.current = setTimeout(() => {
+      programmaticScrollRef.current = false
+      programmaticScrollClearRef.current = null
+    }, holdMs)
+  }
+
+  function isFollowGliding() {
+    return followSpringRef.current.raf != null
+  }
+
+  function isProgrammaticFollowScroll() {
+    return programmaticScrollRef.current || isFollowGliding()
+  }
+
+  function setReaderScrollTop(top: number) {
+    const el = readerScrollRef.current
+    if (el) el.scrollTop = top
+    else window.scrollTo({ top })
+  }
+
+  function stopFollowGlide() {
+    const spring = followSpringRef.current
+    if (spring.raf != null) cancelAnimationFrame(spring.raf)
+    spring.raf = null
+    spring.target = null
+    spring.v = 0
+  }
+
+  function glideFollowBy(delta: number) {
+    const { y, max } = getReaderScrollMetrics()
+    const target = Math.max(0, Math.min(max, y + delta))
+    if (Math.abs(target - y) < 1) return
+    const spring = followSpringRef.current
+    spring.target = target
+    if (prefersReducedMotion()) {
+      stopFollowGlide()
+      beginProgrammaticScroll(160)
+      setReaderScrollTop(target)
+      return
+    }
+    spring.y = y
+    if (spring.raf != null) return
+
+    spring.v = 0
+    spring.lastT = performance.now()
+    programmaticScrollRef.current = true
+    const tick = (now: number) => {
+      if (
+        audioFollowPausedRef.current
+        || layoutRef.current !== 'continuous'
+        || spring.target == null
+      ) {
+        spring.raf = null
+        spring.target = null
+        spring.v = 0
+        beginProgrammaticScroll(80)
+        return
+      }
+      const dt = Math.min(0.048, Math.max(0, (now - spring.lastT) / 1000))
+      spring.lastT = now
+      const live = getReaderScrollMetrics()
+      const nextTarget = Math.max(0, Math.min(live.max, spring.target))
+      const next = stepFollowScrollSpring({ y: spring.y, v: spring.v }, nextTarget, dt)
+      spring.y = next.y
+      spring.v = next.v
+      programmaticScrollRef.current = true
+      setReaderScrollTop(next.y)
+      if (followScrollSettled(next, nextTarget)) {
+        setReaderScrollTop(nextTarget)
+        spring.raf = null
+        spring.target = null
+        spring.v = 0
+        beginProgrammaticScroll(80)
+        return
+      }
+      spring.raf = requestAnimationFrame(tick)
+    }
+    spring.raf = requestAnimationFrame(tick)
   }
 
   function getPagedChrome() {
@@ -2956,6 +3040,7 @@ export function ReaderRoute() {
     if (!page) return
 
     if (reason === 'user' && isAudioActive() && !audioFollowPausedRef.current) {
+      stopFollowGlide()
       audioFollowPausedRef.current = true
       setAudioFollowPaused(true)
     }
@@ -3193,14 +3278,14 @@ export function ReaderRoute() {
   function revealPlaybackAfterLayoutSwitch(followPlayback: boolean) {
     const cue = activeAudioCueRangeRef.current
     if (!cue) {
-      if (layoutRef.current === 'paginated') setPlaybackOverlayRects([])
+      setPlaybackOverlayRects([])
       return
     }
     activeAudioCueKeyRef.current = null
+    const spoken = spokenOffsetRef.current ?? cue.start
     if (layoutRef.current === 'paginated') {
-      setPlaybackRange(null)
       const textLen = payload?.text.length ?? cue.end
-      if (followPlayback) followPaginatedSpokenOffset(cue.start)
+      if (followPlayback) followPaginatedSpokenOffset(spoken)
       const visible = clipRangeToPage(
         cue.start,
         cue.end,
@@ -3212,11 +3297,11 @@ export function ReaderRoute() {
         setPlaybackOverlayRects([])
         return
       }
-      updatePaginatedPlaybackOverlay(visible.start, visible.end)
+      updatePlaybackOverlay(visible.start, visible.end)
       return
     }
-    setPlaybackOverlayRects([])
-    showAudioFollow(cue.start, cue.end, followPlayback)
+    updatePlaybackOverlay(cue.start, cue.end)
+    if (followPlayback) followContinuousReadingWindow(cue)
   }
 
   async function revealPage(
@@ -3508,6 +3593,8 @@ export function ReaderRoute() {
       latestScrollPct.current = scrollPctFromOffset(switchOffset, textLength)
       if (nextLayout === 'paginated') pendingPageOffsetRef.current = switchOffset
     }
+
+    if (switched) stopFollowGlide()
 
     if (nextLayout !== 'paginated') {
       abortPageTurns()
@@ -4048,7 +4135,8 @@ export function ReaderRoute() {
       const activeCueRange = activeAudioCueRangeRef.current
       if (activeCueRange) {
         // Inline playback mark scrolls with the page — do not re-layout on scroll.
-        if (!programmaticScrollRef.current && isAudioActive() && !audioFollowPausedRef.current) {
+        if (!isProgrammaticFollowScroll() && isAudioActive() && !audioFollowPausedRef.current) {
+          stopFollowGlide()
           audioFollowPausedRef.current = true
           setAudioFollowPaused(true)
         }
@@ -4070,6 +4158,14 @@ export function ReaderRoute() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.text])
+
+  useEffect(() => () => {
+    const spring = followSpringRef.current
+    if (spring.raf != null) cancelAnimationFrame(spring.raf)
+    spring.raf = null
+    spring.target = null
+    spring.v = 0
+  }, [])
 
   useEffect(() => {
     function flushProgress() {
@@ -4331,7 +4427,7 @@ export function ReaderRoute() {
     activeAudioCueKeyRef.current = null
     activeAudioCueRangeRef.current = null
     spokenOffsetRef.current = null
-    setPlaybackRange(null)
+    stopFollowGlide()
     setPlaybackOverlayRects([])
     audioFollowPausedRef.current = false
     setAudioFollowPaused(false)
@@ -4342,12 +4438,22 @@ export function ReaderRoute() {
     setAudioFollowPaused(false)
     const range = activeAudioCueRangeRef.current
     if (!range) return
+    const spoken = spokenOffsetRef.current ?? range.start
     if (layoutRef.current === 'paginated') {
-      followPaginatedSpokenOffset(range.start)
-      updatePaginatedPlaybackOverlay(range.start, range.end)
+      followPaginatedSpokenOffset(spoken)
+      const textLen = payload?.text.length ?? range.end
+      const visible = clipRangeToPage(
+        range.start,
+        range.end,
+        pageBreaksRef.current,
+        pageIndexRef.current,
+        textLen,
+      ) ?? range
+      updatePlaybackOverlay(visible.start, visible.end)
       return
     }
-    showAudioFollow(range.start, range.end, true)
+    updatePlaybackOverlay(range.start, range.end)
+    followContinuousReadingWindow(range)
   }
 
   function followPaginatedSpokenOffset(offset: number) {
@@ -4359,10 +4465,45 @@ export function ReaderRoute() {
     if (next !== pageIndexRef.current) goToPage(next, 'follow')
   }
 
-  function updatePaginatedPlaybackOverlay(startOffset: number, endOffset: number) {
+  function followContinuousReadingWindow(windowRange: { start: number; end: number }) {
+    if (layoutRef.current !== 'continuous') return
+    if (audioFollowPausedRef.current) return
+    const root = readerTextRef.current
+    if (!root || windowRange.end <= windowRange.start) return
+    const range = domRangeForSourceOffsets(windowRange.start, windowRange.end, root)
+    if (!range) return
+
+    const boxes = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0)
+    const fallback = range.getBoundingClientRect()
+    if (boxes.length === 0) {
+      if (fallback.width === 0 && fallback.height === 0) return
+      boxes.push(fallback)
+    }
+    const top = Math.min(...boxes.map((rect) => rect.top))
+    const bottom = Math.max(...boxes.map((rect) => rect.top + rect.height))
+    const viewRect = readerScrollRef.current?.getBoundingClientRect()
+    const readableTop = continuousReadingPinY()
+    const readableBottom = (viewRect?.bottom ?? window.innerHeight) - CONTINUOUS_FOLLOW_BOTTOM_CLEARANCE
+    const band = continuousFollowBand(readableTop, readableBottom)
+    const mid = (top + bottom) / 2
+    const height = bottom - top
+    const viewH = readableBottom - readableTop
+    const delta = height >= viewH - 8
+      ? scrollDeltaToPinRect(top, readableTop)
+      : top >= readableTop && bottom <= readableBottom && mid >= band.safeTop && mid <= band.safeBottom
+        ? 0
+        : scrollDeltaToPinRect(mid, band.targetY)
+    if (delta === 0) return
+    glideFollowBy(delta)
+  }
+
+  function updatePlaybackOverlay(startOffset: number, endOffset: number) {
     const root = readerTextRef.current
     const inner = pageInnerRef.current
-    if (!root || !inner || endOffset <= startOffset) return
+    if (!root || !inner || endOffset <= startOffset) {
+      setPlaybackOverlayRects([])
+      return
+    }
     const range = domRangeForSourceOffsets(startOffset, endOffset, root)
     if (!range) return
     const measure = () => {
@@ -4378,54 +4519,49 @@ export function ReaderRoute() {
       root.style.clipPath = prevClip
     }
     if (raw.length === 0) return
-    const next = clientRectsToLocal(raw, inner.getBoundingClientRect())
+    const next = clientRectsToLocal(
+      mergeRectsIntoLineWashes(raw),
+      inner.getBoundingClientRect(),
+    )
     if (next.length === 0) return
     setPlaybackOverlayRects((current) => (overlayRectsEqual(current, next) ? current : next))
   }
 
-  function showAudioFollow(startOffset: number, endOffset: number, follow: boolean) {
-    setPlaybackRange({ start: startOffset, end: endOffset })
-
-    const root = readerTextRef.current
-    if (!root) return
+  function paintReadingWindow(windowRange: { start: number; end: number }) {
+    const nextKey = `${windowRange.start}:${windowRange.end}`
+    activeAudioCueRangeRef.current = windowRange
+    const changed = activeAudioCueKeyRef.current !== nextKey
+    if (changed) activeAudioCueKeyRef.current = nextKey
 
     if (layoutRef.current === 'paginated') {
-      updatePaginatedPlaybackOverlay(startOffset, endOffset)
+      const textLen = payload?.text.length ?? windowRange.end
+      const visible = clipRangeToPage(
+        windowRange.start,
+        windowRange.end,
+        pageBreaksRef.current,
+        pageIndexRef.current,
+        textLen,
+      )
+      if (!visible) {
+        setPlaybackOverlayRects([])
+        return
+      }
+      updatePlaybackOverlay(visible.start, visible.end)
       return
     }
 
-    const range = domRangeForSourceOffsets(startOffset, endOffset, root)
-    if (!range) return
-
-    const fallbackRect = range.getBoundingClientRect()
-    if (fallbackRect.width === 0 && fallbackRect.height === 0) return
-
-    const rects = selectionRectsFromRange(range, fallbackRect)
-
-    // Respect user scroll: highlight still updates, viewport stays put.
-    if (!follow || audioFollowPausedRef.current || rects.length === 0) return
-
-    const top = Math.min(...rects.map((rect) => rect.top))
-    const bottom = Math.max(...rects.map((rect) => rect.top + rect.height))
-    const view = getReaderScrollMetrics().view
-    const safeTop = view * 0.22
-    const safeBottom = view * 0.72
-    if (top >= safeTop && bottom <= safeBottom) return
-
-    const centerY = (top + bottom) / 2
-    const targetY = view * 0.42
-    const delta = centerY - targetY
-    if (Math.abs(delta) < 12) return
-
-    programmaticScrollRef.current = true
-    // Instant scroll avoids fighting the user's finger/wheel with smooth animation.
-    scrollReaderBy(delta, 'auto')
-    window.setTimeout(() => {
-      programmaticScrollRef.current = false
-    }, 80)
+    if (changed) {
+      updatePlaybackOverlay(windowRange.start, windowRange.end)
+      followContinuousReadingWindow(windowRange)
+      requestAnimationFrame(() => {
+        if (activeAudioCueKeyRef.current !== nextKey) return
+        updatePlaybackOverlay(windowRange.start, windowRange.end)
+        followContinuousReadingWindow(windowRange)
+      })
+    }
   }
 
-  function syncAudioFollowCue(chunk: TtsAudioChunk, currentTime: number, follow: boolean) {
+  function syncAudioFollowCue(chunk: TtsAudioChunk, currentTime: number, _follow: boolean) {
     const spoken = spokenOffsetAtTime({
       chunkStart: chunk.start,
       chunkEnd: chunk.end,
@@ -4435,51 +4571,14 @@ export function ReaderRoute() {
     })
     spokenOffsetRef.current = spoken
     if (!audioFollowPausedRef.current) readOffsetRef.current = spoken
-    const cues = (chunk.cues ?? []).filter((cue) => cue.end > cue.start)
-    const activeCue = cues.find((cue, index) => {
-      const cueStart = Math.max(0, cue.timeStart)
-      const cueEnd = Math.max(cueStart, cue.timeEnd)
-      const isLastCue = index === cues.length - 1
-      return currentTime >= cueStart && (currentTime < cueEnd || (isLastCue && currentTime <= cueEnd + 0.2))
-    }) ?? (cues.length
-      ? (currentTime < cues[0].timeStart ? cues[0] : cues[cues.length - 1])
-      : null)
+    const text = payload?.text ?? ''
+    const windowRange = resolveReadingWindow(spoken, text, activeAudioCueRangeRef.current)
 
-    const cueStart = activeCue?.start ?? spoken
-    const cueEnd = activeCue?.end ?? Math.max(cueStart + 1, spoken)
-    const phrase = expandToReadingPhrase(cueStart, cueEnd, payload?.text ?? '')
-
-    // Turn first so the highlight can be clipped to the page now on screen.
     if (layoutRef.current === 'paginated' && !audioFollowPausedRef.current) {
       followPaginatedSpokenOffset(spoken)
     }
 
-    if (layoutRef.current === 'paginated') {
-      const textLen = payload?.text.length ?? phrase.end
-      const visible = clipRangeToPage(
-        phrase.start,
-        phrase.end,
-        pageBreaksRef.current,
-        pageIndexRef.current,
-        textLen,
-      ) ?? clipRangeToPage(
-        spoken,
-        Math.max(spoken + 1, phrase.end),
-        pageBreaksRef.current,
-        pageIndexRef.current,
-        textLen,
-      )
-      if (!visible) return
-      activeAudioCueRangeRef.current = visible
-      updatePaginatedPlaybackOverlay(visible.start, visible.end)
-      return
-    }
-
-    const nextKey = `${phrase.start}:${phrase.end}`
-    activeAudioCueRangeRef.current = { start: phrase.start, end: phrase.end }
-    if (activeAudioCueKeyRef.current === nextKey) return
-    activeAudioCueKeyRef.current = nextKey
-    showAudioFollow(phrase.start, phrase.end, follow && !audioFollowPausedRef.current)
+    paintReadingWindow(windowRange)
   }
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -4671,8 +4770,7 @@ export function ReaderRoute() {
       <div
         ref={pageInnerRef}
         className={cn(
-          'reader-page-inner mx-auto px-5 pb-36',
-          paginated && 'relative',
+          'reader-page-inner relative mx-auto px-5 pb-36',
           !paginated && 'transition-[max-width] duration-200',
         )}
         data-reader-page-column={paginated ? '' : undefined}
@@ -4691,7 +4789,7 @@ export function ReaderRoute() {
         onTouchEnd={handleTouchEnd}
         onContextMenu={(e) => e.preventDefault()}
       >
-        {paginated && playbackOverlayRects.map((rect, index) => (
+        {playbackOverlayRects.map((rect, index) => (
           <div
             key={`pb-${Math.round(rect.top)}-${Math.round(rect.left)}-${index}`}
             data-reader-playback-overlay="true"
@@ -4719,12 +4817,9 @@ export function ReaderRoute() {
               paragraphs={paragraphs}
               bionic={appearance.bionic}
               highlights={readerHighlights}
-              playback={playbackRange}
-              playbackColor={colors.playback}
               virtualize={!paginated || !pagedLayoutAll}
               layoutStart={pagedWindow.start}
               layoutEnd={pagedWindow.end}
-              paintPlaybackInline={!paginated}
             />
           </div>
         )}

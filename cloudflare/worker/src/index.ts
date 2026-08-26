@@ -3826,18 +3826,18 @@ async function providers(env: Env) {
     providers: [
       {
         id: 'kokoro',
-        name: 'Kokoro',
+        name: 'HR Voices',
         available: kokoroConfigured,
         recommended: true,
         voices: KOKORO_VOICES,
         defaultVoice: KOKORO_DEFAULT_VOICE,
         description: kokoroConfigured
-          ? 'Default neural TTS with edge/R2 audio cache (hosted Kokoro).'
-          : 'Set KOKORO_REMOTE_URL on the Worker to enable hosted Kokoro (see docs/hosted-kokoro.md).',
+          ? 'Default neural voices with cached audio.'
+          : 'Set KOKORO_REMOTE_URL on the Worker to enable HR Voices (see docs/hosted-kokoro.md).',
       },
       {
         id: 'google',
-        name: 'Gemini TTS',
+        name: 'HR Ultra Realistic',
         available: geminiConfigured,
         recommended: false,
         voices: GEMINI_VOICES,
@@ -3845,8 +3845,8 @@ async function providers(env: Env) {
         models: GEMINI_TTS_MODELS,
         defaultModel: configuredGeminiModel(env, null),
         description: geminiConfigured
-          ? 'Cloud Gemini TTS for higher quality narrated chunks.'
-          : 'Add GEMINI_API_KEY as a Cloudflare Worker secret to enable Gemini TTS.',
+          ? 'Ultra-realistic Gemini TTS for higher quality narration.'
+          : 'Add GEMINI_API_KEY as a Cloudflare Worker secret to enable HR Ultra Realistic.',
       },
     ],
   })

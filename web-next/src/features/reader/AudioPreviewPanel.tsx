@@ -16,6 +16,7 @@ import {
 } from './audioPlayback'
 import {
   defaultVoiceForProvider,
+  displayNameForTtsProvider,
   providerOptionsFromCatalog,
   PROVIDER_PREVIEW_TEXT,
   type ProvidersResponse,
@@ -130,7 +131,7 @@ export function AudioPreviewPanel({
   const committedProviderInfo = providerOptions.find(p => p.id === provider)
   const committedVoiceLabel = committedProviderInfo
     ?.voices.find((item) => item.id === voice)
-    ?.label ?? voice ?? committedProviderInfo?.label ?? 'Kokoro'
+    ?.label ?? voice ?? committedProviderInfo?.label ?? displayNameForTtsProvider('kokoro')
   const hasDraftChanges = audioPreferenceDraftChanged({
     committedProvider: provider,
     committedVoice: voice,
@@ -436,7 +437,11 @@ export function AudioPreviewPanel({
             },
           })
         }}>
-          <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full h-9 text-sm">
+            <SelectValue>
+              {activeProvider?.label ?? displayNameForTtsProvider(resolvedDraftProvider)}
+            </SelectValue>
+          </SelectTrigger>
           <SelectContent alignItemWithTrigger={false} side="bottom">
             {providerOptions.map((p) => (
               <SelectItem key={p.id} value={p.id} disabled={!p.available}>
