@@ -1,3 +1,14 @@
+import {
+  NotionHttpError,
+  disconnectNotion,
+  finishNotionOAuth,
+  isAllowedReturnOrigin,
+  notionStatus,
+  startNotionOAuth,
+  syncAllNotesToNotion,
+  syncHighlightToNotion,
+} from './notion'
+
 type JsonValue =
   | string
   | number
@@ -59,6 +70,9 @@ interface Env {
   RESEND_API_KEY?: string
   /** Operator inbox. Never returned to clients. */
   SUPPORT_INBOX?: string
+  NOTION_CLIENT_ID?: string
+  NOTION_CLIENT_SECRET?: string
+  NOTION_REDIRECT_URI?: string
 }
 
 interface ExecutionContext {
@@ -236,6 +250,9 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   const path = normalizePath(url.pathname)
 
   if (path === '/api/health' && request.method === 'GET') return health(env)
+  if (path === '/api/integrations/notion/callback' && request.method === 'GET') {
+    return handleNotionCallback(request, env, url)
+  }
   if (path.startsWith('/api/auth/')) return handleAuth(request, env, path)
   if (path === '/api/providers' && request.method === 'GET') return providers(env)
   // Public warmup: ping hosted Kokoro so Fly stays warm before the user plays audio.
@@ -252,6 +269,23 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   if (path === '/api/telemetry' && request.method === 'POST') return recordTelemetry(request, env, user)
   if (path === '/api/stats/active-users' && request.method === 'GET') return activeUsersStat(env)
   if (path === '/api/support' && request.method === 'POST') return submitSupport(request, env, user)
+  if (path === '/api/integrations/notion' && request.method === 'GET') {
+    return json(await notionStatus(env, user))
+  }
+  if (path === '/api/integrations/notion/start' && request.method === 'GET') {
+    return handleNotionStart(request, env, url, user)
+  }
+  if (path === '/api/integrations/notion' && request.method === 'DELETE') {
+    return json(await disconnectNotion(env, user))
+  }
+  if (path === '/api/integrations/notion/sync' && request.method === 'POST') {
+    try {
+      const result = await syncAllNotesToNotion(env, user)
+      return json({ ok: true, ...result })
+    } catch (error) {
+      throw notionAsApiError(error)
+    }
+  }
 
   if (path === '/api/books' && request.method === 'GET') return listBooks(env, user)
   if (path === '/api/books' && request.method === 'POST') return createBook(request, env, user)
@@ -516,6 +550,19 @@ async function deleteUserAccount(request: Request, env: Env) {
   for (const sql of [
     'DELETE FROM performance_events WHERE user_id = ?',
     'DELETE FROM learning_events WHERE user_id = ?',
+  ]) {
+    try {
+      await env.DB.prepare(sql).bind(user.id).run()
+    } catch {
+      // Table may not exist on older databases.
+    }
+  }
+
+  for (const sql of [
+    'DELETE FROM notion_synced_highlights WHERE user_id = ?',
+    'DELETE FROM notion_book_pages WHERE user_id = ?',
+    'DELETE FROM notion_connections WHERE user_id = ?',
+    'DELETE FROM notion_oauth_states WHERE user_id = ?',
   ]) {
     try {
       await env.DB.prepare(sql).bind(user.id).run()
@@ -1283,7 +1330,9 @@ async function handleBookRoute(request: Request, env: Env, user: User, bookId: s
   if (rest === 'progress' && request.method === 'GET') return bookProgress(env, user, bookId)
   if (rest === 'progress/reading' && request.method === 'PUT') return updateReadingProgress(request, env, user, bookId)
   if (rest === 'highlights' && request.method === 'GET') return listHighlights(env, user, bookId)
-  if (rest === 'highlights' && request.method === 'POST') return createHighlight(request, env, user, bookId)
+  if (rest === 'highlights' && request.method === 'POST') {
+    return createHighlight(request, env, user, bookId, ctx)
+  }
   const highlightDelete = rest.match(/^highlights\/([^/]+)$/)
   if (highlightDelete && request.method === 'DELETE') {
     await env.DB.prepare('DELETE FROM highlights WHERE id = ? AND user_id = ? AND book_id = ?')
@@ -2503,7 +2552,13 @@ async function highlightRows(env: Env, user: User, bookId: string) {
   return rows.results.map(serializeHighlight)
 }
 
-async function createHighlight(request: Request, env: Env, user: User, bookId: string) {
+async function createHighlight(
+  request: Request,
+  env: Env,
+  user: User,
+  bookId: string,
+  ctx: ExecutionContext,
+) {
   await bookRow(env, user, bookId)
   const body = await readJson<Record<string, unknown>>(request)
   const id = crypto.randomUUID()
@@ -2512,6 +2567,9 @@ async function createHighlight(request: Request, env: Env, user: User, bookId: s
   const text = stringField(body.text)
   if (!text || end <= start) throw new ApiError(400, 'Invalid highlight.')
   const now = new Date().toISOString()
+  const color = stringField(body.color) || 'amber'
+  const kind = stringField(body.kind) || 'highlight'
+  const note = stringField(body.note) || null
   await env.DB.prepare(
     `INSERT INTO highlights (id, book_id, user_id, start_offset, end_offset, text, note, color, kind, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2522,22 +2580,60 @@ async function createHighlight(request: Request, env: Env, user: User, bookId: s
     start,
     end,
     text,
-    stringField(body.note) || null,
-    stringField(body.color) || 'amber',
-    stringField(body.kind) || 'highlight',
+    note,
+    color,
+    kind,
     now,
   ).run()
+  ctx.waitUntil(
+    syncHighlightToNotion(env, user, bookId, { id, text, note, color, kind })
+      .catch((error) => console.error('notion sync', error)),
+  )
   return json(serializeHighlight({
     id,
     book_id: bookId,
     start_offset: start,
     end_offset: end,
     text,
-    note: stringField(body.note) || null,
-    color: stringField(body.color) || 'amber',
-    kind: stringField(body.kind) || 'highlight',
+    note,
+    color,
+    kind,
     created_at: now,
   }), 201)
+}
+
+function notionAsApiError(error: unknown): ApiError {
+  if (error instanceof NotionHttpError) return new ApiError(error.status, error.message)
+  if (error instanceof ApiError) return error
+  return new ApiError(502, 'Could not reach Notion.')
+}
+
+function handleNotionStart(request: Request, env: Env, url: URL, user: User) {
+  const headerOrigin = request.headers.get('Origin') || request.headers.get('Referer') || ''
+  let returnOrigin = primaryAppOrigin(env, request)
+  try {
+    if (headerOrigin) returnOrigin = new URL(headerOrigin).origin
+  } catch { /* keep default */ }
+  if (!isAllowedReturnOrigin(returnOrigin, env, url.origin)) {
+    returnOrigin = primaryAppOrigin(env, request)
+  }
+  return startNotionOAuth(env, user, request.url, returnOrigin)
+    .then((body) => json(body))
+    .catch((error) => {
+      throw notionAsApiError(error)
+    })
+}
+
+async function handleNotionCallback(request: Request, env: Env, url: URL) {
+  const finished = await finishNotionOAuth(
+    env,
+    request.url,
+    url.searchParams.get('code'),
+    url.searchParams.get('state'),
+    url.searchParams.get('error'),
+  )
+  const location = `${finished.origin.replace(/\/+$/, '')}/notes?${finished.query}`
+  return Response.redirect(location, 302)
 }
 
 function serializeHighlight(row: Record<string, unknown>) {

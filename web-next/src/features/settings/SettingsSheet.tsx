@@ -32,6 +32,7 @@ import {
   type BookAppearance,
 } from '@/features/reader/bookSettings'
 import { AboutHiggsRead } from './AboutHiggsRead'
+import { NotionConnect } from './NotionConnect'
 
 type SettingsTab = 'appearance' | 'audio'
 
@@ -245,6 +246,9 @@ function SettingsBody({
       </div>
 
       <div className="p-3 border-t border-border space-y-1 shrink-0">
+        <div className="pb-2">
+          <NotionConnect compact />
+        </div>
         {error && <p className="text-xs text-destructive px-1 pb-1">{error}</p>}
         <button
           type="button"
