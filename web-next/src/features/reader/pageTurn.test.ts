@@ -209,6 +209,15 @@ describe('classifyPaginatedSwipe', () => {
     })).toBe('select')
   })
 
+  it('does not treat a short LTR swipe on text as a highlight', () => {
+    expect(classifyPaginatedSwipe({
+      startedOnText: true, dx: 20, dy: 2, dtMs: 80, vx: 0.22,
+    })).toBe('undecided')
+    expect(classifyPaginatedSwipe({
+      startedOnText: true, dx: 28, dy: 2, dtMs: 100, vx: 0.25, phase: 'end',
+    })).toBe('page')
+  })
+
   it('turns previous from a right swipe that missed the words', () => {
     expect(classifyPaginatedSwipe({
       startedOnText: false, dx: 28, dy: 3, dtMs: 240, vx: 0.1,

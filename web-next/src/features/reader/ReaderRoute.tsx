@@ -3655,9 +3655,10 @@ export function ReaderRoute() {
     if (waitForFonts) fonts?.addEventListener?.('loadingdone', onFonts)
 
     let paintFrame = 0
-    if (switched) {
-      paintFrame = requestAnimationFrame(() => { ignoreRo = false })
-    } else if (!pagedLayoutAll) {
+    if (switched || !pagedLayoutAll) {
+      // First paint uses a neighbor window so the layout switch does not
+      // relayout the whole book. The next frame must still measure every
+      // page or the pill stays "—" and swipes have nothing to turn.
       paintFrame = requestAnimationFrame(() => {
         ignoreRo = false
         if (layoutRef.current === 'paginated') setPagedLayoutAll(true)
@@ -3795,7 +3796,12 @@ export function ReaderRoute() {
           vx: turn.vx,
           phase: 'move',
         })
-        if (intent === 'undecided') return
+        if (intent === 'undecided') {
+          // Axis-lock is enough: without preventDefault, iOS cancels the
+          // pointer and the page never follows the finger.
+          if (lockPageTurnAxis(dx, dy) && e.cancelable) e.preventDefault()
+          return
+        }
         if (intent === 'select') {
           drag.mode = 'selecting'
           setIsDragSelecting(true)
@@ -4501,7 +4507,10 @@ export function ReaderRoute() {
             vx: dtMs > 0 ? dx / dtMs : 0,
             phase: 'move',
           })
-          if (intent === 'undecided') return
+          if (intent === 'undecided') {
+            if (e.cancelable) e.preventDefault()
+            return
+          }
           if (intent === 'page') {
             r.mode = 'paging'
             if (e.cancelable) e.preventDefault()

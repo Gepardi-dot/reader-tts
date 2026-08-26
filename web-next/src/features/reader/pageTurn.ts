@@ -39,14 +39,19 @@ export function classifyPaginatedSwipe(input: {
   const travel = Math.abs(dx)
   const instant = dtMs > 0 ? travel / dtMs : 0
   const speed = Math.max(Math.abs(vx), instant)
-  // A page-back flick is a short, fast right swipe. A longer LTR drag on
-  // words is a highlight even if the finger is moving fairly quickly.
+  // A page-back flick is a short, fast right swipe. Distance alone is not a
+  // highlight — 18px is still a normal page swipe on a phone.
   const isFlick = speed >= PAGE_TURN_VELOCITY_PX_MS && dtMs <= PAGE_FLICK_MAX_MS
   if (isFlick) return 'page'
 
-  const intentional = dtMs >= PAGE_SELECT_MIN_MS || travel >= PAGE_SELECT_MIN_PX
+  const intentional = dtMs >= PAGE_SELECT_MIN_MS
+    && speed < PAGE_TURN_VELOCITY_PX_MS
+    && travel >= PAGE_SELECT_MIN_PX
   if (intentional) return 'select'
-  if (phase === 'end') return travel >= PAGE_SELECT_MIN_PX ? 'select' : 'undecided'
+  if (phase === 'end') {
+    if (isFlick || travel >= PAGE_TURN_COMMIT_PX) return 'page'
+    return 'undecided'
+  }
   return 'undecided'
 }
 
