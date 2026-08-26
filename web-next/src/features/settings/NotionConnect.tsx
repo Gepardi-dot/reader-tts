@@ -30,7 +30,7 @@ function consumeNotionFlag(): { message: string | null; error: string | null; sh
   if (flag === 'need-page') {
     return {
       message: null,
-      error: 'In Notion, pick any page on the permission screen — we create a HiggsRead folder under it.',
+      error: 'In Notion, pick any page on the permission screen so HiggsRead can write book pages to your library.',
       shouldSync: false,
     }
   }
@@ -136,8 +136,8 @@ export function NotionConnect({ compact = false }: { compact?: boolean }) {
           </p>
           <p className="text-[12px] text-muted-foreground leading-4 mt-0.5">
             {connected
-              ? `One page per book${status?.workspaceName ? ` in ${status.workspaceName}` : ''}. New highlights appear automatically.`
-              : 'One tap. Pick any Notion page — we add a HiggsRead folder and keep each book’s notes there.'}
+              ? `Each book is a page in your Notion library${status?.workspaceName ? ` (${status.workspaceName})` : ''}. Open it to see notes.`
+              : 'One tap. Notion asks you to pick a page, then each book shows up in your Private library by title.'}
           </p>
           {isLoading ? (
             <p className="text-[12px] text-muted-foreground mt-2">Checking…</p>

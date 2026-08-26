@@ -39,5 +39,5 @@ npx wrangler d1 migrations apply reader_tts --local --config wrangler.toml
 
 1. Notes or Settings → **Connect Notion**.
 2. Notion asks them to pick **any page** (required by Notion — we cannot skip this).
-3. We create a **HiggsRead** folder under that page and a child page per book title.
-4. New highlights/notes append there. **Sync existing notes** copies what they already saved.
+3. Each book becomes its own page in **Private** (Library), titled with the book name. Notes live inside that page.
+4. New highlights/notes append there. **Sync existing notes** copies what they already saved, and lifts older nested book pages into the library when Notion allows it.
