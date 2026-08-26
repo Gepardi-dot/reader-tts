@@ -1,12 +1,16 @@
 /** Notion public OAuth + one-way note sync. Tokens never leave the Worker. */
 
 export const NOTION_VERSION = '2022-06-28'
+/** Workspace-level Private pages require a current Notion-Version. */
+const NOTION_PAGES_VERSION = '2026-03-11'
 const NOTION_AUTH = 'https://api.notion.com/v1/oauth/authorize'
 const NOTION_TOKEN = 'https://api.notion.com/v1/oauth/token'
 const NOTION_API = 'https://api.notion.com/v1'
 const STATE_TTL_MS = 15 * 60 * 1000
 const TITLE_MAX = 80
 const TEXT_MAX = 1900
+const WORKSPACE_PARENT = { type: 'workspace', workspace: true } as const
+const LIBRARY_BOOK_ICON = { type: 'emoji', emoji: '📖' } as const
 
 type NotionStatement = {
   bind: (...values: unknown[]) => NotionStatement
@@ -180,19 +184,36 @@ export async function ensureNotionTables(env: NotionEnv): Promise<void> {
   `).run()
 }
 
-function notionHeaders(token: string): HeadersInit {
+function notionHeaders(token: string, version = NOTION_VERSION): HeadersInit {
   return {
     Authorization: `Bearer ${token}`,
-    'Notion-Version': NOTION_VERSION,
+    'Notion-Version': version,
     'Content-Type': 'application/json',
   }
 }
 
-async function notionFetch(token: string, path: string, init: RequestInit = {}): Promise<unknown> {
+export function workspacePageCreateBody(title: string) {
+  return {
+    parent: WORKSPACE_PARENT,
+    icon: LIBRARY_BOOK_ICON,
+    properties: {
+      title: {
+        title: [{ type: 'text', text: { content: clipPlain(title, TITLE_MAX) } }],
+      },
+    },
+  }
+}
+
+async function notionFetch(
+  token: string,
+  path: string,
+  init: RequestInit = {},
+  version = NOTION_VERSION,
+): Promise<unknown> {
   const response = await fetch(`${NOTION_API}${path}`, {
     ...init,
     headers: {
-      ...notionHeaders(token),
+      ...notionHeaders(token, version),
       ...(init.headers ?? {}),
     },
   })
@@ -208,66 +229,29 @@ async function notionFetch(token: string, path: string, init: RequestInit = {}):
   }
 }
 
-function richTitle(from: unknown): string {
-  if (!from || typeof from !== 'object') return ''
-  const record = from as Record<string, unknown>
-  if (Array.isArray(record.title)) {
-    return record.title.map((part) => {
-      if (!part || typeof part !== 'object') return ''
-      const item = part as Record<string, unknown>
-      return typeof item.plain_text === 'string' ? item.plain_text : ''
-    }).join('')
-  }
-  const props = record.properties
-  if (props && typeof props === 'object') {
-    for (const value of Object.values(props as Record<string, unknown>)) {
-      if (!value || typeof value !== 'object') continue
-      const field = value as Record<string, unknown>
-      if (field.type === 'title' || Array.isArray(field.title)) {
-        const got = richTitle({ title: field.title })
-        if (got) return got
-      }
-    }
-  }
-  return ''
-}
-
-function asHits(payload: unknown): NotionSearchHit[] {
-  if (!payload || typeof payload !== 'object') return []
-  const results = (payload as { results?: unknown }).results
-  if (!Array.isArray(results)) return []
-  const hits: NotionSearchHit[] = []
-  for (const item of results) {
-    if (!item || typeof item !== 'object') continue
-    const row = item as Record<string, unknown>
-    const object = row.object === 'database' ? 'database' : row.object === 'page' ? 'page' : null
-    if (!object || typeof row.id !== 'string') continue
-    hits.push({
-      id: row.id,
-      object,
-      title: richTitle(row) || (object === 'database' ? 'Untitled database' : 'Untitled'),
-    })
-  }
-  return hits
-}
-
 export async function notionStatus(env: NotionEnv, user: NotionUser) {
   await ensureNotionTables(env)
   const configured = notionConfigured(env)
   const row = await env.DB.prepare(
-    `SELECT workspace_name, parent_page_id, parent_kind, updated_at
+    `SELECT access_token, workspace_name, parent_page_id, parent_kind, updated_at
      FROM notion_connections WHERE user_id = ?`,
   ).bind(user.id).first<{
+    access_token: string
     workspace_name: string | null
     parent_page_id: string | null
     parent_kind: string | null
     updated_at: string
   }>()
+  let parentKind = row?.parent_kind ?? null
+  if (row?.access_token && parentKind !== 'workspace') {
+    await liftExistingBookPages(env, row.access_token, user.id)
+    parentKind = 'workspace'
+  }
   return {
     configured,
     connected: Boolean(row?.parent_page_id),
     workspaceName: row?.workspace_name ?? null,
-    parentKind: row?.parent_kind ?? null,
+    parentKind,
     updatedAt: row?.updated_at ?? null,
   }
 }
@@ -327,25 +311,6 @@ async function exchangeCode(env: NotionEnv, requestUrl: string, code: string) {
   }
 }
 
-async function searchAccessible(token: string): Promise<NotionSearchHit[]> {
-  const pages = asHits(await notionFetch(token, '/search', {
-    method: 'POST',
-    body: JSON.stringify({
-      page_size: 25,
-      filter: { value: 'page', property: 'object' },
-      sort: { direction: 'descending', timestamp: 'last_edited_time' },
-    }),
-  }))
-  const databases = asHits(await notionFetch(token, '/search', {
-    method: 'POST',
-    body: JSON.stringify({
-      page_size: 10,
-      filter: { value: 'database', property: 'object' },
-    }),
-  }))
-  return [...pages, ...databases]
-}
-
 async function createChildPage(token: string, parentPageId: string, title: string): Promise<string> {
   const payload = await notionFetch(token, '/pages', {
     method: 'POST',
@@ -360,6 +325,58 @@ async function createChildPage(token: string, parentPageId: string, title: strin
   }) as Record<string, unknown>
   if (typeof payload.id !== 'string') throw new NotionHttpError(502, 'Notion did not create a page.')
   return payload.id
+}
+
+async function createWorkspacePage(token: string, title: string): Promise<string> {
+  const payload = await notionFetch(token, '/pages', {
+    method: 'POST',
+    body: JSON.stringify(workspacePageCreateBody(title)),
+  }, NOTION_PAGES_VERSION) as Record<string, unknown>
+  if (typeof payload.id !== 'string') throw new NotionHttpError(502, 'Notion did not create a page.')
+  return payload.id
+}
+
+async function tryMovePageToLibrary(token: string, pageId: string): Promise<void> {
+  try {
+    await notionFetch(token, `/pages/${pageId}/move`, {
+      method: 'POST',
+      body: JSON.stringify({ parent: WORKSPACE_PARENT }),
+    }, NOTION_PAGES_VERSION)
+  } catch {
+    /* older nested pages stay put if Notion rejects a workspace move */
+  }
+}
+
+async function liftExistingBookPages(env: NotionEnv, token: string, userId: string): Promise<void> {
+  const pages = await env.DB.prepare(
+    'SELECT page_id FROM notion_book_pages WHERE user_id = ?',
+  ).bind(userId).all<{ page_id: string }>()
+  for (const page of pages.results ?? []) {
+    if (page.page_id) await tryMovePageToLibrary(token, page.page_id)
+  }
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    `UPDATE notion_connections SET parent_kind = 'workspace', updated_at = ? WHERE user_id = ?`,
+  ).bind(now, userId).run()
+}
+
+async function createLibraryBookPage(
+  token: string,
+  title: string,
+  fallbackParentId: string | null,
+  fallbackKind: string,
+): Promise<string> {
+  try {
+    return await createWorkspacePage(token, title)
+  } catch (error) {
+    if (fallbackKind === 'database' && fallbackParentId) {
+      return createDatabaseItem(token, fallbackParentId, title)
+    }
+    if (fallbackParentId && fallbackParentId !== 'workspace') {
+      return createChildPage(token, fallbackParentId, title)
+    }
+    throw error
+  }
 }
 
 async function createDatabaseItem(token: string, databaseId: string, title: string): Promise<string> {
@@ -387,24 +404,6 @@ async function createDatabaseItem(token: string, databaseId: string, title: stri
   }) as Record<string, unknown>
   if (typeof payload.id !== 'string') throw new NotionHttpError(502, 'Notion did not create a page.')
   return payload.id
-}
-
-async function resolveHomePage(token: string, duplicatedTemplateId: string | null): Promise<NotionSearchHit> {
-  if (duplicatedTemplateId) {
-    return { id: duplicatedTemplateId, object: 'page', title: 'HiggsRead' }
-  }
-  const hits = await searchAccessible(token)
-  const picked = pickNotionHome(hits)
-  if (!picked) {
-    throw new NotionHttpError(
-      409,
-      'Pick any Notion page in the permission screen — we add a HiggsRead folder under it.',
-    )
-  }
-  if (picked.object === 'database') return picked
-  if (picked.title.trim().toLowerCase() === 'higgsread') return picked
-  const childId = await createChildPage(token, picked.id, 'HiggsRead')
-  return { id: childId, object: 'page', title: 'HiggsRead' }
 }
 
 export async function finishNotionOAuth(
@@ -435,7 +434,6 @@ export async function finishNotionOAuth(
 
   try {
     const token = await exchangeCode(env, requestUrl, code)
-    const home = await resolveHomePage(token.accessToken, token.duplicatedTemplateId)
     const now = new Date().toISOString()
     await env.DB.prepare(
       `INSERT INTO notion_connections (
@@ -458,16 +456,13 @@ export async function finishNotionOAuth(
       token.workspaceId,
       token.workspaceName,
       token.botId,
-      home.id,
-      home.object,
+      token.workspaceId || 'workspace',
+      'workspace',
       now,
       now,
     ).run()
     return { origin, query: 'notion=connected' }
   } catch (err) {
-    if (err instanceof NotionHttpError && err.status === 409) {
-      return { origin, query: 'notion=need-page' }
-    }
     console.error('notion oauth finish', err)
     return { origin, query: 'notion=error' }
   }
@@ -504,11 +499,12 @@ async function bookPageId(
   const existing = await env.DB.prepare(
     'SELECT page_id FROM notion_book_pages WHERE user_id = ? AND book_id = ?',
   ).bind(userId, bookId).first<{ page_id: string }>()
-  if (existing?.page_id) return existing.page_id
+  if (existing?.page_id) {
+    if (parentKind !== 'workspace') await tryMovePageToLibrary(token, existing.page_id)
+    return existing.page_id
+  }
   const title = clipPlain(bookTitle || 'Untitled book', TITLE_MAX)
-  const pageId = parentKind === 'database'
-    ? await createDatabaseItem(token, parentId, title)
-    : await createChildPage(token, parentId, title)
+  const pageId = await createLibraryBookPage(token, title, parentId, parentKind)
   await env.DB.prepare(
     'INSERT OR REPLACE INTO notion_book_pages (user_id, book_id, page_id) VALUES (?, ?, ?)',
   ).bind(userId, bookId, pageId).run()
