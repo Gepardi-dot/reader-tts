@@ -107,6 +107,7 @@ import {
 } from './readerLayout'
 import {
   animateTransform,
+  classifyPaginatedSwipe,
   isFinePointerClick,
   lockPageTurnAxis,
   pageRestY,
@@ -2667,6 +2668,7 @@ export function ReaderRoute() {
     axis: null as 'x' | 'y' | null,
     startX: 0,
     startY: 0,
+    startT: 0,
     lastX: 0,
     lastY: 0,
     lastT: 0,
@@ -2677,6 +2679,15 @@ export function ReaderRoute() {
     animating: false,
     gen: 0,
   })
+  const dragRef = useRef<{
+    startRange: Range | null
+    startX: number
+    startY: number
+    startT: number
+    mode: 'idle' | 'deciding' | 'selecting' | 'scrolling' | 'paging'
+  }>({ startRange: null, startX: 0, startY: 0, startT: 0, mode: 'idle' })
+  const [isDragSelecting, setIsDragSelecting] = useState(false)
+  const growDragSelectionRef = useRef<(clientX: number, clientY: number) => void>(() => {})
   layoutRef.current = appearance.layout
   pageIndexRef.current = pageIndex
   pageBreaksRef.current = pageBreaks
@@ -3703,6 +3714,13 @@ export function ReaderRoute() {
 
     const turn = pageTurnRef.current
 
+    const resetPageTurnFollow = () => {
+      applyRestingPageTransform(pageBreaksRef.current[pageIndexRef.current])
+      turn.offset = 0
+      turn.incomingDir = 0
+      turn.axis = null
+    }
+
     const onStart = (e: PointerEvent) => {
       if (!e.isPrimary || e.button !== 0 || sheet !== 'none' || panel || turn.animating) {
         turn.tracking = false
@@ -3713,23 +3731,49 @@ export function ReaderRoute() {
         turn.tracking = false
         return
       }
+      const now = performance.now()
       turn.tracking = true
       turn.axis = null
       turn.startX = e.clientX
       turn.startY = e.clientY
+      turn.startT = now
       turn.lastX = e.clientX
       turn.lastY = e.clientY
-      turn.lastT = performance.now()
+      turn.lastT = now
       turn.vx = 0
       turn.vy = 0
       turn.offset = 0
       turn.incomingDir = 0
+      const word = getWordAtPoint(e.clientX, e.clientY)
+      dragRef.current = word
+        ? {
+          startRange: word.range,
+          startX: e.clientX,
+          startY: e.clientY,
+          startT: now,
+          mode: 'deciding',
+        }
+        : {
+          startRange: null,
+          startX: e.clientX,
+          startY: e.clientY,
+          startT: now,
+          mode: 'idle',
+        }
     }
 
     const onMove = (e: PointerEvent) => {
       if (!turn.tracking || !e.isPrimary) return
-      if (dragRef.current.mode === 'selecting' || dragRef.current.mode === 'deciding') return
       if (sheet !== 'none' || panel) return
+      const drag = dragRef.current
+      if (drag.mode === 'selecting') {
+        if (e.cancelable) e.preventDefault()
+        if (!el.hasPointerCapture(e.pointerId)) {
+          try { el.setPointerCapture(e.pointerId) } catch { /* ignore */ }
+        }
+        growDragSelectionRef.current(e.clientX, e.clientY)
+        return
+      }
       const now = performance.now()
       const dt = Math.max(8, now - turn.lastT)
       const sampleX = (e.clientX - turn.lastX) / dt
@@ -3742,6 +3786,28 @@ export function ReaderRoute() {
 
       const dx = e.clientX - turn.startX
       const dy = e.clientY - turn.startY
+      if (drag.mode === 'deciding') {
+        const intent = classifyPaginatedSwipe({
+          startedOnText: Boolean(drag.startRange),
+          dx,
+          dy,
+          dtMs: now - turn.startT,
+          vx: turn.vx,
+          phase: 'move',
+        })
+        if (intent === 'undecided') return
+        if (intent === 'select') {
+          drag.mode = 'selecting'
+          setIsDragSelecting(true)
+          if (e.cancelable) e.preventDefault()
+          if (!el.hasPointerCapture(e.pointerId)) {
+            try { el.setPointerCapture(e.pointerId) } catch { /* ignore */ }
+          }
+          growDragSelectionRef.current(e.clientX, e.clientY)
+          return
+        }
+        drag.mode = 'paging'
+      }
       if (!turn.axis) {
         turn.axis = lockPageTurnAxis(dx, dy)
         if (!turn.axis) return
@@ -3772,12 +3838,43 @@ export function ReaderRoute() {
     const finishGesture = (clientX: number, clientY: number) => {
       if (!turn.tracking) return
       turn.tracking = false
+      const drag = dragRef.current
+      if (drag.mode === 'selecting') {
+        justShowedMenu.current = true
+        setIsDragSelecting(false)
+        resetPageTurnFollow()
+        return
+      }
+      if (drag.mode === 'deciding') {
+        const dx = clientX - turn.startX
+        const dy = clientY - turn.startY
+        const intent = classifyPaginatedSwipe({
+          startedOnText: Boolean(drag.startRange),
+          dx,
+          dy,
+          dtMs: performance.now() - turn.startT,
+          vx: turn.vx,
+          phase: 'end',
+        })
+        if (intent === 'select') {
+          drag.mode = 'selecting'
+          growDragSelectionRef.current(clientX, clientY)
+          justShowedMenu.current = true
+          setIsDragSelecting(false)
+          resetPageTurnFollow()
+          return
+        }
+        if (intent !== 'page') {
+          resetPageTurnFollow()
+          return
+        }
+        drag.mode = 'paging'
+        if (!turn.axis) turn.axis = lockPageTurnAxis(dx, dy)
+      }
       const axis = turn.axis
       turn.axis = null
-      if (!axis || dragRef.current.mode === 'selecting') {
-        applyRestingPageTransform(pageBreaksRef.current[pageIndexRef.current])
-        turn.offset = 0
-        turn.incomingDir = 0
+      if (!axis) {
+        resetPageTurnFollow()
         return
       }
       const pagesNow = pageBreaksRef.current
@@ -4222,6 +4319,31 @@ export function ReaderRoute() {
     return buildState(text, rect, mode, located, selectionRectsFromRange(range, rect))
   }
 
+  growDragSelectionRef.current = (clientX: number, clientY: number) => {
+    const startRange = dragRef.current.startRange
+    if (!startRange) return
+    const cur = getWordAtPoint(clientX, clientY)
+    if (!cur) return
+    const combined = document.createRange()
+    try {
+      const cmp = startRange.compareBoundaryPoints(Range.START_TO_START, cur.range)
+      if (cmp <= 0) {
+        combined.setStart(startRange.startContainer, startRange.startOffset)
+        combined.setEnd(cur.range.endContainer, cur.range.endOffset)
+      } else {
+        combined.setStart(cur.range.startContainer, cur.range.startOffset)
+        combined.setEnd(startRange.endContainer, startRange.endOffset)
+      }
+    } catch {
+      return
+    }
+    const text = combined.toString().trim()
+    const wc = text.split(/\s+/).filter(Boolean).length
+    const state = buildStateFromRange(combined, wc > 1 ? 'sentence' : 'word')
+    if (state) setSelection(state)
+    window.getSelection()?.removeAllRanges()
+  }
+
   // ── Event handlers ──────────────────────────────────────────────────────────
 
   const handleMouseUp = useCallback((_ev: React.MouseEvent<HTMLDivElement>) => {
@@ -4296,37 +4418,26 @@ export function ReaderRoute() {
   }, [selection, payload?.text, scrollPct, effectiveTtsProvider, warmCloudAtOffset])
 
   // ── Mobile drag-to-select ─────────────────────────────────────────────────
-  // Touch a word and slide your finger across the sentence to grow the
-  // selection word-by-word. Vertical drags fall through to native scroll.
-  const dragRef = useRef<{
-    startRange: Range | null
-    startX: number
-    startY: number
-    mode: 'idle' | 'deciding' | 'selecting' | 'scrolling' | 'paging'
-  }>({ startRange: null, startX: 0, startY: 0, mode: 'idle' })
-  const [isDragSelecting, setIsDragSelecting] = useState(false)
-
+  // Continuous: slide across a sentence to grow the selection; vertical
+  // drags fall through to native scroll. Paginated: the pointer tracker
+  // owns the gesture — LTR on text highlights, flicks and RTL turn the page.
   const handleTouchStart = useCallback((ev: React.TouchEvent<HTMLDivElement>) => {
-    // Paginated: horizontal swipes turn the page. Don't steal them for
-    // drag-to-select — a tap with no movement still selects via onClick.
-    if (layoutRef.current === 'paginated') {
-      dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
-      return
-    }
+    if (layoutRef.current === 'paginated') return
     if (ev.touches.length !== 1) {
-      dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
+      dragRef.current = { startRange: null, startX: 0, startY: 0, startT: 0, mode: 'idle' }
       return
     }
     const t = ev.touches[0]
     const w = getWordAtPoint(t.clientX, t.clientY)
     if (!w) {
-      dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
+      dragRef.current = { startRange: null, startX: 0, startY: 0, startT: 0, mode: 'idle' }
       return
     }
     dragRef.current = {
       startRange: w.range,
       startX: t.clientX,
       startY: t.clientY,
+      startT: performance.now(),
       mode: 'deciding',
     }
   }, [])
@@ -4346,13 +4457,16 @@ export function ReaderRoute() {
       // finger-follow animation can settle on the same gesture.
       justShowedMenu.current = true
     } else if (r.mode === 'deciding' && ev.changedTouches.length > 0) {
-      // Touch ended before onMove could classify it — if it moved at all, it was a scroll
-      const t = ev.changedTouches[0]
-      if (Math.hypot(t.clientX - r.startX, t.clientY - r.startY) > 5) {
-        justShowedMenu.current = true
+      // Continuous: a moved finger that never classified is a scroll, not a tap.
+      // Paginated: the pointer tracker already treated this as a tap or a turn.
+      if (layoutRef.current !== 'paginated') {
+        const t = ev.changedTouches[0]
+        if (Math.hypot(t.clientX - r.startX, t.clientY - r.startY) > 5) {
+          justShowedMenu.current = true
+        }
       }
     }
-    dragRef.current = { startRange: null, startX: 0, startY: 0, mode: 'idle' }
+    dragRef.current = { startRange: null, startX: 0, startY: 0, startT: 0, mode: 'idle' }
   }, [])
 
   // Non-passive touchmove — required so we can preventDefault to suppress page
@@ -4362,8 +4476,13 @@ export function ReaderRoute() {
     if (!el) return
 
     const onMove = (e: TouchEvent) => {
-      if (layoutRef.current === 'paginated') return
       const r = dragRef.current
+      if (layoutRef.current === 'paginated') {
+        if (r.mode === 'idle' || r.mode === 'paging') {
+          if (r.mode === 'paging' && e.cancelable) e.preventDefault()
+          return
+        }
+      }
       if (!r.startRange || e.touches.length !== 1) return
       const t = e.touches[0]
       const dx = t.clientX - r.startX
@@ -4372,14 +4491,31 @@ export function ReaderRoute() {
       if (r.mode === 'deciding') {
         const dist = Math.hypot(dx, dy)
         if (dist < 8) return
-        // Paginated swipes are handled by the page-turn pointer tracker.
-        // Vertical drags in continuous mode fall through to native scroll.
-        if (Math.abs(dy) > Math.abs(dx) * 1.4 && Math.abs(dy) > 8) {
+        if (layoutRef.current === 'paginated') {
+          const dtMs = performance.now() - r.startT
+          const intent = classifyPaginatedSwipe({
+            startedOnText: true,
+            dx,
+            dy,
+            dtMs,
+            vx: dtMs > 0 ? dx / dtMs : 0,
+            phase: 'move',
+          })
+          if (intent === 'undecided') return
+          if (intent === 'page') {
+            r.mode = 'paging'
+            if (e.cancelable) e.preventDefault()
+            return
+          }
+          r.mode = 'selecting'
+          setIsDragSelecting(true)
+        } else if (Math.abs(dy) > Math.abs(dx) * 1.4 && Math.abs(dy) > 8) {
           r.mode = 'scrolling'
           return
+        } else {
+          r.mode = 'selecting'
+          setIsDragSelecting(true)
         }
-        r.mode = 'selecting'
-        setIsDragSelecting(true)
       }
 
       if (r.mode === 'scrolling') return

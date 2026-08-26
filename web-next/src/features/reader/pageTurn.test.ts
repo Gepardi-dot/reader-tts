@@ -4,6 +4,7 @@ import {
   PAGE_TURN_COMMIT_RATIO,
   PAGE_TURN_MIN_FLICK_PX,
   PAGE_TURN_VELOCITY_PX_MS,
+  classifyPaginatedSwipe,
   isFinePointerClick,
   lockPageTurnAxis,
   pageRestY,
@@ -177,5 +178,52 @@ describe('prefersReducedMotion', () => {
       removeEventListener: () => {},
     }))
     expect(prefersReducedMotion()).toBe(true)
+  })
+})
+
+describe('classifyPaginatedSwipe', () => {
+  it('waits for the axis lock', () => {
+    expect(classifyPaginatedSwipe({
+      startedOnText: true, dx: 4, dy: 2, dtMs: 40, vx: 0.1,
+    })).toBe('undecided')
+  })
+
+  it('turns the page on a left swipe, including on text', () => {
+    expect(classifyPaginatedSwipe({
+      startedOnText: true, dx: -28, dy: 3, dtMs: 90, vx: -0.4,
+    })).toBe('page')
+    expect(classifyPaginatedSwipe({
+      startedOnText: true, dx: -36, dy: 2, dtMs: 260, vx: -0.1,
+    })).toBe('page')
+  })
+
+  it('turns previous from a quick right flick on text', () => {
+    expect(classifyPaginatedSwipe({
+      startedOnText: true, dx: 36, dy: 2, dtMs: 80, vx: 0.45,
+    })).toBe('page')
+  })
+
+  it('highlights an intentional LTR drag on text', () => {
+    expect(classifyPaginatedSwipe({
+      startedOnText: true, dx: 32, dy: 4, dtMs: 240, vx: 0.12,
+    })).toBe('select')
+  })
+
+  it('turns previous from a right swipe that missed the words', () => {
+    expect(classifyPaginatedSwipe({
+      startedOnText: false, dx: 28, dy: 3, dtMs: 240, vx: 0.1,
+    })).toBe('page')
+  })
+
+  it('keeps vertical swipes as page turns', () => {
+    expect(classifyPaginatedSwipe({
+      startedOnText: true, dx: 3, dy: -28, dtMs: 90, vx: 0, 
+    })).toBe('page')
+  })
+
+  it('treats a short LTR press on a word as a tap', () => {
+    expect(classifyPaginatedSwipe({
+      startedOnText: true, dx: 10, dy: 1, dtMs: 80, vx: 0.12, phase: 'end',
+    })).toBe('undecided')
   })
 })

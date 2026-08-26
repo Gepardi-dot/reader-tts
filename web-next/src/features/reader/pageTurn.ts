@@ -6,6 +6,49 @@ export const PAGE_TURN_COMMIT_RATIO = 0.055
 export const PAGE_TURN_VELOCITY_PX_MS = 0.32
 export const PAGE_TURN_MIN_FLICK_PX = 8
 export const PAGE_TURN_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)'
+/** Slow LTR on a word past this time is a highlight, not a page flick. */
+export const PAGE_SELECT_MIN_MS = 140
+/** Slow LTR on a word past this travel is a highlight, not a page flick. */
+export const PAGE_SELECT_MIN_PX = 18
+/** A page flick usually commits inside this window from finger-down. */
+export const PAGE_FLICK_MAX_MS = 220
+
+export type PaginatedSwipeIntent = 'undecided' | 'select' | 'page'
+
+/**
+ * Paginated touch: quick left/right flicks turn the page; an intentional LTR
+ * drag on English text grows a highlight. RTL is never a highlight.
+ */
+export function classifyPaginatedSwipe(input: {
+  startedOnText: boolean
+  dx: number
+  dy: number
+  dtMs: number
+  vx: number
+  phase?: 'move' | 'end'
+}): PaginatedSwipeIntent {
+  const { startedOnText, dx, dy, dtMs, vx, phase = 'move' } = input
+  const axis = lockPageTurnAxis(dx, dy)
+  if (!axis) return 'undecided'
+  if (axis === 'y') return 'page'
+  // Finger left = next page. English selection is LTR, so RTL is always a turn.
+  if (dx < 0) return 'page'
+  // Finger right off the words — previous page, even when the swipe is slow.
+  if (!startedOnText) return 'page'
+
+  const travel = Math.abs(dx)
+  const instant = dtMs > 0 ? travel / dtMs : 0
+  const speed = Math.max(Math.abs(vx), instant)
+  // A page-back flick is a short, fast right swipe. A longer LTR drag on
+  // words is a highlight even if the finger is moving fairly quickly.
+  const isFlick = speed >= PAGE_TURN_VELOCITY_PX_MS && dtMs <= PAGE_FLICK_MAX_MS
+  if (isFlick) return 'page'
+
+  const intentional = dtMs >= PAGE_SELECT_MIN_MS || travel >= PAGE_SELECT_MIN_PX
+  if (intentional) return 'select'
+  if (phase === 'end') return travel >= PAGE_SELECT_MIN_PX ? 'select' : 'undecided'
+  return 'undecided'
+}
 
 export function prefersReducedMotion(): boolean {
   return typeof matchMedia === 'function'
