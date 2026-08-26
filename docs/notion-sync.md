@@ -11,11 +11,15 @@ Users tap **Connect Notion** once. HiggsRead writes each book's notes under a pa
    - `https://reader-tts-api.reader-tts-ari.workers.dev/api/integrations/notion/callback`
    - `http://127.0.0.1:8787/api/integrations/notion/callback`
    - `http://localhost:8787/api/integrations/notion/callback`
-5. Copy the OAuth client id and secret.
+5. Copy credentials from **OAuth connection**:
+   - **Client ID:** use the `client_id=` value inside **Authorization URL** (Select All in that field). Do not trust the Client ID box if it differs — Notion’s install page rejects the wrong one as “Missing or incomplete Client ID”.
+   - **Client secret:** the secret field, not the client id.
+   - Put the client id in `wrangler.toml` `[vars]` as `NOTION_CLIENT_ID`. Never `wrangler secret put` the client id (PowerShell adds a newline).
+   - Put only the client secret as a Worker secret.
 
 ```powershell
 cd cloudflare/worker
-npx wrangler secret put NOTION_CLIENT_ID --config wrangler.toml
+# Client ID belongs in wrangler.toml [vars], not secrets.
 npx wrangler secret put NOTION_CLIENT_SECRET --config wrangler.toml
 npx wrangler d1 migrations apply reader_tts --remote --config wrangler.toml
 npx wrangler deploy --config wrangler.toml
