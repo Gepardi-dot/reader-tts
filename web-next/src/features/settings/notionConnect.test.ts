@@ -41,6 +41,14 @@ describe('pickNotionHome', () => {
   })
 })
 
+describe('cleanNotionCredential', () => {
+  it('strips quotes and newlines from stored secrets', () => {
+    const raw = '"3c8d872b-594c-813a-8bcb-083709ddb4dc"\r\n'
+    const cleaned = raw.replace(/^\uFEFF/, '').replace(/[\r\n\t]+/g, '').trim().replace(/^['"]+|['"]+$/g, '')
+    expect(cleaned).toBe('3c8d872b-594c-813a-8bcb-083709ddb4dc')
+  })
+})
+
 describe('isAllowedReturnOrigin', () => {
   it('allows the production app and local Vite', () => {
     expect(isAllowedReturnOrigin('https://www.higgsread.com')).toBe(true)
