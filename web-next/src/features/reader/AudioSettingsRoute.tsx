@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge'
 import { api } from '@/shared/api/client'
 import {
   defaultVoiceForProvider,
+  displayNameForTtsProvider,
   normalizeTtsProviders,
   type TtsProviderInfo,
 } from './audioProviderCatalog'
@@ -117,7 +118,9 @@ export function AudioSettingsRoute() {
               setSelectedVoice(resolvedVoiceForProvider(v, nextProvider, loadAudioPrefs()))
             }}>
               <SelectTrigger>
-                <SelectValue />
+                <SelectValue>
+                  {displayNameForTtsProvider(selectedProvider, currentProvider?.name)}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {providers.map((p) => (
@@ -137,7 +140,7 @@ export function AudioSettingsRoute() {
               <p className="text-xs text-muted-foreground">{currentProvider.description}</p>
             )}
             <p className="text-xs text-muted-foreground">
-              Kokoro is the default. Gemini is available when configured on the server.
+              HR Voices is the default. HR Ultra Realistic is available when configured on the server.
             </p>
           </div>
 

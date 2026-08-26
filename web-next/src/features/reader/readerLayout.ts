@@ -57,6 +57,14 @@ export function applyReaderScrollerStyle(
 /** Floating progress pill: 18px offset + 44px bar + gap. Not inner `pb-36`. */
 export const PAGINATED_BOTTOM_CLEARANCE = 96
 
+/** Play bar overlays the scroller; keep the spoken line fully above it. */
+export const CONTINUOUS_FOLLOW_BOTTOM_CLEARANCE = 64
+
+/** Spoken line sits around the middle of the readable column (header → play bar). */
+export const CONTINUOUS_FOLLOW_TARGET = 0.45
+export const CONTINUOUS_FOLLOW_SAFE_TOP = 0.34
+export const CONTINUOUS_FOLLOW_SAFE_BOTTOM = 0.56
+
 export function paginatedTextViewHeight(
   scrollerHeight: number,
   paddingTop: number,
@@ -247,6 +255,40 @@ export function overlayRectsEqual(a: readonly OverlayRect[], b: readonly Overlay
   })
 }
 
+/** Collapse word boxes on the same visual line into one wash. */
+export function mergeRectsIntoLineWashes(
+  rects: readonly OverlayRect[],
+  yTolerance = 8,
+): OverlayRect[] {
+  if (rects.length === 0) return []
+  const sorted = [...rects].sort((a, b) => a.top - b.top || a.left - b.left)
+  const lines: OverlayRect[] = []
+  for (const rect of sorted) {
+    const prev = lines[lines.length - 1]
+    const sameLine = Boolean(
+      prev
+      && Math.abs(rect.top - prev.top) <= yTolerance
+      && rect.top < prev.top + prev.height,
+    )
+    if (sameLine && prev) {
+      const right = Math.max(prev.left + prev.width, rect.left + rect.width)
+      const bottom = Math.max(prev.top + prev.height, rect.top + rect.height)
+      prev.left = Math.min(prev.left, rect.left)
+      prev.top = Math.min(prev.top, rect.top)
+      prev.width = right - prev.left
+      prev.height = bottom - prev.top
+    } else {
+      lines.push({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      })
+    }
+  }
+  return lines
+}
+
 /** Map viewport boxes onto a transformed page inner. */
 export function clientRectsToLocal(
   rects: readonly OverlayRect[],
@@ -317,6 +359,43 @@ export function scrollDeltaToPinRect(rectTop: number, pinY: number, minDelta = 4
   if (!Number.isFinite(rectTop) || !Number.isFinite(pinY)) return 0
   const delta = rectTop - pinY
   return Math.abs(delta) < minDelta ? 0 : delta
+}
+
+/** Middle reading band inside the visible column, in viewport Y. */
+export function continuousFollowBand(readableTop: number, readableBottom: number): {
+  targetY: number
+  safeTop: number
+  safeBottom: number
+} {
+  const top = Number.isFinite(readableTop) ? readableTop : 0
+  const bottom = Number.isFinite(readableBottom) ? Math.max(top + 1, readableBottom) : top + 1
+  const height = Math.max(1, bottom - top)
+  return {
+    targetY: top + height * CONTINUOUS_FOLLOW_TARGET,
+    safeTop: top + height * CONTINUOUS_FOLLOW_SAFE_TOP,
+    safeBottom: top + height * CONTINUOUS_FOLLOW_SAFE_BOTTOM,
+  }
+}
+
+/**
+ * Keep the spoken line around the middle of the page. Stay put while it is in
+ * the middle band; if it drifts too high or too low, pin its center back to
+ * the reading target.
+ */
+export function continuousSpokenFollowDelta(options: {
+  spokenTop: number
+  spokenBottom: number
+  targetY: number
+  safeTop: number
+  safeBottom: number
+  minDelta?: number
+}): number {
+  const { spokenTop, spokenBottom, targetY, safeTop, safeBottom, minDelta = 8 } = options
+  if (!Number.isFinite(spokenTop) || !Number.isFinite(spokenBottom)) return 0
+  if (!Number.isFinite(targetY) || !Number.isFinite(safeTop) || !Number.isFinite(safeBottom)) return 0
+  const spokenMid = (spokenTop + spokenBottom) / 2
+  if (spokenMid >= safeTop && spokenMid <= safeBottom) return 0
+  return scrollDeltaToPinRect(spokenMid, targetY, minDelta)
 }
 
 /** Inner scrollTop → source-Y of the first line below the column padding. */

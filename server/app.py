@@ -3312,7 +3312,7 @@ def provider_catalog() -> list[dict[str, Any]]:
     return [
         {
             "id": "kokoro",
-            "name": "Kokoro TTS",
+            "name": "HR Voices",
             "available": kokoro_configured(),
             "recommended": kokoro_configured(),
             "description": (
@@ -3327,7 +3327,7 @@ def provider_catalog() -> list[dict[str, Any]]:
         },
         {
             "id": "google",
-            "name": "Google Gemini TTS",
+            "name": "HR Ultra Realistic",
             "available": bool(env_value("GEMINI_API_KEY")),
             "recommended": True,
             "description": "Preview Gemini audiobook-style TTS with a free tier and promptable delivery style.",

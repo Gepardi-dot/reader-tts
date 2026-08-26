@@ -38,7 +38,7 @@ Per-process dicts/sets only persist within one lambda invocation. Any cache must
 
 | z-index | Element | Notes |
 |--------:|---------|-------|
-| `z-[54]` | *(unused)* | Paginated spoken wash is an absolute overlay inside the page inner |
+| `z-[54]` | *(unused)* | Spoken wash is an absolute overlay inside the page inner (paginated + continuous) |
 | `z-[55]` | Selection overlay | `pointer-events-none` |
 | `z-[60]` | Selection action menu | Vocab/dictionary/play popup |
 | `z-[65]` | BottomSheet | Container + backdrop |
@@ -66,6 +66,8 @@ If a user reports a quality problem, suspect the implementation before defending
 - **On-device Kokoro model path** unchanged: worker + `kokoro-model-v1` SW cache + COOP/COEP for WASM threads.
 - **Chunk sizes** (approx): Kokoro first ~95 / mid ~160 / steady ~280; Gemini first ~110 / follow ~280; Kokoro prefetch ahead 2, Gemini 1.
 - **Paginated follow**: each visual line stores the first source character on that line. Reusing the paragraph start on every wrapped line made `pageIndexForOffset` jump to the last page of the paragraph.
+- **Continuous follow**: keep the spoken line around the middle of the readable column (header → play bar). Clock `onProgress` passes `follow=false`; the reader still follows the spoken offset unless the user scrolled away. Drift outside the middle band glides the line back with a critically damped spring (~400ms, retargets without restarting). Reduced-motion users still jump.
+- **Spoken wash**: overlay line bars only — never a word cursor and never inline `<mark>`. `resolveReadingWindow` holds ~3 sentences until that span is spoken, then advances to the next ~3. Continuous follow recenters when the window changes, not on each word. Wrapped `\n` is not a sentence end; blank lines still are.
 - **Layout switch**: paginated ↔ continuous keep the same column (fixed header, same padding) so line wrapping does not change. Continuous → paginated freezes the live Y in the same frame — it does not relayout the whole book.
 
 ---
@@ -115,4 +117,5 @@ Manual UX checks:
 - Switch voice mid-book → next page synthesizes with new voice without errors
 - Open audio settings sheet while audio plays → no z-index bleed
 - Let it play across a page boundary → no audible gap
+- Continuous: while TTS plays, the spoken highlight stays around the middle of the page and recenters with a smooth glide (unless the user has scrolled away)
 - iOS Safari: lock screen, return → audio resumes (or fails predictably)

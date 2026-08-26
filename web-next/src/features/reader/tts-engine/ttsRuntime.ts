@@ -345,7 +345,7 @@ export class TtsRuntime {
     this.emit()
 
     if (params.provider !== 'kokoro' && params.provider !== 'google') {
-      this.hooks.showToast('Choose Kokoro or Gemini TTS to play audio.')
+      this.hooks.showToast('Choose HR Voices or HR Ultra Realistic to play audio.')
       this.stop()
       return
     }
