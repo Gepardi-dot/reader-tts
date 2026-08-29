@@ -5,6 +5,7 @@
  * Hit path is the product "instant" path.
  */
 
+import { decodeAudioDataSafe } from '@/lib/browser'
 import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 import {
   LOCAL_KOKORO_CACHE_VERSION,
@@ -81,7 +82,7 @@ export async function getStoredSegment(
   const hit = await getCachedAudio(key, SEGMENT_CACHE_VERSION).catch(() => null)
   if (!hit?.blob) return null
 
-  const buffer = await ctx.decodeAudioData(await hit.blob.arrayBuffer())
+  const buffer = await decodeAudioDataSafe(ctx, hit.blob)
   const durationSec = hit.duration ?? buffer.duration
   putMemorySegment(key, key, buffer, durationSec) // segmentId filled by caller if needed
   return {

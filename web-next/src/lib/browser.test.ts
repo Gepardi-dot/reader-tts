@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  armHtmlMediaElement,
+  armNavigatorAudioSession,
   createAudioContext,
+  decodeAudioDataSafe,
   isAppleWebKit,
   isIosWebKit,
   isMacSafari,
@@ -59,6 +62,64 @@ describe('readFileBuffer', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('armHtmlMediaElement', () => {
+  it('marks playsinline for iOS WebKit', () => {
+    const attrs: Record<string, string> = {}
+    const media = {
+      setAttribute: (name: string, value: string) => { attrs[name] = value },
+      preload: '',
+      controls: true,
+      isConnected: true,
+      style: {} as CSSStyleDeclaration,
+    } as unknown as HTMLMediaElement
+    armHtmlMediaElement(media)
+    expect(attrs.playsinline).toBe('true')
+    expect(attrs['webkit-playsinline']).toBe('true')
+    expect(media.preload).toBe('auto')
+    expect(media.controls).toBe(false)
+  })
+})
+
+describe('armNavigatorAudioSession', () => {
+  it('sets playback type when the API exists', () => {
+    const session = { type: 'auto' }
+    vi.stubGlobal('navigator', { audioSession: session })
+    armNavigatorAudioSession()
+    expect(session.type).toBe('playback')
+    vi.unstubAllGlobals()
+  })
+})
+
+describe('decodeAudioDataSafe', () => {
+  it('copies the buffer and uses the promise decode path', async () => {
+    const decoded = { duration: 1 } as AudioBuffer
+    const seen: ArrayBuffer[] = []
+    const ctx = {
+      decodeAudioData: vi.fn((data: ArrayBuffer) => {
+        seen.push(data)
+        return Promise.resolve(decoded)
+      }),
+    } as unknown as AudioContext
+    const raw = new Uint8Array([1, 2, 3]).buffer
+    const buffer = await decodeAudioDataSafe(ctx, raw)
+    expect(buffer).toBe(decoded)
+    expect(seen[0]).not.toBe(raw)
+    expect(new Uint8Array(seen[0]!)).toEqual(new Uint8Array([1, 2, 3]))
+  })
+
+  it('supports callback-style webkit decodeAudioData', async () => {
+    const decoded = { duration: 2 } as AudioBuffer
+    const ctx = {
+      decodeAudioData: (data: ArrayBuffer, success?: (buffer: AudioBuffer) => void) => {
+        success?.(decoded)
+        void data
+      },
+    } as unknown as AudioContext
+    const buffer = await decodeAudioDataSafe(ctx, new Uint8Array([9]).buffer)
+    expect(buffer).toBe(decoded)
   })
 })
 

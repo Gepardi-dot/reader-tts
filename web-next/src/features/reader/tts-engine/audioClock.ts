@@ -1,5 +1,14 @@
-import { createAudioContext } from '@/lib/browser'
-import { audioBufferScheduledEndTime, audioBufferSourceStartTime } from '../audioPlayback'
+import {
+  armHtmlMediaElement,
+  armNavigatorAudioSession,
+  createAudioContext,
+  isIosWebKit,
+} from '@/lib/browser'
+import {
+  audioBufferScheduledEndTime,
+  audioBufferSourceStartTime,
+  SILENT_WAV_DATA_URL,
+} from '../audioPlayback'
 
 export interface ClockUnitMeta {
   /** Logical text-chunk index for UI / follow highlighting. */
@@ -8,6 +17,8 @@ export interface ClockUnitMeta {
   seekSeconds?: number
   /** Optional cues for follow highlighting (buffer-relative). */
   cues?: readonly { start: number; timeStart: number }[]
+  /** Original media URL (mp3/wav blob). Preferred on iOS HTMLAudio vs re-encoding PCM. */
+  objectUrl?: string
 }
 
 export interface ScheduledClockUnit {
@@ -19,6 +30,7 @@ export interface ScheduledClockUnit {
   endAt: number
   seekSeconds: number
   objectUrl?: string
+  ownsObjectUrl?: boolean
 }
 
 export interface AudioClockHandlers {
@@ -40,8 +52,11 @@ function isWebAudioRate(rate: number) {
 /**
  * Append-only audio scheduler.
  *
- * - Rate ≈ 1.0: Web Audio BufferSource (gapless, native pitch).
- * - Rate ≠ 1.0: HTMLAudioElement with preservesPitch (no chipmunk / robotic pitch shift).
+ * - Rate ≈ 1.0 (desktop): Web Audio BufferSource (gapless, native pitch).
+ * - Rate ≠ 1.0, or any rate on iOS WebKit: HTMLAudioElement with preservesPitch.
+ *   iOS Safari/Chrome mute Web Audio under the Ring/Silent switch and drop
+ *   AudioContext.resume() after an awaited fetch unless HTMLAudio was primed
+ *   in the same tap.
  *
  * BufferSource.playbackRate is intentionally never used for speed ≠ 1 — it
  * changes pitch and is what made sped-up Gemini sound robotic.
@@ -63,14 +78,23 @@ export class AudioClock {
   private keepAlive: { source: AudioScheduledSourceNode; gain: GainNode } | null = null
   private detachCtxListeners: (() => void) | null = null
   private visibilityBound = false
+  private pageShowBound = false
   private readonly onVisibility = () => {
     if (typeof document === 'undefined' || document.visibilityState !== 'visible') return
     if (!this.active || this.paused) return
+    this.unlock()
+    void this.resume()
+  }
+  private readonly onPageShow = () => {
+    if (!this.active || this.paused) return
+    this.unlock()
     void this.resume()
   }
 
-  /** HTML pitch-preserving lane */
+  /** HTML pitch-preserving lane (also the iOS playback path). */
   private htmlAudio: HTMLAudioElement | null = null
+  /** Looping silent element that holds the iOS audio session across network waits. */
+  private unlockHtml: HTMLAudioElement | null = null
   private htmlQueue: ScheduledClockUnit[] = []
   private htmlQueueIndex = -1
   private htmlPlayGeneration = 0
@@ -136,13 +160,18 @@ export class AudioClock {
 
   /**
    * Call from a user-gesture stack (tap / keydown) before any await.
-   * Keeps one AudioContext unlocked for the session so a slow Kokoro fetch
-   * cannot lose autoplay permission and go silently stuck.
+   * iOS Safari/Chrome: resume Web Audio, play a silent buffer, and start a
+   * looping silent HTMLAudio so the audio session survives the TTS fetch.
    */
   unlock() {
+    armNavigatorAudioSession()
     const ctx = this.ensureContext()
     this.ensureKeepAlive(ctx)
-    if (ctx.state !== 'running') void ctx.resume().catch(() => undefined)
+    this.primeHtmlUnlock()
+    if ((ctx.state as string) !== 'running') {
+      this.kickWebAudio(ctx)
+      void ctx.resume().catch(() => undefined)
+    }
   }
 
   setHandlers(handlers: AudioClockHandlers) {
@@ -173,7 +202,8 @@ export class AudioClock {
   }
 
   private useHtmlLane() {
-    return !isWebAudioRate(this.rate)
+    // iOS Chrome is WKWebView — same Web Audio silent-switch / autoplay rules as Safari.
+    return !isWebAudioRate(this.rate) || isIosWebKit()
   }
 
   /**
@@ -199,8 +229,10 @@ export class AudioClock {
 
   async resume() {
     this.paused = false
+    this.unlock()
     if (this.useHtmlLane()) {
       if (this.htmlAudio) {
+        this.pauseUnlockHtml()
         try {
           await this.htmlAudio.play()
         } catch {
@@ -210,7 +242,9 @@ export class AudioClock {
       return
     }
     const ctx = this.ctx
-    if (ctx && ctx.state === 'suspended') await ctx.resume()
+    if (ctx && (ctx.state === 'suspended' || (ctx.state as string) === 'interrupted')) {
+      await ctx.resume().catch(() => undefined)
+    }
   }
 
   async pause() {
@@ -241,6 +275,7 @@ export class AudioClock {
     this.scheduled = []
     this.horizon = 0
     this.stopHtmlLane(true)
+    this.pauseUnlockHtml()
     this.activeUnitId = null
     this.active = false
     this.paused = false
@@ -252,6 +287,12 @@ export class AudioClock {
     this.stop()
     this.detachContextListeners()
     this.unbindVisibility()
+    this.unbindPageShow()
+    this.releaseUnlockHtml()
+    if (this.htmlAudio) {
+      try { this.htmlAudio.remove() } catch { /* not in the DOM */ }
+      this.htmlAudio = null
+    }
     void this.ctx?.close().catch(() => undefined)
     this.ctx = null
   }
@@ -313,11 +354,15 @@ export class AudioClock {
 
   private appendHtml(buffer: AudioBuffer, meta: ClockUnitMeta): ScheduledClockUnit | null {
     const seekSeconds = Math.max(0, Math.min(buffer.duration, meta.seekSeconds ?? 0))
-    let objectUrl: string
-    try {
-      objectUrl = URL.createObjectURL(audioBufferToWavBlob(buffer))
-    } catch {
-      return null
+    let objectUrl = meta.objectUrl
+    let ownsObjectUrl = false
+    if (!objectUrl) {
+      try {
+        objectUrl = URL.createObjectURL(audioBufferToWavBlob(buffer))
+        ownsObjectUrl = true
+      } catch {
+        return null
+      }
     }
 
     const unit: ScheduledClockUnit = {
@@ -329,6 +374,7 @@ export class AudioClock {
       endAt: 0,
       seekSeconds,
       objectUrl,
+      ownsObjectUrl,
     }
     this.htmlQueue.push(unit)
     this.active = true
@@ -363,11 +409,24 @@ export class AudioClock {
     audio.onerror = null
 
     try {
-      audio.src = unit.objectUrl ?? ''
-      audio.load()
+      this.pauseUnlockHtml()
+      audio.loop = false
+      // Do not call load() after src — iOS treats that as a new element and
+      // drops the user-gesture unlock from the Play tap.
+      if (audio.src !== unit.objectUrl) {
+        audio.src = unit.objectUrl ?? ''
+      }
       applyPreservesPitch(audio, this.rate)
       if (unit.seekSeconds > 0) {
-        audio.currentTime = unit.seekSeconds
+        const seekTo = unit.seekSeconds
+        if (audio.readyState >= 1) {
+          audio.currentTime = seekTo
+        } else {
+          audio.addEventListener('loadedmetadata', () => {
+            if (gen !== this.htmlPlayGeneration) return
+            audio.currentTime = seekTo
+          }, { once: true })
+        }
       }
       if (!this.paused) {
         await audio.play()
@@ -397,7 +456,7 @@ export class AudioClock {
   private ensureHtmlAudio() {
     if (!this.htmlAudio) {
       this.htmlAudio = new Audio()
-      this.htmlAudio.preload = 'auto'
+      armHtmlMediaElement(this.htmlAudio)
     }
     applyPreservesPitch(this.htmlAudio, this.rate)
     return this.htmlAudio
@@ -417,7 +476,7 @@ export class AudioClock {
     }
     if (revokeUrls) {
       for (const unit of this.htmlQueue) {
-        if (unit.objectUrl) URL.revokeObjectURL(unit.objectUrl)
+        if (unit.ownsObjectUrl && unit.objectUrl) URL.revokeObjectURL(unit.objectUrl)
       }
       this.htmlQueue = []
       this.htmlQueueIndex = -1
@@ -663,16 +722,110 @@ export class AudioClock {
     this.detachCtxListeners = null
   }
 
+  private kickWebAudio(ctx: AudioContext) {
+    try {
+      const rate = ctx.sampleRate || 22_050
+      const frames = Math.max(1, Math.floor(rate * 0.04))
+      const buffer = ctx.createBuffer(1, frames, rate)
+      const source = ctx.createBufferSource()
+      source.buffer = buffer
+      source.connect(ctx.destination)
+      source.start(0)
+      source.onended = () => {
+        try { source.disconnect() } catch { /* already disconnected */ }
+      }
+    } catch {
+      // Tests / old WebKit without a full graph.
+    }
+  }
+
+  private ensureUnlockHtml() {
+    if (this.unlockHtml) return this.unlockHtml
+    if (typeof Audio === 'undefined') return null
+    try {
+      const audio = new Audio()
+      armHtmlMediaElement(audio)
+      audio.loop = true
+      audio.src = SILENT_WAV_DATA_URL
+      this.unlockHtml = audio
+      return audio
+    } catch {
+      return null
+    }
+  }
+
+  private primeHtmlUnlock() {
+    if (isIosWebKit()) {
+      const hold = this.ensureUnlockHtml()
+      if (hold) {
+        try {
+          if (!hold.src) hold.src = SILENT_WAV_DATA_URL
+          hold.loop = true
+          const play = hold.play()
+          if (play && typeof play.catch === 'function') play.catch(() => undefined)
+        } catch {
+          // Gesture may already be spent; Play tap will try again.
+        }
+      }
+    }
+    if (!this.useHtmlLane()) return
+    try {
+      const content = this.ensureHtmlAudio()
+      if (this.htmlQueueIndex < 0) {
+        if (!content.src) content.src = SILENT_WAV_DATA_URL
+        const play = content.play()
+        if (play && typeof play.catch === 'function') play.catch(() => undefined)
+      }
+    } catch {
+      // HTMLAudio may be missing in tests.
+    }
+  }
+
+  private pauseUnlockHtml() {
+    if (!this.unlockHtml) return
+    try {
+      this.unlockHtml.pause()
+    } catch {
+      // ignore
+    }
+  }
+
+  private releaseUnlockHtml() {
+    if (!this.unlockHtml) return
+    try {
+      this.unlockHtml.pause()
+      this.unlockHtml.removeAttribute('src')
+      this.unlockHtml.load()
+      this.unlockHtml.remove()
+    } catch {
+      // ignore
+    }
+    this.unlockHtml = null
+  }
+
   private bindVisibility() {
     if (this.visibilityBound || typeof document === 'undefined') return
     this.visibilityBound = true
     document.addEventListener('visibilitychange', this.onVisibility)
+    this.bindPageShow()
   }
 
   private unbindVisibility() {
     if (!this.visibilityBound || typeof document === 'undefined') return
     this.visibilityBound = false
     document.removeEventListener('visibilitychange', this.onVisibility)
+  }
+
+  private bindPageShow() {
+    if (this.pageShowBound || typeof window === 'undefined') return
+    this.pageShowBound = true
+    window.addEventListener('pageshow', this.onPageShow)
+  }
+
+  private unbindPageShow() {
+    if (!this.pageShowBound || typeof window === 'undefined') return
+    this.pageShowBound = false
+    window.removeEventListener('pageshow', this.onPageShow)
   }
 }
 

@@ -26,6 +26,7 @@ import {
   requestLiveAudio,
   type LiveAudioPayload,
 } from './liveAudio'
+import { decodeAudioDataSafe } from '@/lib/browser'
 import { pcmToAudioBuffer } from './audioClock'
 import type { NativeAudioResult, TtsAudioChunk } from './types'
 import type { ChunkLoader } from './bufferPool'
@@ -124,7 +125,7 @@ async function loadKokoroStreaming(
   if (opts.stale()) return
   if (hit) {
     const ctx = opts.ensureAudioContext()
-    const buffer = await ctx.decodeAudioData(await hit.blob.arrayBuffer())
+    const buffer = await decodeAudioDataSafe(ctx, hit.blob)
     if (opts.stale()) return
     opts.onFrame({
       url: null,
@@ -204,7 +205,7 @@ async function loadKokoroStreaming(
           void (async () => {
             try {
               const ctx = opts.ensureAudioContext()
-              const buffer = await ctx.decodeAudioData(result.wav.slice(0))
+              const buffer = await decodeAudioDataSafe(ctx, result.wav)
               if (!opts.stale()) {
                 opts.onFrame({
                   url: null,
@@ -397,7 +398,7 @@ async function loadLiveProviderChunkOnce(
   const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
   if (opts.stale()) return
   const ctx = opts.ensureAudioContext()
-  const buffer = await ctx.decodeAudioData(await blob.arrayBuffer())
+  const buffer = await decodeAudioDataSafe(ctx, blob)
   if (opts.stale()) return
   const url = URL.createObjectURL(blob)
   opts.trackObjectUrl(url)

@@ -72,3 +72,93 @@ export function createAudioContext(): AudioContext {
     return new Ctor()
   }
 }
+
+type NavigatorAudioSession = {
+  type: string
+}
+
+/**
+ * iOS 16.4+ WebKit: Web Audio is muted by the Ring/Silent switch unless the
+ * page takes the "playback" audio session (same category as Music / Podcasts).
+ */
+export function armNavigatorAudioSession() {
+  if (typeof navigator === 'undefined') return
+  try {
+    const session = (navigator as Navigator & { audioSession?: NavigatorAudioSession }).audioSession
+    if (session && session.type !== 'playback') session.type = 'playback'
+  } catch {
+    // Older WebKit — HTMLAudio unlock is the fallback.
+  }
+}
+
+/** iOS Safari/Chrome (WebKit) refuse HTMLMediaElement.play() without playsinline. */
+export function armHtmlMediaElement(media: HTMLMediaElement) {
+  media.setAttribute('playsinline', 'true')
+  media.setAttribute('webkit-playsinline', 'true')
+  media.setAttribute('x-webkit-airplay', 'deny')
+  const video = media as HTMLMediaElement & {
+    playsInline?: boolean
+    disableRemotePlayback?: boolean
+  }
+  video.playsInline = true
+  media.preload = 'auto'
+  media.controls = false
+  try {
+    video.disableRemotePlayback = true
+  } catch {
+    // Attribute is optional.
+  }
+  try {
+    if (typeof document === 'undefined' || media.isConnected) return
+    media.setAttribute('aria-hidden', 'true')
+    media.style.position = 'fixed'
+    media.style.left = '0'
+    media.style.bottom = '0'
+    media.style.width = '1px'
+    media.style.height = '1px'
+    media.style.opacity = '0.01'
+    media.style.pointerEvents = 'none'
+    document.body?.appendChild(media)
+  } catch {
+    // Tests and documents without a body.
+  }
+}
+
+/**
+ * Safari detaches the ArrayBuffer passed to decodeAudioData. iOS IDB/File
+ * blobs can also fail `arrayBuffer()` — FileReader still works.
+ */
+export async function decodeAudioDataSafe(
+  ctx: AudioContext,
+  source: ArrayBuffer | Blob,
+): Promise<AudioBuffer> {
+  const raw = source instanceof ArrayBuffer ? source : await readFileBuffer(source)
+  const copy = raw.slice(0)
+  const decode = ctx.decodeAudioData.bind(ctx) as (
+    data: ArrayBuffer,
+    success?: (buffer: AudioBuffer) => void,
+    error?: (err?: unknown) => void,
+  ) => Promise<AudioBuffer> | void
+
+  return await new Promise<AudioBuffer>((resolve, reject) => {
+    let settled = false
+    const ok = (buffer: AudioBuffer) => {
+      if (settled) return
+      settled = true
+      resolve(buffer)
+    }
+    const fail = (err?: unknown) => {
+      if (settled) return
+      settled = true
+      reject(err instanceof Error ? err : new Error('Could not decode audio.'))
+    }
+    try {
+      const result = decode(copy, ok, fail)
+      if (result && typeof result.then === 'function') {
+        void result.then(ok, fail)
+      }
+    } catch (err) {
+      fail(err)
+    }
+  })
+}

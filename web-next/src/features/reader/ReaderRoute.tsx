@@ -95,6 +95,7 @@ import {
   pageTopFromInnerScroll,
   paginatedTextViewHeight,
   readerScrollerStyle,
+  readerUsesWindowScroll,
   snapPageToLines,
   resolveLayoutSwitchOffset,
   scrollDeltaToPinRect,
@@ -748,6 +749,7 @@ const WORD_ACTIONS = [
 ] as const
 
 const SENTENCE_ACTIONS = [
+  { id: 'play',      Icon: Mic,         label: 'Play'      },
   { id: 'copy',      Icon: Copy,        label: 'Copy'      },
   { id: 'notes',     Icon: NotebookPen, label: 'Notes'     },
   { id: 'askai',     Icon: Sparkles,    label: 'Ask AI'    },
@@ -773,6 +775,7 @@ function SelectionMenu({
 }: SelectionMenuProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [busyColor,  setBusyColor]  = useState<string | null>(null)
+  const playStartedRef = useRef(false)
   const queryClient = useQueryClient()
 
   useEffect(() => {
@@ -786,7 +789,7 @@ function SelectionMenu({
     })
   }, [queryClient, sel.mode, sel.text])
 
-  const menuW = sel.mode === 'word' ? 300 : 268
+  const menuW = sel.mode === 'word' ? 300 : 320
   const cx = Math.min(
     Math.max(sel.viewportX, menuW / 2 + 10),
     window.innerWidth - menuW / 2 - 10,
@@ -816,8 +819,8 @@ function SelectionMenu({
         onClose()
         break
       case 'play':
-        onClose()
         onPlayWord(sel.text, sel.startOffset)
+        onClose()
         break
       case 'vocabulary': {
         if (sel.text.trim().split(/\s+/).length > 1) {
@@ -896,6 +899,10 @@ function SelectionMenu({
 
   function handleSentence(id: string) {
     switch (id) {
+      case 'play':
+        onPlayWord(sel.text, sel.startOffset)
+        onClose()
+        break
       case 'copy':
         navigator.clipboard.writeText(sel.text).catch(() => {})
         onToast('Copied')
@@ -949,6 +956,14 @@ function SelectionMenu({
 
   const actions = sel.mode === 'word' ? WORD_ACTIONS : SENTENCE_ACTIONS
 
+  function startPlayFromGesture() {
+    if (playStartedRef.current) return
+    playStartedRef.current = true
+    onWarmAtOffset?.(sel.startOffset)
+    if (sel.mode === 'word') void handleWord('play')
+    else handleSentence('play')
+  }
+
   return (
     <motion.div
       className="fixed z-[60] rounded-2xl overflow-hidden"
@@ -976,13 +991,19 @@ function SelectionMenu({
         {actions.map(({ id, Icon, label }) => (
           <button
             key={id}
-            onClick={() => sel.mode === 'word' ? handleWord(id) : handleSentence(id)}
-            onPointerDown={(e) => {
-              // Start network/synth on press so Play often hits a warm cache.
-              if (id === 'play' && sel.mode === 'word') {
-                e.stopPropagation()
-                onWarmAtOffset?.(sel.startOffset)
+            onClick={() => {
+              if (id === 'play') {
+                startPlayFromGesture()
+                return
               }
+              if (sel.mode === 'word') handleWord(id)
+              else handleSentence(id)
+            }}
+            onPointerDown={(e) => {
+              if (id !== 'play') return
+              // Start on press so iOS still has a user gesture when Audio.play() runs.
+              e.stopPropagation()
+              startPlayFromGesture()
             }}
             disabled={busyAction === id}
             className="flex-1 flex flex-col items-center gap-1.5 py-3 px-1 text-white hover:bg-white/10 active:bg-white/15 transition-colors disabled:opacity-40"
@@ -2525,7 +2546,20 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
       {/* Center: play button + progress bar */}
       <div className="flex items-center gap-2 flex-1 min-w-0">
         <button
-          onClick={() => handle?.toggle()}
+          onPointerDown={(e) => {
+            if (e.pointerType === 'mouse') return
+            e.preventDefault()
+            ;(e.currentTarget as HTMLButtonElement).dataset.iosToggle = '1'
+            handle?.toggle()
+          }}
+          onClick={(e) => {
+            const btn = e.currentTarget
+            if (btn.dataset.iosToggle === '1') {
+              delete btn.dataset.iosToggle
+              return
+            }
+            handle?.toggle()
+          }}
           disabled={!handle}
           aria-label={primaryLabel}
           title={primaryLabel}
@@ -2778,7 +2812,20 @@ export function ReaderRoute() {
   }, [playWordRaw])
   const hasReaderText = Boolean(payload?.text)
 
+  function readingViewportHeight() {
+    return Math.round(window.visualViewport?.height ?? window.innerHeight)
+  }
+
   function getReaderScrollMetrics() {
+    if (readerUsesWindowScroll(layoutRef.current)) {
+      const view = readingViewportHeight()
+      const y = window.scrollY || document.documentElement.scrollTop || 0
+      return {
+        y,
+        max: Math.max(0, document.documentElement.scrollHeight - view),
+        view,
+      }
+    }
     const el = readerScrollRef.current
     if (el) {
       return {
@@ -2795,6 +2842,10 @@ export function ReaderRoute() {
   }
 
   function scrollReaderTo(top: number, behavior: ScrollBehavior = 'auto') {
+    if (readerUsesWindowScroll(layoutRef.current)) {
+      window.scrollTo({ top, behavior })
+      return
+    }
     const el = readerScrollRef.current
     if (el) el.scrollTo({ top, behavior })
     else window.scrollTo({ top, behavior })
@@ -2823,6 +2874,10 @@ export function ReaderRoute() {
   }
 
   function setReaderScrollTop(top: number) {
+    if (readerUsesWindowScroll(layoutRef.current)) {
+      window.scrollTo({ top })
+      return
+    }
     const el = readerScrollRef.current
     if (el) el.scrollTop = top
     else window.scrollTo({ top })
@@ -3173,11 +3228,22 @@ export function ReaderRoute() {
     const scroller = readerScrollRef.current
     const root = readerTextRef.current
     const text = payload?.text
-    if (!scroller || !root || !text) return null
-    const rect = scroller.getBoundingClientRect()
-    if (rect.height <= 0 || rect.width <= 0) return null
-    const y = Math.max(rect.top + 8, Math.min(continuousReadingPinY(), rect.bottom - 8))
-    const x = rect.left + rect.width / 2
+    if (!root || !text) return null
+    let x: number
+    let y: number
+    if (readerUsesWindowScroll(layoutRef.current)) {
+      const vv = window.visualViewport
+      const top = vv?.offsetTop ?? 0
+      const height = readingViewportHeight()
+      y = Math.max(top + 8, Math.min(continuousReadingPinY(), top + height - 8))
+      x = (vv?.offsetLeft ?? 0) + (vv?.width ?? window.innerWidth) / 2
+    } else {
+      if (!scroller) return null
+      const rect = scroller.getBoundingClientRect()
+      if (rect.height <= 0 || rect.width <= 0) return null
+      y = Math.max(rect.top + 8, Math.min(continuousReadingPinY(), rect.bottom - 8))
+      x = rect.left + rect.width / 2
+    }
     const caret = caretRangeAt(x, y)
     if (!caret) return null
     const offset = sourceOffsetForDomPoint(caret.startContainer, caret.startOffset, root)
@@ -3524,6 +3590,22 @@ export function ReaderRoute() {
       window.scrollTo(0, scrollY)
     }
   }, [sheet])
+
+  useEffect(() => {
+    const html = document.documentElement
+    html.classList.toggle('reader-window-scroll', readerUsesWindowScroll(appearance.layout))
+    return () => html.classList.remove('reader-window-scroll')
+  }, [appearance.layout])
+
+  useEffect(() => {
+    const themeMeta = document.querySelector('meta[name="theme-color"]')
+    if (!themeMeta) return
+    const previous = themeMeta.getAttribute('content')
+    themeMeta.setAttribute('content', THEMES[appearance.theme].bg)
+    return () => {
+      if (previous) themeMeta.setAttribute('content', previous)
+    }
+  }, [appearance.theme])
 
   useEffect(() => {
     const flush = () => {
@@ -4626,9 +4708,11 @@ export function ReaderRoute() {
     }
     const top = Math.min(...boxes.map((rect) => rect.top))
     const bottom = Math.max(...boxes.map((rect) => rect.top + rect.height))
-    const viewRect = readerScrollRef.current?.getBoundingClientRect()
+    const vv = window.visualViewport
     const readableTop = continuousReadingPinY()
-    const readableBottom = (viewRect?.bottom ?? window.innerHeight) - CONTINUOUS_FOLLOW_BOTTOM_CLEARANCE
+    const readableBottom = (vv
+      ? vv.offsetTop + vv.height
+      : window.innerHeight) - CONTINUOUS_FOLLOW_BOTTOM_CLEARANCE
     const band = continuousFollowBand(readableTop, readableBottom)
     const mid = (top + bottom) / 2
     const height = bottom - top
@@ -4766,7 +4850,9 @@ export function ReaderRoute() {
       data-reader-theme={appearance.theme}
       data-reader-sheet-lock={sheet === 'audio' || sheet === 'appearance' ? '' : undefined}
       className={cn(
-        'h-svh flex flex-col overflow-hidden',
+        paginated
+          ? 'h-svh flex flex-col overflow-hidden'
+          : 'min-h-svh flex flex-col',
         appearance.theme === 'white' && 'reader-theme-kindle',
       )}
       style={{
@@ -4884,8 +4970,10 @@ export function ReaderRoute() {
         ref={readerScrollRef}
         data-reader-scroll=""
         className={cn(
-          'min-h-0 flex-1 overflow-x-hidden overscroll-y-contain',
-          paginated ? 'overflow-y-hidden' : 'overflow-y-auto',
+          'overflow-x-hidden',
+          paginated
+            ? 'min-h-0 flex-1 overflow-y-hidden overscroll-y-contain'
+            : 'overflow-y-visible',
         )}
         style={{
           ...readerScrollerStyle(appearance.layout),

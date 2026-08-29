@@ -1,6 +1,34 @@
 export const BROWSER_TTS_PROVIDER_ID = 'browser'
 export const CLOUD_TTS_PROVIDER_ID = 'google'
-export const SILENT_WAV_DATA_URL = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
+
+/** ~50ms of silence. Looping this holds the iOS audio session across a TTS fetch. */
+function makeSilentWavDataUrl(durationSec = 0.05, sampleRate = 8000) {
+  const length = Math.max(1, Math.floor(durationSec * sampleRate))
+  const dataSize = length * 2
+  const bytes = new Uint8Array(44 + dataSize)
+  const view = new DataView(bytes.buffer)
+  const ascii = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i))
+  }
+  ascii(0, 'RIFF')
+  view.setUint32(4, 36 + dataSize, true)
+  ascii(8, 'WAVE')
+  ascii(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  ascii(36, 'data')
+  view.setUint32(40, dataSize, true)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]!)
+  return `data:audio/wav;base64,${btoa(binary)}`
+}
+
+export const SILENT_WAV_DATA_URL = makeSilentWavDataUrl()
 
 export interface AudioTextChunk {
   start: number

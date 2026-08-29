@@ -1,18 +1,22 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   PWA_INSTALL_AFTER_MS,
   addUsageMs,
   canOneClickInstall,
+  canShareIosHomeScreen,
   detectInstalledRelatedApp,
   getInstallSurface,
   installCtaLabel,
+  iosSharePlacement,
   isAndroidDevice,
   isInstallDismissed,
+  isIosChromeLike,
   isIosDevice,
   isMacSafari,
   isStandaloneDisplay,
   isUsageEligible,
   promptPwaInstall,
+  shareIosAddToHomeScreen,
   setDeferredInstallPrompt,
   shouldCountInstallUsage,
   shouldDeferSwReload,
@@ -51,13 +55,14 @@ describe('isIosDevice', () => {
 })
 
 describe('install hint', () => {
-  it('waits for five minutes of use on every platform', () => {
+  it('waits for five minutes of use on non-iOS platforms', () => {
     expect(
       shouldShowInstallHint({
         standalone: false,
         dismissed: false,
         usageEligible: false,
         pathname: '/library',
+        ios: false,
       }),
     ).toBe(false)
     expect(
@@ -66,6 +71,19 @@ describe('install hint', () => {
         dismissed: false,
         usageEligible: true,
         pathname: '/library',
+        ios: false,
+      }),
+    ).toBe(true)
+  })
+
+  it('shows the iOS Share coach without a usage wait', () => {
+    expect(
+      shouldShowInstallHint({
+        standalone: false,
+        dismissed: false,
+        usageEligible: false,
+        pathname: '/library',
+        ios: true,
       }),
     ).toBe(true)
   })
@@ -77,6 +95,7 @@ describe('install hint', () => {
         dismissed: false,
         usageEligible: true,
         pathname: '/library',
+        ios: true,
       }),
     ).toBe(false)
     expect(
@@ -146,8 +165,22 @@ describe('install surface', () => {
     expect(installCtaLabel('prompt')).toBe('Install as app')
     expect(installCtaLabel('desktop-menu')).toBe('Install as app')
     expect(installCtaLabel('android-menu')).toBe('Install as app')
-    expect(installCtaLabel('ios')).toBe('Install as app')
+    expect(installCtaLabel('ios')).toBe('Open Share menu')
     expect(installCtaLabel('mac-dock')).toBe('Install as app')
+  })
+
+  it('puts Chrome-like iOS Share in the top bar and Safari at the bottom', () => {
+    const chromeUa = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) CriOS/120.0.0.0'
+    const safariUa = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) AppleWebKit/605.1.15 Version/17.0'
+    expect(isIosChromeLike(chromeUa, 5, 'iPhone')).toBe(true)
+    expect(isIosChromeLike(safariUa, 5, 'iPhone')).toBe(false)
+    expect(iosSharePlacement(chromeUa, 5, 'iPhone')).toBe('top')
+    expect(iosSharePlacement(safariUa, 5, 'iPhone')).toBe('bottom')
+  })
+
+  it('detects the Web Share API used to open the iOS sheet', () => {
+    expect(canShareIosHomeScreen({ share: async () => undefined })).toBe(true)
+    expect(canShareIosHomeScreen({})).toBe(false)
   })
 
   it('does not claim a one-click prompt without a captured event', () => {
@@ -158,6 +191,22 @@ describe('install surface', () => {
     expect(supportsWebInstallApi({ install: async () => undefined })).toBe(true)
     expect(supportsWebInstallApi({})).toBe(false)
     expect(supportsInstallElement(undefined)).toBe(false)
+  })
+})
+
+describe('shareIosAddToHomeScreen', () => {
+  it('opens the system share sheet', async () => {
+    const share = vi.fn(async () => undefined)
+    expect(await shareIosAddToHomeScreen({ share })).toBe('shared')
+    expect(share).toHaveBeenCalled()
+  })
+
+  it('treats a user cancel as aborted', async () => {
+    expect(await shareIosAddToHomeScreen({
+      share: async () => {
+        throw new DOMException('The user aborted a request.', 'AbortError')
+      },
+    })).toBe('aborted')
   })
 })
 

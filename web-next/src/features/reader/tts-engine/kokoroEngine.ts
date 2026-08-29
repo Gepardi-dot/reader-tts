@@ -26,6 +26,7 @@ import {
   notePlaybackFetchEnd,
   notePlaybackFetchStart,
 } from '@/shared/storage/rollingVoiceCache'
+import { decodeAudioDataSafe } from '@/lib/browser'
 import { pacingFor } from '../audioPlayback'
 import { AudioClock, pcmToAudioBuffer } from './audioClock'
 import {
@@ -187,6 +188,7 @@ export class KokoroEngine {
 
   resume() {
     if (this.phase !== 'paused') return
+    this.clock.unlock()
     void this.clock.resume()
     this.phase = 'playing'
     this.hooks.onSnapshot()
@@ -463,7 +465,7 @@ export class KokoroEngine {
               if (frames.length === 1) buffer = frames[0]!
               else if (frames.length > 1) buffer = concatBuffers(ctx, frames)
               else if (result.wav.byteLength > 0) {
-                buffer = await ctx.decodeAudioData(result.wav.slice(0))
+                buffer = await decodeAudioDataSafe(ctx, result.wav)
                 if (!streamed) {
                   this.clock.append(buffer, { chunkIndex: index })
                   streamed = true
@@ -541,7 +543,7 @@ export class KokoroEngine {
               let buffer: AudioBuffer
               if (frames.length === 1) buffer = frames[0]!
               else if (frames.length > 1) buffer = concatBuffers(ctx, frames)
-              else if (result.wav.byteLength > 0) buffer = await ctx.decodeAudioData(result.wav.slice(0))
+              else if (result.wav.byteLength > 0) buffer = await decodeAudioDataSafe(ctx, result.wav)
               else {
                 done()
                 return

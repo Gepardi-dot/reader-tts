@@ -7,6 +7,7 @@ import {
   performanceNow,
   queuePerformanceTelemetry,
 } from '@/shared/telemetry/performanceTelemetry'
+import { decodeAudioDataSafe } from '@/lib/browser'
 import {
   BROWSER_TTS_PROVIDER_ID,
   pacingFor,
@@ -60,7 +61,7 @@ export const defaultNativeAudioSourceDeps: NativeAudioSourceDeps = {
   liveAudioCooldownRemainingMs,
   requestLiveAudio,
   loadLiveAudioBlob,
-  decodeAudioBlob: async (ctx, blob) => ctx.decodeAudioData(await blob.arrayBuffer()),
+  decodeAudioBlob: async (ctx, blob) => decodeAudioDataSafe(ctx, blob),
   createObjectUrl: (blob) => URL.createObjectURL(blob),
   now: performanceNow,
   elapsedMs,

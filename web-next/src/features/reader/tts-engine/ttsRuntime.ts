@@ -276,6 +276,7 @@ export class TtsRuntime {
       return
     }
     if (this.phase !== 'paused') return
+    this.clock.unlock()
     void this.clock.resume()
     this.phase = 'playing'
     this.emit()
@@ -467,6 +468,7 @@ export class TtsRuntime {
         chunkIndex,
         seekSeconds: 0,
         cues: frame.cues,
+        objectUrl: frame.url ?? undefined,
       })
       // Resume after a boundary underrun as soon as the next buffer lands.
       if (this.phase === 'buffering' || this.phase === 'idle') {
@@ -617,6 +619,7 @@ export class TtsRuntime {
           chunkIndex: index,
           seekSeconds: 0,
           cues: chunk.cues,
+          objectUrl: chunk.url ?? undefined,
         })
         scheduled += 1
       }

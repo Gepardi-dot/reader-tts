@@ -6,18 +6,22 @@ import {
   type CSSProperties,
   type ReactNode,
 } from 'react'
+import { createPortal } from 'react-dom'
 import { useLocation } from 'react-router-dom'
 import { X } from 'lucide-react'
 import {
   canOneClickInstall,
+  canShareIosHomeScreen,
   detectInstalledRelatedApp,
   dismissInstallHint,
   getDeferredInstallPrompt,
   getInstallSurface,
   installCtaLabel,
+  iosSharePlacement,
   isStandaloneDisplay,
   markAppInstalled,
   promptPwaInstall,
+  shareIosAddToHomeScreen,
   shouldShowInstallHint,
   subscribeInstallState,
   supportsInstallElement,
@@ -60,8 +64,8 @@ function copyFor(surface: InstallSurface): {
 } {
   if (surface === 'ios') {
     return {
-      title: 'Keep HiggsRead on your Home Screen',
-      body: 'Add the app icon so reading opens full-screen, like a native app.',
+      title: 'Read without the browser bars',
+      body: 'Add HiggsRead to your Home Screen. It opens full-screen, like a book app.',
       action: installCtaLabel(surface),
     }
   }
@@ -93,23 +97,49 @@ function copyFor(surface: InstallSurface): {
   }
 }
 
+function IosAddToHomeRow() {
+  return (
+    <div
+      className="mt-3 flex items-center gap-3 rounded-[12px] px-3 py-2.5"
+      style={{
+        backgroundColor: 'rgba(255,255,255,0.72)',
+        border: '1px solid rgba(55, 53, 47, 0.10)',
+      }}
+    >
+      <span
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] text-[18px] font-semibold leading-none"
+        style={{ backgroundColor: '#2383e2', color: '#fff' }}
+        aria-hidden
+      >
+        +
+      </span>
+      <span className="text-foreground min-w-0 flex-1 text-[14px] font-medium">
+        Add to Home Screen
+      </span>
+    </div>
+  )
+}
+
 function guideFor(surface: InstallSurface): ReactNode {
   if (surface === 'ios') {
+    const shareAtTop = iosSharePlacement() === 'top'
     return (
-      <ol className="text-muted-foreground mt-2 space-y-1.5 text-[12.5px] leading-relaxed">
-        <li>
-          1. Tap{' '}
-          <span className="text-foreground inline-flex translate-y-px items-center gap-1">
-            <IosShareGlyph /> Share
-          </span>
-        </li>
-        <li>
-          2. Choose <span className="text-foreground">Add to Home Screen</span>
-        </li>
-        <li>
-          3. Tap <span className="text-foreground">Add</span>
-        </li>
-      </ol>
+      <div className="mt-3">
+        <ol className="text-muted-foreground space-y-2 text-[13px] leading-relaxed">
+          <li>
+            1. Tap{' '}
+            <span className="text-foreground inline-flex translate-y-px items-center gap-1 font-medium">
+              <IosShareGlyph /> Share
+            </span>
+            {shareAtTop ? ' at the top right of the address bar.' : ' in the bar at the bottom of Safari.'}
+          </li>
+          <li>2. Scroll to this row and tap it:</li>
+        </ol>
+        <IosAddToHomeRow />
+        <p className="text-muted-foreground mt-2.5 text-[13px] leading-relaxed">
+          3. Tap <span className="text-foreground font-medium">Add</span>.
+        </p>
+      </div>
     )
   }
   if (surface === 'android-menu') {
@@ -170,6 +200,85 @@ function ChromiumInstallElement({
   })
 }
 
+function IosHomeScreenCoach({
+  title,
+  body,
+  action,
+  onDismiss,
+}: {
+  title: string
+  body: ReactNode
+  action: string
+  onDismiss: () => void
+}) {
+  const [shareFailed, setShareFailed] = useState(false)
+  const shareAtTop = iosSharePlacement() === 'top'
+  const canShare = canShareIosHomeScreen()
+
+  async function onShare() {
+    const result = await shareIosAddToHomeScreen()
+    if (result === 'unavailable') setShareFailed(true)
+  }
+
+  const card = (
+    <div
+      role="dialog"
+      aria-label={title}
+      className="w-full max-w-md rounded-[18px] px-4 py-3.5"
+      style={PLATE}
+    >
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-foreground text-[16px] font-medium tracking-tight">{title}</p>
+          <p className="text-muted-foreground mt-1 text-[13.5px] leading-relaxed">{body}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted-foreground hover:text-foreground rounded-md p-1 hover:bg-black/5"
+          aria-label="Dismiss Home Screen guide"
+        >
+          <X size={16} />
+        </button>
+      </div>
+      {guideFor('ios')}
+      {canShare && !shareFailed ? (
+        <button
+          type="button"
+          onClick={() => void onShare()}
+          className="mt-3.5 flex h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-[#37352f] text-[14px] font-medium text-[#f7f7f5] transition-opacity hover:opacity-90"
+        >
+          <IosShareGlyph className="opacity-90" />
+          {action}
+        </button>
+      ) : (
+        <p className="text-muted-foreground mt-3 text-[12.5px] leading-relaxed">
+          {shareAtTop
+            ? 'Use Share at the top right, then Add to Home Screen.'
+            : 'Use Share in the Safari bar at the bottom, then Add to Home Screen.'}
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="text-muted-foreground mt-2 h-9 w-full text-[13px] hover:text-foreground"
+      >
+        Not now
+      </button>
+    </div>
+  )
+
+  if (typeof document === 'undefined') return card
+  return createPortal(
+    <div
+      className="pointer-events-none fixed inset-0 z-[90] flex items-center justify-center px-3"
+    >
+      <div className="pointer-events-auto w-full max-w-md">{card}</div>
+    </div>,
+    document.body,
+  )
+}
+
 export function PwaInstallBanner() {
   const { pathname } = useLocation()
   const [visible, setVisible] = useState(() => shouldShowInstallHint({ pathname }))
@@ -216,6 +325,17 @@ export function PwaInstallBanner() {
   function onDismiss() {
     dismissInstallHint()
     setVisible(false)
+  }
+
+  if (surface === 'ios') {
+    return (
+      <IosHomeScreenCoach
+        title={copy.title}
+        body={copy.body}
+        action={copy.action}
+        onDismiss={onDismiss}
+      />
+    )
   }
 
   return (
