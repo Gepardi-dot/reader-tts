@@ -176,6 +176,20 @@
   html.pwa-standalone #root {
     min-height: 100dvh;
   }
+
+  /* Continuous reader: document scroll so iOS Safari/Chrome can collapse chrome. */
+  html.reader-window-scroll,
+  html.reader-window-scroll body {
+    height: auto;
+    min-height: 100%;
+    overflow-x: clip;
+    overflow-y: auto;
+  }
+  html.reader-window-scroll #root {
+    height: auto;
+    min-height: 100svh;
+    overflow: visible;
+  }
 }
 
 /* ── Kindle reader prose ────────────────────────────── */
@@ -243,13 +257,12 @@
   background-position: center top;
 }
 
-/* Continuous must stay a real scrollport even if a sheet lock left
-   overflow:hidden on the node. Paginated keeps overflow clipped. */
+/* Continuous must not trap scroll in an inner box — iOS only hides the
+   address/tab bars when the document itself is scrolling. */
 [data-reader-layout="continuous"]:not([data-reader-sheet-lock]) [data-reader-scroll] {
   overflow-x: hidden !important;
-  overflow-y: auto !important;
+  overflow-y: visible !important;
   touch-action: pan-y !important;
-  -webkit-overflow-scrolling: touch;
 }
 [data-reader-layout="continuous"] [data-reader-text] {
   clip-path: none !important;

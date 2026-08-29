@@ -57,10 +57,13 @@ If a user reports a quality problem, suspect the implementation before defending
 
 - **TTS v3 runtime** (`tts-engine/ttsRuntime.ts`): imperative producer/consumer. React only observes snapshots. See `docs/tts-v3-runtime.md`.
 - **Playback window**: hosted Kokoro/Gemini chunk from the tap through the rest of the book. `AUDIO_SLICE_CHARS` is only the scroll-warmup window, not session length.
-- **AudioClock** appends WebAudio buffers end-to-end; underruns wait for the producer instead of stop/restarting the graph. A silent keep-alive keeps the context running; missed `onended` is recovered from the timeline; a watchdog retries the next chunk if the clock goes dry.
-- **Gesture unlock**: `AudioClock.unlock()` runs on pointerdown/keydown and again synchronously at Play, before any live-audio await.
+- **AudioClock** appends WebAudio buffers end-to-end on desktop at 1.0×; underruns wait for the producer instead of stop/restarting the graph. A silent keep-alive keeps the context running; missed `onended` is recovered from the timeline; a watchdog retries the next chunk if the clock goes dry.
+- **Gesture unlock**: `AudioClock.unlock()` runs on pointerdown/touchstart/click/keydown (capture, not once) and again synchronously at Play, before any live-audio await. It sets `navigator.audioSession.type = 'playback'`, starts a looping silent HTMLAudio, and kicks a short Web Audio buffer so iOS Safari/Chrome keep the audio session across the fetch.
+- **iOS playback**: iPhone/iPad (Safari and Chrome — both WebKit) use the HTMLAudio lane at every rate, with `playsInline`, no `load()` after `src`, and the original live-audio blob URL when present. Desktop Safari still uses gapless Web Audio at 1.0×.
+- **Decode**: `decodeAudioDataSafe` copies the ArrayBuffer and falls back to FileReader so iOS IDB blobs can still decode.
 - **Kokoro streams sentence PCM** via `synthesizeLocalStreaming` → `pcmToAudioBuffer` → clock.append as each frame arrives (first-audio no longer waits for full WAV). Full WAV still cached to IndexedDB on complete.
 - **Gemini** loads full live-audio chunks (edge/R2 cache) and appends when decoded; cold miss shows buffering, never silent browser-speech mask.
+- **Live-audio bytes** are served from `GET /api/audio/files/:digest` (R2 + short-lived memory), not a megabyte `data:` JSON body. Local wrangler used to drop those bodies (`Network connection lost`) so Play never started.
 - **Live-audio fetch** has a 50s client timeout and one retry on 502/timeout so a hung Fly request cannot occupy the in-memory cache forever.
 - **Browser speech** is a selected provider only (`browser`), not a hidden fallback for native voices.
 - **On-device Kokoro model path** unchanged: worker + `kokoro-model-v1` SW cache + COOP/COEP for WASM threads.
@@ -118,4 +121,4 @@ Manual UX checks:
 - Open audio settings sheet while audio plays → no z-index bleed
 - Let it play across a page boundary → no audible gap
 - Continuous: while TTS plays, the spoken highlight stays around the middle of the page and recenters with a smooth glide (unless the user has scrolled away)
-- iOS Safari: lock screen, return → audio resumes (or fails predictably)
+- iOS Safari / Chrome: tap Play → audio is audible (including with the Ring/Silent switch). Lock screen, return → audio resumes (or fails predictably)

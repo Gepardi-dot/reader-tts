@@ -98,10 +98,15 @@ export function useTtsSessionController({
 
   useEffect(() => {
     const unlock = () => ensureRuntime().unlockAudio()
-    window.addEventListener('pointerdown', unlock, { once: true, passive: true })
-    window.addEventListener('keydown', unlock, { once: true })
+    const pointerOpts = { capture: true, passive: true } as const
+    window.addEventListener('pointerdown', unlock, pointerOpts)
+    window.addEventListener('touchstart', unlock, pointerOpts)
+    window.addEventListener('click', unlock, pointerOpts)
+    window.addEventListener('keydown', unlock)
     return () => {
-      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('pointerdown', unlock, pointerOpts)
+      window.removeEventListener('touchstart', unlock, pointerOpts)
+      window.removeEventListener('click', unlock, pointerOpts)
       window.removeEventListener('keydown', unlock)
     }
   }, [])

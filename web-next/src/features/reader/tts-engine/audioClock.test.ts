@@ -88,6 +88,14 @@ class FakeHtmlAudio {
   mozPreservesPitch = false
   webkitPreservesPitch = false
   paused = true
+  loop = false
+  muted = false
+  ended = false
+  error: MediaError | null = null
+  readyState = 4
+  playsInline = false
+  controls = false
+  disableRemotePlayback = false
   onended: (() => void) | null = null
   onerror: (() => void) | null = null
   preload = 'auto'
@@ -99,6 +107,8 @@ class FakeHtmlAudio {
   })
   readonly load = vi.fn()
   readonly removeAttribute = vi.fn()
+  readonly setAttribute = vi.fn()
+  readonly addEventListener = vi.fn()
 }
 
 describe('AudioClock', () => {
@@ -215,6 +225,43 @@ describe('AudioClock', () => {
     expect(fake.preservesPitch).toBe(true)
     expect(fake.playbackRate).toBe(1.5)
     expect(fake.play).toHaveBeenCalled()
+  })
+
+  it('plays through HTMLAudio on iOS even at 1.0× and keeps caller blob URLs', async () => {
+    const fake = new FakeHtmlAudio()
+    const revoke = vi.fn()
+    vi.stubGlobal('Audio', class {
+      constructor() {
+        return fake
+      }
+    })
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:encoded'),
+      revokeObjectURL: revoke,
+    })
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.0.0 Mobile/15E148 Safari/604.1',
+      maxTouchPoints: 5,
+      platform: 'iPhone',
+      audioSession: { type: 'auto' },
+    })
+
+    const clock = new AudioClock()
+    clock.unlock()
+    expect((navigator as Navigator & { audioSession: { type: string } }).audioSession.type).toBe('playback')
+    expect(fake.playsInline).toBe(true)
+    expect(fake.play).toHaveBeenCalled()
+
+    const unit = clock.append(audioBuffer(0.5), { chunkIndex: 0, objectUrl: 'blob:live-chunk' })
+    expect(unit).not.toBeNull()
+    await Promise.resolve()
+    expect(fake.src).toBe('blob:live-chunk')
+    expect(fake.load).not.toHaveBeenCalled()
+    expect(contexts[0]?.sources.length ?? 0).toBe(0)
+
+    clock.stop()
+    expect(revoke).not.toHaveBeenCalledWith('blob:live-chunk')
+    clock.close()
   })
 })
 

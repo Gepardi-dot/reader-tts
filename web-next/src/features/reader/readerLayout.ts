@@ -21,8 +21,13 @@ export function normalizeReaderLayout(value: unknown): ReaderLayout {
 
 export type ReaderScrollerStyle = {
   overflowX: 'hidden'
-  overflowY: 'hidden' | 'auto'
+  overflowY: 'hidden' | 'auto' | 'visible'
   touchAction: 'none' | 'pan-y'
+}
+
+/** Continuous reads on the document so iOS Safari/Chrome can collapse their chrome. */
+export function readerUsesWindowScroll(layout: ReaderLayout) {
+  return layout !== 'paginated'
 }
 
 /** Axis-specific overflow so a sheet lock cannot leave `overflow: hidden` stuck. */
@@ -30,7 +35,7 @@ export function readerScrollerStyle(layout: ReaderLayout): ReaderScrollerStyle {
   const paginated = layout === 'paginated'
   return {
     overflowX: 'hidden',
-    overflowY: paginated ? 'hidden' : 'auto',
+    overflowY: paginated ? 'hidden' : 'visible',
     touchAction: paginated ? 'none' : 'pan-y',
   }
 }

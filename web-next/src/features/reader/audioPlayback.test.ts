@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  SILENT_WAV_DATA_URL,
   BROWSER_TTS_PROVIDER_ID,
   CHUNK_CHARS,
   FIRST_AUDIO_CHARS,
@@ -28,6 +29,13 @@ import {
   spokenOffsetAtTime,
 } from './audioPlayback'
 import { pageIndexForOffset } from './readerLayout'
+
+describe('silent wav unlock clip', () => {
+  it('is a playable wav data URL', () => {
+    expect(SILENT_WAV_DATA_URL.startsWith('data:audio/wav;base64,')).toBe(true)
+    expect(SILENT_WAV_DATA_URL.length).toBeGreaterThan(80)
+  })
+})
 
 describe('audio playback chunking', () => {
   it('builds absolute-offset chunks and prefers sentence boundaries', () => {

@@ -104,6 +104,9 @@ const KOKORO_DEFAULT_VOICE = 'af_sky'
 const LIVE_AUDIO_CACHE_VERSION = 2
 const EDGE_AUDIO_CACHE_SECONDS = 7 * 24 * 60 * 60
 const R2_AUDIO_CACHE_PREFIX = `live-audio/v${LIVE_AUDIO_CACHE_VERSION}`
+const AUDIO_FILE_PATH_PREFIX = '/api/audio/files/'
+const liveAudioFileMemory = new Map<string, { wav: Uint8Array; duration: number | null; expiresAt: number }>()
+const LIVE_AUDIO_FILE_MEMORY_MS = 10 * 60_000
 const R2_COVER_PREFIX = 'book-covers'
 const MAX_COVER_STORE_BYTES = 400_000
 const MAX_COVER_FETCH_BYTES = 2_500_000
@@ -265,6 +268,9 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   if (path === '/api/covers/image' && request.method === 'GET') return proxyBookCover(url)
 
   if (path === '/api/providers/test' && request.method === 'POST') return testProvider(request, env, ctx)
+  if (path.startsWith(AUDIO_FILE_PATH_PREFIX) && request.method === 'GET') {
+    return serveCachedAudioFile(env, decodeURIComponent(path.slice(AUDIO_FILE_PATH_PREFIX.length)))
+  }
   if (path === '/api/telemetry/tts-summary' && request.method === 'GET') return ttsTelemetrySummary(env, user)
   if (path === '/api/telemetry' && request.method === 'POST') return recordTelemetry(request, env, user)
   if (path === '/api/stats/active-users' && request.method === 'GET') return activeUsersStat(env)
@@ -376,6 +382,19 @@ function withCors(response: Response, request: Request, env: Env) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 
+function isPrivateLanHostname(hostname: string) {
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return true
+  const parts = hostname.split('.').map((part) => Number(part))
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false
+  }
+  const [a, b] = parts as [number, number, number, number]
+  if (a === 10) return true
+  if (a === 192 && b === 168) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  return false
+}
+
 function isAllowedBrowserOrigin(origin: string, allowed: Set<string>) {
   if (allowed.has(origin)) return true
   try {
@@ -385,10 +404,11 @@ function isAllowedBrowserOrigin(origin: string, allowed: Set<string>) {
     if (hostname === 'readertts.vercel.app' || hostname.endsWith('.vercel.app')) return true
     // Custom production domain (Vercel static → Worker API).
     if (hostname === 'higgsread.com' || hostname === 'www.higgsread.com') return true
-    // Local Vite dev servers on common ports.
+    // Local Vite (this PC or a phone hitting the LAN IP).
+    const port = new URL(origin).port || (protocol === 'https:' ? '443' : '80')
     if (
-      (hostname === 'localhost' || hostname === '127.0.0.1')
-      && ['5173', '5174', '5175', '4173'].includes(new URL(origin).port || '80')
+      ['5173', '5174', '5175', '4173'].includes(port)
+      && (hostname === 'localhost' || hostname === '127.0.0.1' || isPrivateLanHostname(hostname))
     ) {
       return true
     }
@@ -1503,6 +1523,39 @@ function r2AudioCacheKey(cacheDigest: string) {
   return `${R2_AUDIO_CACHE_PREFIX}/${cacheDigest}.wav`
 }
 
+function liveAudioFileUrl(cacheDigest: string) {
+  return `${AUDIO_FILE_PATH_PREFIX}${encodeURIComponent(cacheDigest)}`
+}
+
+function rememberLiveAudioFile(cacheDigest: string, wav: Uint8Array, duration: number | null) {
+  liveAudioFileMemory.set(cacheDigest, {
+    wav,
+    duration,
+    expiresAt: Date.now() + LIVE_AUDIO_FILE_MEMORY_MS,
+  })
+}
+
+function liveAudioPayloadFromFile(
+  cacheDigest: string,
+  options: {
+    duration: number | null
+    byteLength?: number | null
+    cacheStorage?: string
+  },
+): Record<string, JsonValue> {
+  return {
+    url: liveAudioFileUrl(cacheDigest),
+    duration: options.duration,
+    cues: [],
+    cacheKey: `live-audio:v${LIVE_AUDIO_CACHE_VERSION}:${cacheDigest}`,
+    cacheVersion: LIVE_AUDIO_CACHE_VERSION,
+    contentType: 'audio/wav',
+    byteLength: options.byteLength ?? null,
+    cacheHit: false,
+    cacheStorage: options.cacheStorage ?? 'generated',
+  }
+}
+
 function liveAudioPayloadFromWav(
   cacheDigest: string,
   wav: Uint8Array,
@@ -1511,17 +1564,38 @@ function liveAudioPayloadFromWav(
     cacheStorage?: string
   },
 ): Record<string, JsonValue> {
-  return {
-    url: `data:audio/wav;base64,${bytesToBase64(wav)}`,
+  rememberLiveAudioFile(cacheDigest, wav, options.duration)
+  return liveAudioPayloadFromFile(cacheDigest, {
     duration: options.duration,
-    cues: [],
-    cacheKey: `live-audio:v${LIVE_AUDIO_CACHE_VERSION}:${cacheDigest}`,
-    cacheVersion: LIVE_AUDIO_CACHE_VERSION,
-    contentType: 'audio/wav',
     byteLength: wav.byteLength,
-    cacheHit: false,
     cacheStorage: options.cacheStorage ?? 'generated',
+  })
+}
+
+async function serveCachedAudioFile(env: Env, cacheDigest: string) {
+  const digest = cacheDigest.trim()
+  if (!digest || digest.length > 128) throw new ApiError(404, 'Audio not found.')
+  const memory = liveAudioFileMemory.get(digest)
+  if (memory && memory.expiresAt > Date.now()) {
+    return new Response(memory.wav, {
+      headers: {
+        'Content-Type': 'audio/wav',
+        'Cache-Control': 'private, max-age=3600',
+      },
+    })
   }
+  if (memory) liveAudioFileMemory.delete(digest)
+  if (!env.AUDIO_CACHE) throw new ApiError(404, 'Audio not found.')
+  const object = await env.AUDIO_CACHE.get(r2AudioCacheKey(digest))
+  if (!object) throw new ApiError(404, 'Audio not found.')
+  const wav = new Uint8Array(await object.arrayBuffer())
+  rememberLiveAudioFile(digest, wav, object.customMetadata?.duration ? Number(object.customMetadata.duration) : null)
+  return new Response(wav, {
+    headers: {
+      'Content-Type': object.customMetadata?.contentType || 'audio/wav',
+      'Cache-Control': 'private, max-age=3600',
+    },
+  })
 }
 
 async function readR2AudioCache(env: Env, cacheDigest: string): Promise<Record<string, JsonValue> | null> {
@@ -1529,22 +1603,28 @@ async function readR2AudioCache(env: Env, cacheDigest: string): Promise<Record<s
   try {
     const object = await env.AUDIO_CACHE.get(r2AudioCacheKey(cacheDigest))
     if (!object) return null
-    const wav = new Uint8Array(await object.arrayBuffer())
     const durationRaw = object.customMetadata?.duration
     const duration = durationRaw && Number.isFinite(Number(durationRaw))
       ? Number(durationRaw)
       : null
-    return liveAudioPayloadFromWav(cacheDigest, wav, {
-      duration,
-      cacheStorage: 'r2',
-    })
+    const byteLengthRaw = object.customMetadata?.byteLength
+    const byteLength = byteLengthRaw && Number.isFinite(Number(byteLengthRaw))
+      ? Number(byteLengthRaw)
+      : object.size
+    return {
+      ...liveAudioPayloadFromFile(cacheDigest, {
+        duration,
+        byteLength,
+        cacheStorage: 'r2',
+      }),
+      cacheHit: true,
+    }
   } catch {
     return null
   }
 }
 
-function writeR2AudioCache(
-  ctx: ExecutionContext,
+async function persistR2AudioCache(
   env: Env,
   cacheDigest: string,
   result: { duration: number; wav: Uint8Array },
@@ -1556,17 +1636,22 @@ function writeR2AudioCache(
     contentType: 'audio/wav',
     byteLength: String(result.wav.byteLength),
   }
-  ctx.waitUntil(
-    env.AUDIO_CACHE
-      .put(r2AudioCacheKey(cacheDigest), result.wav, {
-        httpMetadata: {
-          contentType: 'audio/wav',
-          cacheControl: `public, max-age=${EDGE_AUDIO_CACHE_SECONDS}`,
-        },
-        customMetadata: metadata,
-      })
-      .catch(() => undefined),
-  )
+  await env.AUDIO_CACHE.put(r2AudioCacheKey(cacheDigest), result.wav, {
+    httpMetadata: {
+      contentType: 'audio/wav',
+      cacheControl: `public, max-age=${EDGE_AUDIO_CACHE_SECONDS}`,
+    },
+    customMetadata: metadata,
+  })
+}
+
+function writeR2AudioCache(
+  ctx: ExecutionContext,
+  env: Env,
+  cacheDigest: string,
+  result: { duration: number; wav: Uint8Array },
+) {
+  ctx.waitUntil(persistR2AudioCache(env, cacheDigest, result).catch(() => undefined))
 }
 
 async function geminiLiveAudioCacheDigest(input: {
@@ -1829,14 +1914,20 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
       lengthScale: safeLengthScale,
     })
 
+  rememberLiveAudioFile(cacheDigest, result.wav, result.duration)
   const payload = {
-    ...liveAudioPayloadFromWav(cacheDigest, result.wav, {
+    ...liveAudioPayloadFromFile(cacheDigest, {
       duration: result.duration,
+      byteLength: result.wav.byteLength,
       cacheStorage: 'generated',
     }),
     cacheKey,
   }
-  writeR2AudioCache(ctx, env, cacheDigest, result)
+  try {
+    await persistR2AudioCache(env, cacheDigest, result)
+  } catch {
+    writeR2AudioCache(ctx, env, cacheDigest, result)
+  }
   writeEdgeAudioCache(ctx, cacheDigest, payload)
   return json(payload)
 }

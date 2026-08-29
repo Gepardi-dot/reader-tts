@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Pause, Play, SkipBack, SkipForward } from 'lucide-react'
+import { Pause, Play, SkipBack, SkipForward, Volume2 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { armHtmlMediaElement } from '@/lib/browser'
 import { api, request } from '@/shared/api/client'
 import type { RollingCacheState } from '@/shared/storage/rollingVoiceCache'
 import { queuePerformanceTelemetry } from '@/shared/telemetry/performanceTelemetry'
@@ -30,6 +31,42 @@ import {
   type AudioPhase,
   type PreviewAudioChunk as AudioChunk,
 } from './tts-engine/types'
+
+function unlockPreviewAudio(existing: HTMLAudioElement | null): HTMLAudioElement {
+  const audio = existing ?? new Audio()
+  armHtmlMediaElement(audio)
+  audio.preservesPitch = true
+  // Silent samples, not muted — iOS does not treat a muted play() as unlocking later unmuted playback.
+  audio.muted = false
+  audio.loop = false
+  audio.src = SILENT_WAV_DATA_URL
+  const playPromise = audio.play()
+  if (playPromise && typeof playPromise.then === 'function') {
+    playPromise.catch(() => undefined)
+  }
+  return audio
+}
+
+function attachPreviewUrl(audio: HTMLAudioElement, url: string, rate: number) {
+  audio.src = url
+  audio.muted = false
+  audio.preservesPitch = true
+  audio.playbackRate = rate
+}
+
+function bindPreviewPlayback(
+  audio: HTMLAudioElement,
+  handlers: {
+    onEnded: () => void
+    onError: () => void
+    onBlocked: () => void
+  },
+) {
+  audio.onended = handlers.onEnded
+  audio.onerror = handlers.onError
+  audio.play().catch(handlers.onBlocked)
+}
+
 export interface AudioPreviewColors {
   bg: string
   text: string
@@ -78,6 +115,10 @@ export function AudioPreviewPanel({
   const audioObjectUrlsRef = useRef<Set<string>>(new Set())
   const chunkFetchesRef = useRef<Map<number, Promise<string | null>>>(new Map())
   const primedAudioRef = useRef<HTMLAudioElement | null>(null)
+  const previewTargetRef = useRef<{ provider: string; voice: string | null }>({
+    provider,
+    voice,
+  })
   rateRef.current = rate
   chunksRef.current = chunks
 
@@ -119,9 +160,13 @@ export function AudioPreviewPanel({
       ?? providerOptions[0]?.id
       ?? 'kokoro')
   const activeProvider = providerOptions.find(p => p.id === resolvedDraftProvider)
-  const providerVoices = activeProvider?.voices ?? []
+  const catalogVoices = activeProvider?.voices ?? []
+  const providerVoices = catalogVoices
   const selectedProviderUnavailable = Boolean(providersRes?.providers?.length && (!activeProvider || !activeProvider.available))
-  const draftVoiceMatchesProvider = Boolean(draftVoice && providerVoices.some((item) => item.id === draftVoice))
+  const draftVoiceMatchesProvider = Boolean(
+    draftVoice
+    && providerVoices.some((item) => item.id === draftVoice),
+  )
   // When we silently remapped the provider, use that provider's default voice until the user picks one.
   const selectedVoiceId = draftProviderKnown && draftVoiceMatchesProvider
     ? draftVoice
@@ -177,13 +222,15 @@ export function AudioPreviewPanel({
     updateChunk(idx, { status: 'fetching' })
     const fetchPromise = (async () => {
       try {
-        const { lengthScale, sentenceSilence } = pacingFor(resolvedDraftProvider)
+        const playProvider = previewTargetRef.current.provider
+        const playVoice = previewTargetRef.current.voice
+        const { lengthScale, sentenceSilence } = pacingFor(playProvider)
         const previewLengthScale = Math.max(0.6, Math.min(lengthScale * rateRef.current, 1.5))
         const preview = await request<ProviderTestResult>('/api/providers/test', {
           method: 'POST',
           body: JSON.stringify({
-            provider: resolvedDraftProvider,
-            voice: selectedVoiceId,
+            provider: playProvider,
+            voice: playVoice,
             model: null,
             narration_style: '',
             length_scale: previewLengthScale,
@@ -220,7 +267,7 @@ export function AudioPreviewPanel({
 
   function prefetchAhead(fromIdx: number, currentChunks: AudioChunk[], signal: AbortSignal) {
     if (signal.aborted) return
-    const target = PREFETCH_AHEAD_TARGET[resolvedDraftProvider] ?? DEFAULT_PREFETCH_AHEAD
+    const target = PREFETCH_AHEAD_TARGET[previewTargetRef.current.provider] ?? DEFAULT_PREFETCH_AHEAD
     for (let offset = 1; offset <= target; offset += 1) {
       const idx = fromIdx + offset
       const chunk = currentChunks[idx]
@@ -259,20 +306,9 @@ export function AudioPreviewPanel({
   }
 
   function primeAudioElement(): HTMLAudioElement {
-    let audio = audioRef.current
-    if (!audio) {
-      audio = new Audio()
-      audio.preservesPitch = true
-      audioRef.current = audio
-    }
-    audio.muted = true
-    audio.loop = false
-    audio.src = SILENT_WAV_DATA_URL
+    const audio = unlockPreviewAudio(audioRef.current)
+    audioRef.current = audio
     primedAudioRef.current = audio
-    const playPromise = audio.play()
-    if (playPromise && typeof playPromise.then === 'function') {
-      playPromise.catch(() => undefined)
-    }
     return audio
   }
 
@@ -283,36 +319,36 @@ export function AudioPreviewPanel({
     const audio = audioRef.current ?? new Audio()
     const wasPrimedForThisTap = primedAudioRef.current === audio
     if (!wasPrimedForThisTap) audio.pause()
-    audio.src = c.url
-    audio.muted = false
-    audio.preservesPitch = true
-    audio.playbackRate = rateRef.current
+    attachPreviewUrl(audio, c.url, rateRef.current)
     audioRef.current = audio
     primedAudioRef.current = null
     setPhase('playing')
     setCurIdx(idx)
     curIdxRef.current = idx
     setErrorMsg(null)
-    audio.play().catch(() => {
-      if (ctrl.signal.aborted) return
-      setPhase('paused')
-      setErrorMsg('Audio is ready. Tap play again to start playback.')
-    })
-
     prefetchAhead(idx, currentChunks, ctrl.signal)
-
-    audio.onended = () => {
-      if (ctrl.signal.aborted) return
-      void continuePlayback(idx + 1, ctrl)
-    }
-    audio.onerror = () => {
-      if (ctrl.signal.aborted) return
-      setErrorMsg('Audio playback failed. Try starting it again.')
-      setPhase('idle')
-    }
+    bindPreviewPlayback(audio, {
+      onEnded: () => {
+        if (ctrl.signal.aborted) return
+        void continuePlayback(idx + 1, ctrl)
+      },
+      onError: () => {
+        if (ctrl.signal.aborted) return
+        setErrorMsg('Audio playback failed. Try starting it again.')
+        setPhase('idle')
+      },
+      onBlocked: () => {
+        if (ctrl.signal.aborted) return
+        setPhase('paused')
+        setErrorMsg('Audio is ready. Tap play again to start playback.')
+      },
+    })
   }
 
-  async function startPlayback() {
+  async function startPlayback(
+    playProvider = resolvedDraftProvider,
+    playVoice = selectedVoiceId,
+  ) {
     abortRef.current?.abort()
     const primedAudio = primedAudioRef.current
     if (audioRef.current && audioRef.current !== primedAudio) {
@@ -322,16 +358,18 @@ export function AudioPreviewPanel({
     chunkFetchesRef.current.clear()
     const ctrl = new AbortController()
     abortRef.current = ctrl
+    previewTargetRef.current = { provider: playProvider, voice: playVoice }
     setErrorMsg(null)
 
-    if (selectedProviderUnavailable) {
-      const message = `${activeProvider?.label ?? resolvedDraftProvider} is not configured yet. Choose an available provider.`
+    const playProviderInfo = providerOptions.find((item) => item.id === playProvider)
+    if (playProviderInfo && !playProviderInfo.available) {
+      const message = `${playProviderInfo.label} is not configured yet. Choose an available provider.`
       setErrorMsg(message)
       onError?.(message)
       return
     }
 
-    if (!selectedVoiceId) {
+    if (!playVoice) {
       setErrorMsg('Choose a voice to preview.')
       return
     }
@@ -378,17 +416,59 @@ export function AudioPreviewPanel({
           setErrorMsg('Playback was blocked by the browser. Tap play again.')
           setPhase('paused')
         })
+    } else if (phase === 'buffering') {
+      stopPlayback()
     } else if (phase === 'idle') {
       primeAudioElement()
       void startPlayback()
     }
   }
 
+  function previewSelection(nextProvider: string, nextVoice: string | null, source: string) {
+    stopPlayback()
+    setErrorMsg(null)
+    setDraftProvider(nextProvider)
+    setDraftVoice(nextVoice)
+    if (!nextVoice) return
+    queuePerformanceTelemetry({
+      eventName: 'tts.voice_draft_changed',
+      provider: nextProvider,
+      metadata: {
+        source,
+        voice: nextVoice,
+      },
+    })
+    const nextInfo = providerOptions.find((item) => item.id === nextProvider)
+    if (nextInfo && !nextInfo.available) {
+      const message = `${nextInfo.label} is not configured yet. Choose an available provider.`
+      setErrorMsg(message)
+      onError?.(message)
+      return
+    }
+    primeAudioElement()
+    void startPlayback(nextProvider, nextVoice)
+  }
+
+  function previewVoice(nextVoice: string, source: string) {
+    if (!nextVoice) return
+    previewSelection(resolvedDraftProvider, nextVoice, source)
+  }
+
   const isIdle = phase === 'idle'
   const isBuffering = phase === 'buffering'
   const isPlaying = phase === 'playing'
   const isPaused = phase === 'paused'
-  const playDisabled = isBuffering || selectedProviderUnavailable || !selectedVoiceId
+  const playDisabled = selectedProviderUnavailable || !selectedVoiceId
+  const selectedVoiceLabel = providerVoices.find((item) => item.id === selectedVoiceId)?.label
+    ?? selectedVoiceId
+    ?? 'voice'
+  const playStatusLabel = isBuffering
+    ? `Generating ${selectedVoiceLabel}`
+    : isPlaying
+      ? `Playing ${selectedVoiceLabel}`
+      : isPaused
+        ? `Resume ${selectedVoiceLabel}`
+        : `Play ${selectedVoiceLabel}`
 
   const totalChunks = chunks.length
   const readyChunks = chunks.filter(c => c.status === 'ready').length
@@ -404,17 +484,7 @@ export function AudioPreviewPanel({
     if (providerVoices.length < 2) return
     const baseIndex = selectedVoiceIndex >= 0 ? selectedVoiceIndex : 0
     const nextIndex = (baseIndex + direction + providerVoices.length) % providerVoices.length
-    stopPlayback()
-    setErrorMsg(null)
-    setDraftVoice(providerVoices[nextIndex].id)
-    queuePerformanceTelemetry({
-      eventName: 'tts.voice_draft_changed',
-      provider: resolvedDraftProvider,
-      metadata: {
-        source: direction > 0 ? 'next' : 'previous',
-        voice: providerVoices[nextIndex].id,
-      },
-    })
+    previewVoice(providerVoices[nextIndex].id, direction > 0 ? 'next' : 'previous')
   }
 
   return (
@@ -423,19 +493,8 @@ export function AudioPreviewPanel({
         <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40 mb-1">Provider</p>
         <Select value={resolvedDraftProvider} onValueChange={(v) => {
           if (v == null) return
-          stopPlayback()
-          setErrorMsg(null)
           const nextProvider = providerOptions.find(p => p.id === v)
-          setDraftProvider(v)
-          setDraftVoice(defaultVoiceForProvider(nextProvider))
-          queuePerformanceTelemetry({
-            eventName: 'tts.voice_draft_changed',
-            provider: v,
-            metadata: {
-              source: 'provider_select',
-              voice: defaultVoiceForProvider(nextProvider) ?? '',
-            },
-          })
+          previewSelection(v, defaultVoiceForProvider(nextProvider), 'provider_select')
         }}>
           <SelectTrigger className="w-full h-9 text-sm">
             <SelectValue>
@@ -459,27 +518,109 @@ export function AudioPreviewPanel({
             value={selectedVoiceId ?? (providerVoices[0]?.id ?? '')}
             onValueChange={(v) => {
               if (v == null) return
-              stopPlayback()
-              setErrorMsg(null)
-              setDraftVoice(v)
-              queuePerformanceTelemetry({
-                eventName: 'tts.voice_draft_changed',
-                provider: resolvedDraftProvider,
-                metadata: {
-                  source: 'voice_select',
-                  voice: v,
-                },
-              })
+              previewVoice(v, 'voice_select')
             }}
           >
-            <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-full h-9 text-sm">
+              <SelectValue>{selectedVoiceLabel}</SelectValue>
+            </SelectTrigger>
             <SelectContent alignItemWithTrigger={false} side="top">
-              {providerVoices.map((v) => (
-                <SelectItem key={v.id} value={v.id}>{v.label}</SelectItem>
-              ))}
+              {providerVoices.map((v) => {
+                const isCurrent = v.id === selectedVoiceId
+                return (
+                  <SelectItem key={v.id} value={v.id}>
+                    <span className="flex w-full min-w-0 items-center justify-between gap-3">
+                      <span className="truncate">{v.label}</span>
+                      <Volume2
+                        size={14}
+                        className={isCurrent && (isPlaying || isBuffering) ? 'opacity-90' : 'opacity-35'}
+                      />
+                    </span>
+                  </SelectItem>
+                )
+              })}
             </SelectContent>
           </Select>
 
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => cycleVoice(-1)}
+              disabled={providerVoices.length < 2}
+              className="h-10 w-10 shrink-0 rounded-full flex items-center justify-center opacity-35 hover:opacity-70 transition-opacity disabled:opacity-15"
+              aria-label="Previous voice"
+            >
+              <SkipBack size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={togglePlay}
+              disabled={playDisabled}
+              className="flex-1 h-10 rounded-full bg-primary text-white flex items-center justify-center gap-2 text-[13px] font-medium shadow-sm active:scale-[0.98] transition-transform disabled:opacity-50"
+              aria-label={
+                isBuffering
+                  ? 'Cancel voice sample'
+                  : isPlaying
+                    ? 'Pause voice sample'
+                    : 'Play voice sample'
+              }
+            >
+              {isBuffering
+                ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                : (isPlaying
+                    ? <Pause size={16} />
+                    : <Play size={16} fill="currentColor" />
+                  )}
+              <span className="truncate max-w-[11rem]">{playStatusLabel}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => cycleVoice(1)}
+              disabled={providerVoices.length < 2}
+              className="h-10 w-10 shrink-0 rounded-full flex items-center justify-center opacity-35 hover:opacity-70 transition-opacity disabled:opacity-15"
+              aria-label="Next voice"
+            >
+              <SkipForward size={16} />
+            </button>
+          </div>
+          <p className="mt-1.5 text-[11px] leading-4 opacity-40">
+            A sample plays as soon as you pick a voice.
+          </p>
+        </div>
+      )}
+
+      <div
+        className="rounded-xl border px-3 py-2 space-y-1"
+        style={{
+          borderColor: isPlaying || isBuffering ? `${colors.text}28` : `${colors.text}12`,
+          background: `${colors.text}05`,
+        }}
+      >
+        <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40">
+          {isPlaying || isBuffering ? `Sample · ${selectedVoiceLabel}` : 'Voice Sample'}
+        </p>
+        <p className="text-[12.5px] leading-5 opacity-70 italic line-clamp-3">
+          "{sampleText}"
+        </p>
+      </div>
+
+      {showProgress && (
+        <div className="space-y-1.5">
+          <div className="h-1 rounded-full overflow-hidden" style={{ background: `${colors.text}15` }}>
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${Math.round((readyChunks / totalChunks) * 100)}%`,
+                background: colors.text,
+                opacity: 0.35,
+              }}
+            />
+          </div>
+          <p className="text-[10px] opacity-35 text-center tabular-nums">
+            {isPlaying || isPaused
+              ? `Part ${curIdx + 1} of ${totalChunks}`
+              : bufferLabel}
+          </p>
         </div>
       )}
 
@@ -524,70 +665,11 @@ export function AudioPreviewPanel({
           }} />
       </div>
 
-      <div className="rounded-xl border px-3 py-2 space-y-1" style={{ borderColor: `${colors.text}12`, background: `${colors.text}05` }}>
-        <p className="text-[10px] font-semibold uppercase tracking-widest opacity-40">Voice Sample</p>
-        <p className="text-[12.5px] leading-5 opacity-70 italic line-clamp-3">
-          "{sampleText}"
-        </p>
-      </div>
-
-      {showProgress && (
-        <div className="space-y-1.5">
-          <div className="h-1 rounded-full overflow-hidden" style={{ background: `${colors.text}15` }}>
-            <div
-              className="h-full rounded-full transition-all duration-500"
-              style={{
-                width: `${Math.round((readyChunks / totalChunks) * 100)}%`,
-                background: colors.text,
-                opacity: 0.35,
-              }}
-            />
-          </div>
-          <p className="text-[10px] opacity-35 text-center tabular-nums">
-            {isPlaying || isPaused
-              ? `Part ${curIdx + 1} of ${totalChunks}`
-              : bufferLabel}
-          </p>
-        </div>
-      )}
-
-      {isBuffering && !showProgress && (
-        <p className="text-xs text-center opacity-40">{bufferLabel}</p>
-      )}
-
       {errorMsg && (
         <p className="rounded-xl border px-3 py-2 text-xs leading-relaxed" style={{ borderColor: `${colors.text}18`, background: `${colors.text}08`, color: colors.text }}>
           {errorMsg}
         </p>
       )}
-
-      <div className="flex items-center justify-center gap-6 py-1 pb-2">
-        <button
-          onClick={() => cycleVoice(-1)}
-          disabled={providerVoices.length < 2 || isBuffering}
-          className="p-1.5 opacity-30 hover:opacity-60 transition-opacity disabled:opacity-15"
-          aria-label="Previous voice"
-        ><SkipBack size={18} /></button>
-        <button
-          onClick={togglePlay}
-          disabled={playDisabled}
-          className="w-12 h-12 rounded-full bg-primary text-white flex items-center justify-center shadow-lg active:scale-95 transition-transform disabled:opacity-50"
-          aria-label={isPlaying ? 'Pause voice sample' : 'Play voice sample'}
-        >
-          {isBuffering
-            ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            : (isPlaying
-                ? <Pause size={20} />
-                : <Play size={20} fill="currentColor" />
-              )}
-        </button>
-        <button
-          onClick={() => cycleVoice(1)}
-          disabled={providerVoices.length < 2 || isBuffering}
-          className="p-1.5 opacity-30 hover:opacity-60 transition-opacity disabled:opacity-15"
-          aria-label="Next voice"
-        ><SkipForward size={18} /></button>
-      </div>
     </div>
   )
 }

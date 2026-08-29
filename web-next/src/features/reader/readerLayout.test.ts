@@ -18,6 +18,7 @@ import {
   pageTopFromInnerScroll,
   paginatedTextViewHeight,
   readerScrollerStyle,
+  readerUsesWindowScroll,
   snapPageToLines,
   resolveLayoutSwitchOffset,
   scrollDeltaToPinRect,
@@ -38,11 +39,18 @@ describe('normalizeReaderLayout', () => {
   })
 })
 
+describe('readerUsesWindowScroll', () => {
+  it('uses the document for continuous so iOS can hide browser chrome', () => {
+    expect(readerUsesWindowScroll('continuous')).toBe(true)
+    expect(readerUsesWindowScroll('paginated')).toBe(false)
+  })
+})
+
 describe('readerScrollerStyle', () => {
-  it('keeps continuous vertically scrollable', () => {
+  it('lets continuous grow with the document instead of an inner scrollport', () => {
     expect(readerScrollerStyle('continuous')).toEqual({
       overflowX: 'hidden',
-      overflowY: 'auto',
+      overflowY: 'visible',
       touchAction: 'pan-y',
     })
   })
@@ -66,7 +74,7 @@ describe('readerScrollerStyle', () => {
     }
     applyReaderScrollerStyle(el, 'continuous')
     expect(el.style.overflow).toBe('')
-    expect(el.style.overflowY).toBe('auto')
+    expect(el.style.overflowY).toBe('visible')
     expect(el.style.overflowX).toBe('hidden')
     expect(el.style.touchAction).toBe('pan-y')
   })

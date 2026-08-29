@@ -58,6 +58,52 @@ export function isAndroidDevice(
   return /android/i.test(userAgent)
 }
 
+/** iOS Chrome / Firefox / Edge — Share lives in the top address bar, not Safari's bottom toolbar. */
+export function isIosChromeLike(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+  maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints,
+  platform = typeof navigator === 'undefined' ? '' : navigator.platform,
+) {
+  if (!isIosDevice(userAgent, maxTouchPoints, platform)) return false
+  return /crios|fxios|edgios/i.test(userAgent)
+}
+
+export function iosSharePlacement(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+  maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints,
+  platform = typeof navigator === 'undefined' ? '' : navigator.platform,
+): 'top' | 'bottom' {
+  return isIosChromeLike(userAgent, maxTouchPoints, platform) ? 'top' : 'bottom'
+}
+
+export function canShareIosHomeScreen(
+  nav: { share?: Navigator['share'] } | null | undefined = typeof navigator === 'undefined'
+    ? undefined
+    : navigator,
+): boolean {
+  return typeof nav?.share === 'function'
+}
+
+export async function shareIosAddToHomeScreen(
+  nav: { share?: Navigator['share'] } | null | undefined = typeof navigator === 'undefined'
+    ? undefined
+    : navigator,
+  homeUrl = typeof window === 'undefined' ? 'https://higgsread.com/' : new URL('/', window.location.href).href,
+): Promise<'shared' | 'aborted' | 'unavailable'> {
+  if (typeof nav?.share !== 'function') return 'unavailable'
+  try {
+    await nav.share({
+      title: 'HiggsRead',
+      text: 'Add HiggsRead to your Home Screen for full-screen reading.',
+      url: homeUrl,
+    })
+    return 'shared'
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') return 'aborted'
+    return 'unavailable'
+  }
+}
+
 export function adoptCapturedInstallPrompt(): BeforeInstallPromptEvent | null {
   if (typeof window === 'undefined') return deferredPrompt
   const captured = window.__higgsPwa?.promptEvent
@@ -239,14 +285,19 @@ export function shouldShowInstallHint(options?: {
   dismissed?: boolean
   usageEligible?: boolean
   pathname?: string
+  ios?: boolean
 }): boolean {
   const standalone = options?.standalone ?? isStandaloneDisplay()
   const dismissed = options?.dismissed ?? isInstallDismissed()
   const usageEligible = options?.usageEligible ?? isUsageEligible()
+  const ios = options?.ios ?? isIosDevice()
   const pathname =
     options?.pathname ?? (typeof window === 'undefined' ? '' : window.location.pathname)
-  if (standalone || dismissed || !usageEligible) return false
-  return shouldCountInstallUsage(pathname)
+  if (standalone || dismissed) return false
+  if (!shouldCountInstallUsage(pathname)) return false
+  // iOS has no install prompt — show the Share → Add to Home Screen coach immediately.
+  if (ios) return true
+  return usageEligible
 }
 
 export function shouldDeferSwReload(pathname: string): boolean {
@@ -268,7 +319,8 @@ export function getDeferredInstallPrompt(): BeforeInstallPromptEvent | null {
   return adoptCapturedInstallPrompt()
 }
 
-export function installCtaLabel(_surface?: InstallSurface): string {
+export function installCtaLabel(surface?: InstallSurface): string {
+  if (surface === 'ios') return 'Open Share menu'
   return 'Install as app'
 }
 

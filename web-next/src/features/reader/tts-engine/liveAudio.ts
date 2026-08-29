@@ -262,12 +262,16 @@ function isCacheableLiveAudio(result: LiveAudioResult): result is LiveAudioResul
   return Boolean(result.cacheKey && typeof result.cacheVersion === 'number')
 }
 
+function isAuthenticatedAudioPath(pathname: string) {
+  return pathname.startsWith('/library/') || pathname.startsWith('/api/audio/files/')
+}
+
 function needsAuthenticatedAudioFetch(url: string) {
-  if (url.startsWith('/library/')) return true
+  if (isAuthenticatedAudioPath(url)) return true
   try {
     const parsed = new URL(url, window.location.href)
     const localApiHost = ['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(parsed.hostname)
-    return parsed.pathname.startsWith('/library/') && (parsed.origin === window.location.origin || localApiHost)
+    return isAuthenticatedAudioPath(parsed.pathname) && (parsed.origin === window.location.origin || localApiHost)
   } catch {
     return false
   }
