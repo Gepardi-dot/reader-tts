@@ -119,6 +119,12 @@ import {
   shouldCommitPageTurn,
   shouldTrackPageTurnPointer,
 } from './pageTurn'
+import {
+  READER_TAP_SLOP_PX,
+  READER_TAP_SUPPRESS_MS,
+  isReaderScrollGesture,
+  isReaderTap,
+} from './readerTap'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -2667,6 +2673,7 @@ export function ReaderRoute() {
   const scrollTimer           = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveTimer             = useRef<ReturnType<typeof setTimeout> | null>(null)
   const justShowedMenu        = useRef(false)
+  const suppressTapUntilRef   = useRef(0)
   const scrolledToOffsetRef   = useRef(false)
   const activeAudioCueKeyRef    = useRef<string | null>(null)
   const activeAudioCueRangeRef  = useRef<{ start: number; end: number } | null>(null)
@@ -2718,8 +2725,9 @@ export function ReaderRoute() {
     startX: number
     startY: number
     startT: number
+    startScrollY: number
     mode: 'idle' | 'deciding' | 'selecting' | 'scrolling' | 'paging'
-  }>({ startRange: null, startX: 0, startY: 0, startT: 0, mode: 'idle' })
+  }>({ startRange: null, startX: 0, startY: 0, startT: 0, startScrollY: 0, mode: 'idle' })
   const [isDragSelecting, setIsDragSelecting] = useState(false)
   const growDragSelectionRef = useRef<(clientX: number, clientY: number) => void>(() => {})
   layoutRef.current = appearance.layout
@@ -2811,6 +2819,19 @@ export function ReaderRoute() {
     return playWordRaw(word, startOffset, reason)
   }, [playWordRaw])
   const hasReaderText = Boolean(payload?.text)
+
+  function idleReaderDrag(): typeof dragRef.current {
+    return { startRange: null, startX: 0, startY: 0, startT: 0, startScrollY: 0, mode: 'idle' }
+  }
+
+  function noteSuppressReaderTap() {
+    justShowedMenu.current = true
+    suppressTapUntilRef.current = performance.now() + READER_TAP_SUPPRESS_MS
+  }
+
+  function shouldIgnoreReaderTap() {
+    return performance.now() < suppressTapUntilRef.current
+  }
 
   function readingViewportHeight() {
     return Math.round(window.visualViewport?.height ?? window.innerHeight)
@@ -3834,6 +3855,7 @@ export function ReaderRoute() {
           startX: e.clientX,
           startY: e.clientY,
           startT: now,
+          startScrollY: window.scrollY || document.documentElement.scrollTop || 0,
           mode: 'deciding',
         }
         : {
@@ -3841,6 +3863,7 @@ export function ReaderRoute() {
           startX: e.clientX,
           startY: e.clientY,
           startT: now,
+          startScrollY: window.scrollY || document.documentElement.scrollTop || 0,
           mode: 'idle',
         }
     }
@@ -4326,6 +4349,10 @@ export function ReaderRoute() {
           setAudioFollowPaused(true)
         }
       }
+      if (!isProgrammaticFollowScroll()) {
+        noteSuppressReaderTap()
+        setSelection((current) => current ? null : current)
+      }
       const goingDown = y > lastScrollY.current && y > 60
       setBarVisible(!goingDown)
       lastScrollY.current = y
@@ -4435,6 +4462,7 @@ export function ReaderRoute() {
   // ── Event handlers ──────────────────────────────────────────────────────────
 
   const handleMouseUp = useCallback((_ev: React.MouseEvent<HTMLDivElement>) => {
+    if (shouldIgnoreReaderTap()) return
     const sel = window.getSelection()
     if (!sel || sel.rangeCount === 0) return
     try {
@@ -4471,6 +4499,11 @@ export function ReaderRoute() {
   }, [sheet, panel])
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (shouldIgnoreReaderTap()) {
+      justShowedMenu.current = false
+      e.stopPropagation()
+      return
+    }
     if (justShowedMenu.current) { justShowedMenu.current = false; e.stopPropagation(); return }
 
     if (selection) {
@@ -4512,13 +4545,13 @@ export function ReaderRoute() {
   const handleTouchStart = useCallback((ev: React.TouchEvent<HTMLDivElement>) => {
     if (layoutRef.current === 'paginated') return
     if (ev.touches.length !== 1) {
-      dragRef.current = { startRange: null, startX: 0, startY: 0, startT: 0, mode: 'idle' }
+      dragRef.current = idleReaderDrag()
       return
     }
     const t = ev.touches[0]
     const w = getWordAtPoint(t.clientX, t.clientY)
     if (!w) {
-      dragRef.current = { startRange: null, startX: 0, startY: 0, startT: 0, mode: 'idle' }
+      dragRef.current = idleReaderDrag()
       return
     }
     dragRef.current = {
@@ -4526,6 +4559,7 @@ export function ReaderRoute() {
       startX: t.clientX,
       startY: t.clientY,
       startT: performance.now(),
+      startScrollY: window.scrollY || document.documentElement.scrollTop || 0,
       mode: 'deciding',
     }
   }, [])
@@ -4535,26 +4569,18 @@ export function ReaderRoute() {
     if (r.mode === 'selecting') {
       // Selection state is already up-to-date from the last touchmove.
       // Mark so the trailing click event doesn't reset it.
-      justShowedMenu.current = true
+      noteSuppressReaderTap()
       setIsDragSelecting(false)
-    } else if (r.mode === 'scrolling') {
-      // Vertical scroll — suppress the trailing synthetic click that some browsers fire
-      justShowedMenu.current = true
-    } else if (r.mode === 'paging') {
-      // Page turn is committed by the scroller swipe handler so the
-      // finger-follow animation can settle on the same gesture.
-      justShowedMenu.current = true
+    } else if (r.mode === 'scrolling' || r.mode === 'paging') {
+      noteSuppressReaderTap()
     } else if (r.mode === 'deciding' && ev.changedTouches.length > 0) {
-      // Continuous: a moved finger that never classified is a scroll, not a tap.
-      // Paginated: the pointer tracker already treated this as a tap or a turn.
-      if (layoutRef.current !== 'paginated') {
-        const t = ev.changedTouches[0]
-        if (Math.hypot(t.clientX - r.startX, t.clientY - r.startY) > 5) {
-          justShowedMenu.current = true
-        }
-      }
+      const t = ev.changedTouches[0]
+      const dx = t.clientX - r.startX
+      const dy = t.clientY - r.startY
+      const scrolled = Math.abs((window.scrollY || document.documentElement.scrollTop || 0) - r.startScrollY) > 2
+      if (!isReaderTap(dx, dy) || scrolled) noteSuppressReaderTap()
     }
-    dragRef.current = { startRange: null, startX: 0, startY: 0, startT: 0, mode: 'idle' }
+    dragRef.current = idleReaderDrag()
   }, [])
 
   // Non-passive touchmove — required so we can preventDefault to suppress page
@@ -4578,7 +4604,7 @@ export function ReaderRoute() {
 
       if (r.mode === 'deciding') {
         const dist = Math.hypot(dx, dy)
-        if (dist < 8) return
+        if (dist < READER_TAP_SLOP_PX) return
         if (layoutRef.current === 'paginated') {
           const dtMs = performance.now() - r.startT
           const intent = classifyPaginatedSwipe({
@@ -4600,8 +4626,9 @@ export function ReaderRoute() {
           }
           r.mode = 'selecting'
           setIsDragSelecting(true)
-        } else if (Math.abs(dy) > Math.abs(dx) * 1.4 && Math.abs(dy) > 8) {
+        } else if (isReaderScrollGesture(dx, dy)) {
           r.mode = 'scrolling'
+          noteSuppressReaderTap()
           return
         } else {
           r.mode = 'selecting'

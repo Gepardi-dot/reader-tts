@@ -77,7 +77,7 @@ export function iosSharePlacement(
 }
 
 export function canShareIosHomeScreen(
-  nav: Pick<Navigator, 'share'> | null | undefined = typeof navigator === 'undefined'
+  nav: { share?: Navigator['share'] } | null | undefined = typeof navigator === 'undefined'
     ? undefined
     : navigator,
 ): boolean {
@@ -85,7 +85,7 @@ export function canShareIosHomeScreen(
 }
 
 export async function shareIosAddToHomeScreen(
-  nav: Pick<Navigator, 'share'> | null | undefined = typeof navigator === 'undefined'
+  nav: { share?: Navigator['share'] } | null | undefined = typeof navigator === 'undefined'
     ? undefined
     : navigator,
   homeUrl = typeof window === 'undefined' ? 'https://higgsread.com/' : new URL('/', window.location.href).href,
