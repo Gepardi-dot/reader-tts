@@ -469,6 +469,7 @@ export class TtsRuntime {
         seekSeconds: 0,
         cues: frame.cues,
         objectUrl: frame.url ?? undefined,
+        objectMime: 'audio/wav',
       })
       // Resume after a boundary underrun as soon as the next buffer lands.
       if (this.phase === 'buffering' || this.phase === 'idle') {
@@ -620,6 +621,7 @@ export class TtsRuntime {
           seekSeconds: 0,
           cues: chunk.cues,
           objectUrl: chunk.url ?? undefined,
+          objectMime: 'audio/wav',
         })
         scheduled += 1
       }

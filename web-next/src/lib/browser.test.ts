@@ -4,11 +4,15 @@ import {
   armNavigatorAudioSession,
   createAudioContext,
   decodeAudioDataSafe,
+  guessAudioMime,
   isAppleWebKit,
   isIosWebKit,
   isMacSafari,
   newBrowserId,
+  pauseHtmlMediaElement,
   readFileBuffer,
+  setHtmlMediaSrc,
+  typedAudioBlob,
 } from './browser'
 
 describe('isAppleWebKit', () => {
@@ -80,6 +84,62 @@ describe('armHtmlMediaElement', () => {
     expect(attrs['webkit-playsinline']).toBe('true')
     expect(media.preload).toBe('auto')
     expect(media.controls).toBe(false)
+  })
+
+  it('parks the element off-screen instead of on the play bar', () => {
+    const style: Record<string, string> = {}
+    const media = {
+      setAttribute: vi.fn(),
+      preload: '',
+      controls: true,
+      isConnected: false,
+      style,
+    } as unknown as HTMLMediaElement
+    armHtmlMediaElement(media)
+    expect(style.left).toBe('-9999px')
+    expect(style.bottom).toBeUndefined()
+  })
+})
+
+describe('html media src helpers', () => {
+  it('wraps untyped blobs as audio/wav', () => {
+    const raw = new Blob([new Uint8Array([1, 2, 3])])
+    const typed = typedAudioBlob(raw, 'audio/wav')
+    expect(typed.type).toBe('audio/wav')
+    expect(typedAudioBlob(new Blob(['x'], { type: 'audio/mpeg' })).type).toBe('audio/mpeg')
+  })
+
+  it('guesses mime from data URLs and file extensions', () => {
+    expect(guessAudioMime('data:audio/wav;base64,AA')).toBe('audio/wav')
+    expect(guessAudioMime('/api/audio/files/abc.wav')).toBe('audio/wav')
+    expect(guessAudioMime('https://example.com/clip.mp3')).toBe('audio/mpeg')
+  })
+
+  it('pauses without emptying src or calling load()', () => {
+    const media = {
+      onended: () => undefined,
+      onerror: () => undefined,
+      pause: vi.fn(),
+      src: 'blob:keep-me',
+      load: vi.fn(),
+      removeAttribute: vi.fn(),
+    } as unknown as HTMLMediaElement
+    pauseHtmlMediaElement(media)
+    expect(media.pause).toHaveBeenCalled()
+    expect(media.src).toBe('blob:keep-me')
+    expect(media.load).not.toHaveBeenCalled()
+    expect(media.removeAttribute).not.toHaveBeenCalled()
+  })
+
+  it('refuses to assign an empty src', () => {
+    const media = {
+      src: 'data:audio/wav;base64,AA',
+      firstChild: null,
+      removeChild: vi.fn(),
+      appendChild: vi.fn(),
+    } as unknown as HTMLMediaElement
+    setHtmlMediaSrc(media, '')
+    expect(media.src).toBe('data:audio/wav;base64,AA')
   })
 })
 

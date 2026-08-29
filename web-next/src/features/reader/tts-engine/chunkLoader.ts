@@ -26,7 +26,7 @@ import {
   requestLiveAudio,
   type LiveAudioPayload,
 } from './liveAudio'
-import { decodeAudioDataSafe } from '@/lib/browser'
+import { decodeAudioDataSafe, typedAudioBlob } from '@/lib/browser'
 import { pcmToAudioBuffer } from './audioClock'
 import type { NativeAudioResult, TtsAudioChunk } from './types'
 import type { ChunkLoader } from './bufferPool'
@@ -397,10 +397,11 @@ async function loadLiveProviderChunkOnce(
 
   const { blob, cues } = await loadLiveAudioBlob(liveAudio, signal)
   if (opts.stale()) return
+  const playable = typedAudioBlob(blob, liveAudio.contentType || 'audio/wav')
   const ctx = opts.ensureAudioContext()
-  const buffer = await decodeAudioDataSafe(ctx, blob)
+  const buffer = await decodeAudioDataSafe(ctx, playable)
   if (opts.stale()) return
-  const url = URL.createObjectURL(blob)
+  const url = URL.createObjectURL(playable)
   opts.trackObjectUrl(url)
   opts.onFrame({
     url,

@@ -44,8 +44,6 @@ export function VoiceOnboardingRoute() {
     if (audio) {
       try {
         audio.pause()
-        audio.removeAttribute('src')
-        audio.load()
       } catch { /* ignore */ }
       audioRef.current = null
     }

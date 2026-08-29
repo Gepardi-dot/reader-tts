@@ -31,9 +31,12 @@ import {
 import { pageIndexForOffset } from './readerLayout'
 
 describe('silent wav unlock clip', () => {
-  it('is a playable wav data URL', () => {
+  it('is a playable 44.1 kHz wav data URL', () => {
     expect(SILENT_WAV_DATA_URL.startsWith('data:audio/wav;base64,')).toBe(true)
     expect(SILENT_WAV_DATA_URL.length).toBeGreaterThan(80)
+    const binary = atob(SILENT_WAV_DATA_URL.split(',')[1] ?? '')
+    const view = new DataView(Uint8Array.from(binary, (ch) => ch.charCodeAt(0)).buffer)
+    expect(view.getUint32(24, true)).toBe(44_100)
   })
 })
 

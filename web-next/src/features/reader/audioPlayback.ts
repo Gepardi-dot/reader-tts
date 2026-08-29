@@ -1,8 +1,9 @@
 export const BROWSER_TTS_PROVIDER_ID = 'browser'
 export const CLOUD_TTS_PROVIDER_ID = 'google'
 
-/** ~50ms of silence. Looping this holds the iOS audio session across a TTS fetch. */
-function makeSilentWavDataUrl(durationSec = 0.05, sampleRate = 8000) {
+/** ~50ms of silence. Looping this holds the iOS audio session across a TTS fetch.
+ *  44.1 kHz PCM — iOS Safari often refuses 8 kHz WAV ("The object can not be found here"). */
+function makeSilentWavDataUrl(durationSec = 0.05, sampleRate = 44_100) {
   const length = Math.max(1, Math.floor(durationSec * sampleRate))
   const dataSize = length * 2
   const bytes = new Uint8Array(44 + dataSize)
