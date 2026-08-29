@@ -1,3 +1,4 @@
+import { guessAudioMime, typedAudioBlob } from '@/lib/browser'
 import { request, requestBlob } from '@/shared/api/client'
 import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 
@@ -303,28 +304,31 @@ export async function loadLiveAudioBlob(result: LiveAudioResult, signal?: AbortS
     ? await getCachedAudio(result.cacheKey, result.cacheVersion).catch(() => null)
     : null
 
+  const fallbackType = result.contentType || 'audio/wav'
   if (cachedAudio?.blob) {
     return {
-      blob: cachedAudio.blob,
+      blob: typedAudioBlob(cachedAudio.blob, cachedAudio.contentType || fallbackType),
       cues: (cachedAudio.cues ?? result.cues ?? []) as LiveAudioCue[],
     }
   }
 
   return {
-    blob: await fetchAndCacheLiveAudioBlob(result, signal),
+    blob: typedAudioBlob(await fetchAndCacheLiveAudioBlob(result, signal), fallbackType),
     cues: (result.cues ?? []) as LiveAudioCue[],
   }
 }
 
 export async function playableAudioUrl(url: string, signal?: AbortSignal) {
-  if (!needsAuthenticatedAudioFetch(url)) return { url, revoke: () => {} }
-
-  const blob = await requestBlob(url, { signal })
-  const objectUrl = URL.createObjectURL(blob)
-  return {
-    url: objectUrl,
-    revoke: () => URL.revokeObjectURL(objectUrl),
+  if (url.startsWith('blob:')) return { url, revoke: () => {} }
+  if (url.startsWith('data:') || needsAuthenticatedAudioFetch(url)) {
+    const blob = typedAudioBlob(await blobFromResultUrl(url, signal), guessAudioMime(url))
+    const objectUrl = URL.createObjectURL(blob)
+    return {
+      url: objectUrl,
+      revoke: () => URL.revokeObjectURL(objectUrl),
+    }
   }
+  return { url, revoke: () => {} }
 }
 
 export function audioErrorMessage(error: unknown) {

@@ -7,7 +7,7 @@ import {
   performanceNow,
   queuePerformanceTelemetry,
 } from '@/shared/telemetry/performanceTelemetry'
-import { decodeAudioDataSafe } from '@/lib/browser'
+import { decodeAudioDataSafe, typedAudioBlob } from '@/lib/browser'
 import {
   BROWSER_TTS_PROVIDER_ID,
   pacingFor,
@@ -176,10 +176,11 @@ export function createNativeAudioSource(
 
     const { blob, cues } = await deps.loadLiveAudioBlob(liveAudio, signal)
     if (signal.aborted || selectionChanged()) return null
+    const playable = typedAudioBlob(blob, liveAudio.contentType || 'audio/wav')
     const ctx = config.ensureAudioContext()
-    const buffer = await deps.decodeAudioBlob(ctx, blob)
+    const buffer = await deps.decodeAudioBlob(ctx, playable)
     if (signal.aborted || selectionChanged()) return null
-    const url = deps.createObjectUrl(blob)
+    const url = deps.createObjectUrl(playable)
     config.trackObjectUrl(url)
     return {
       url,

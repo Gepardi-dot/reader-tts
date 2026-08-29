@@ -96,6 +96,8 @@ class FakeHtmlAudio {
   playsInline = false
   controls = false
   disableRemotePlayback = false
+  isConnected = false
+  firstChild: unknown = null
   onended: (() => void) | null = null
   onerror: (() => void) | null = null
   preload = 'auto'
@@ -106,9 +108,12 @@ class FakeHtmlAudio {
     this.paused = true
   })
   readonly load = vi.fn()
+  readonly remove = vi.fn()
   readonly removeAttribute = vi.fn()
   readonly setAttribute = vi.fn()
   readonly addEventListener = vi.fn()
+  readonly appendChild = vi.fn((node: unknown) => node)
+  readonly removeChild = vi.fn((node: unknown) => node)
 }
 
 describe('AudioClock', () => {
@@ -260,7 +265,38 @@ describe('AudioClock', () => {
     expect(contexts[0]?.sources.length ?? 0).toBe(0)
 
     clock.stop()
+    expect(fake.load).not.toHaveBeenCalled()
+    expect(fake.removeAttribute).not.toHaveBeenCalledWith('src')
+    expect(fake.src.startsWith('data:audio/wav')).toBe(true)
     expect(revoke).not.toHaveBeenCalledWith('blob:live-chunk')
+    clock.close()
+  })
+
+  it('does not load an empty src when Play stop() runs after the iOS unlock tap', async () => {
+    const fake = new FakeHtmlAudio()
+    vi.stubGlobal('Audio', class {
+      constructor() {
+        return fake
+      }
+    })
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:encoded'),
+      revokeObjectURL: vi.fn(),
+    })
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+      maxTouchPoints: 5,
+      platform: 'iPhone',
+      audioSession: { type: 'auto' },
+    })
+
+    const clock = new AudioClock()
+    clock.unlock()
+    // Same sequence as tap Play: pointerdown unlock, then start() → stop().
+    clock.stop()
+    expect(fake.load).not.toHaveBeenCalled()
+    expect(fake.removeAttribute).not.toHaveBeenCalledWith('src')
+    expect(fake.src.startsWith('data:audio/wav')).toBe(true)
     clock.close()
   })
 })

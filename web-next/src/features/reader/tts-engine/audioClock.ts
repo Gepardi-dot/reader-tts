@@ -3,6 +3,8 @@ import {
   armNavigatorAudioSession,
   createAudioContext,
   isIosWebKit,
+  pauseHtmlMediaElement,
+  setHtmlMediaSrc,
 } from '@/lib/browser'
 import {
   audioBufferScheduledEndTime,
@@ -19,6 +21,8 @@ export interface ClockUnitMeta {
   cues?: readonly { start: number; timeStart: number }[]
   /** Original media URL (mp3/wav blob). Preferred on iOS HTMLAudio vs re-encoding PCM. */
   objectUrl?: string
+  /** MIME for `objectUrl` (blob: URLs have no extension; iOS needs the type). */
+  objectMime?: string
 }
 
 export interface ScheduledClockUnit {
@@ -30,6 +34,7 @@ export interface ScheduledClockUnit {
   endAt: number
   seekSeconds: number
   objectUrl?: string
+  objectMime?: string
   ownsObjectUrl?: boolean
 }
 
@@ -374,6 +379,7 @@ export class AudioClock {
       endAt: 0,
       seekSeconds,
       objectUrl,
+      objectMime: meta.objectMime ?? 'audio/wav',
       ownsObjectUrl,
     }
     this.htmlQueue.push(unit)
@@ -408,14 +414,19 @@ export class AudioClock {
     audio.onended = null
     audio.onerror = null
 
+    if (!unit.objectUrl) {
+      void this.playHtmlAt(index + 1)
+      return
+    }
+
     try {
       this.pauseUnlockHtml()
       audio.loop = false
-      // Do not call load() after src — iOS treats that as a new element and
-      // drops the user-gesture unlock from the Play tap.
-      if (audio.src !== unit.objectUrl) {
-        audio.src = unit.objectUrl ?? ''
-      }
+      // Swap src on the already-playing unlock element. Do not pause() first —
+      // the live-audio fetch has already spent the user gesture, and a paused
+      // play() is autoplay-blocked on iOS. Never assign an empty src or call
+      // load() afterwards — that toasts "The object can not be found here."
+      setHtmlMediaSrc(audio, unit.objectUrl, unit.objectMime ?? 'audio/wav')
       applyPreservesPitch(audio, this.rate)
       if (unit.seekSeconds > 0) {
         const seekTo = unit.seekSeconds
@@ -464,12 +475,12 @@ export class AudioClock {
 
   private stopHtmlLane(revokeUrls: boolean) {
     if (this.htmlAudio) {
-      this.htmlAudio.onended = null
-      this.htmlAudio.onerror = null
+      pauseHtmlMediaElement(this.htmlAudio)
+      // Park on a valid silent clip BEFORE revoking blob URLs. Leaving src on a
+      // revoked blob (or emptying it) makes iOS toast "The object can not be found here."
       try {
-        this.htmlAudio.pause()
-        this.htmlAudio.removeAttribute('src')
-        this.htmlAudio.load()
+        this.htmlAudio.loop = false
+        setHtmlMediaSrc(this.htmlAudio, SILENT_WAV_DATA_URL, 'audio/wav')
       } catch {
         // ignore
       }
@@ -746,7 +757,7 @@ export class AudioClock {
       const audio = new Audio()
       armHtmlMediaElement(audio)
       audio.loop = true
-      audio.src = SILENT_WAV_DATA_URL
+      setHtmlMediaSrc(audio, SILENT_WAV_DATA_URL, 'audio/wav')
       this.unlockHtml = audio
       return audio
     } catch {
@@ -759,7 +770,7 @@ export class AudioClock {
       const hold = this.ensureUnlockHtml()
       if (hold) {
         try {
-          if (!hold.src) hold.src = SILENT_WAV_DATA_URL
+          if (!hold.src) setHtmlMediaSrc(hold, SILENT_WAV_DATA_URL, 'audio/wav')
           hold.loop = true
           const play = hold.play()
           if (play && typeof play.catch === 'function') play.catch(() => undefined)
@@ -772,7 +783,7 @@ export class AudioClock {
     try {
       const content = this.ensureHtmlAudio()
       if (this.htmlQueueIndex < 0) {
-        if (!content.src) content.src = SILENT_WAV_DATA_URL
+        if (!content.src) setHtmlMediaSrc(content, SILENT_WAV_DATA_URL, 'audio/wav')
         const play = content.play()
         if (play && typeof play.catch === 'function') play.catch(() => undefined)
       }
@@ -792,10 +803,8 @@ export class AudioClock {
 
   private releaseUnlockHtml() {
     if (!this.unlockHtml) return
+    pauseHtmlMediaElement(this.unlockHtml)
     try {
-      this.unlockHtml.pause()
-      this.unlockHtml.removeAttribute('src')
-      this.unlockHtml.load()
       this.unlockHtml.remove()
     } catch {
       // ignore

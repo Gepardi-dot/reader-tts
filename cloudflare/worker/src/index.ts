@@ -269,7 +269,10 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
 
   if (path === '/api/providers/test' && request.method === 'POST') return testProvider(request, env, ctx)
   if (path.startsWith(AUDIO_FILE_PATH_PREFIX) && request.method === 'GET') {
-    return serveCachedAudioFile(env, decodeURIComponent(path.slice(AUDIO_FILE_PATH_PREFIX.length)))
+    return serveCachedAudioFile(
+      env,
+      decodeURIComponent(path.slice(AUDIO_FILE_PATH_PREFIX.length)).replace(/\.wav$/i, ''),
+    )
   }
   if (path === '/api/telemetry/tts-summary' && request.method === 'GET') return ttsTelemetrySummary(env, user)
   if (path === '/api/telemetry' && request.method === 'POST') return recordTelemetry(request, env, user)
@@ -1524,7 +1527,8 @@ function r2AudioCacheKey(cacheDigest: string) {
 }
 
 function liveAudioFileUrl(cacheDigest: string) {
-  return `${AUDIO_FILE_PATH_PREFIX}${encodeURIComponent(cacheDigest)}`
+  // iOS 17.4+ HTMLAudio sniffs file extensions; extensionless URLs fail to play.
+  return `${AUDIO_FILE_PATH_PREFIX}${encodeURIComponent(cacheDigest)}.wav`
 }
 
 function rememberLiveAudioFile(cacheDigest: string, wav: Uint8Array, duration: number | null) {
@@ -1578,10 +1582,7 @@ async function serveCachedAudioFile(env: Env, cacheDigest: string) {
   const memory = liveAudioFileMemory.get(digest)
   if (memory && memory.expiresAt > Date.now()) {
     return new Response(memory.wav, {
-      headers: {
-        'Content-Type': 'audio/wav',
-        'Cache-Control': 'private, max-age=3600',
-      },
+      headers: audioFileHeaders('audio/wav', memory.wav.byteLength),
     })
   }
   if (memory) liveAudioFileMemory.delete(digest)
@@ -1591,11 +1592,18 @@ async function serveCachedAudioFile(env: Env, cacheDigest: string) {
   const wav = new Uint8Array(await object.arrayBuffer())
   rememberLiveAudioFile(digest, wav, object.customMetadata?.duration ? Number(object.customMetadata.duration) : null)
   return new Response(wav, {
-    headers: {
-      'Content-Type': object.customMetadata?.contentType || 'audio/wav',
-      'Cache-Control': 'private, max-age=3600',
-    },
+    headers: audioFileHeaders(object.customMetadata?.contentType || 'audio/wav', wav.byteLength),
   })
+}
+
+function audioFileHeaders(contentType: string, byteLength: number) {
+  return {
+    'Content-Type': contentType,
+    'Content-Length': String(byteLength),
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'private, max-age=3600',
+    'Cross-Origin-Resource-Policy': 'cross-origin',
+  }
 }
 
 async function readR2AudioCache(env: Env, cacheDigest: string): Promise<Record<string, JsonValue> | null> {

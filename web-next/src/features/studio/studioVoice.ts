@@ -15,6 +15,7 @@ import {
   isKnownKokoroVoice,
 } from '@/features/reader/kokoroVoices'
 import { playableAudioUrl } from '@/features/reader/tts-engine/liveAudio'
+import { armHtmlMediaElement, guessAudioMime, pauseHtmlMediaElement, setHtmlMediaSrc } from '@/lib/browser'
 import { synthesizeKokoroLocal } from '@/features/reader/tts-engine/kokoroAudio'
 import { isModelReady } from '@/shared/storage/modelCache'
 
@@ -66,11 +67,7 @@ function rememberUrl(key: string, url: string) {
 
 function stopCurrentAudio() {
   if (currentAudio) {
-    try {
-      currentAudio.pause()
-      currentAudio.removeAttribute('src')
-      currentAudio.load()
-    } catch { /* ignore */ }
+    pauseHtmlMediaElement(currentAudio)
     currentAudio = null
   }
   try {
@@ -159,9 +156,11 @@ class AutoplayBlockedError extends Error {
 
 async function playUrl(url: string, gen: number, onPlaying?: () => void): Promise<void> {
   if (gen !== speakGeneration) return
-  const audio = new Audio(url)
+  const audio = new Audio()
+  armHtmlMediaElement(audio)
   audio.preload = 'auto'
   try { (audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true } catch { /* ignore */ }
+  setHtmlMediaSrc(audio, url, guessAudioMime(url))
   currentAudio = audio
   await new Promise<void>((resolve, reject) => {
     const done = () => {

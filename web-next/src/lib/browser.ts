@@ -109,19 +109,84 @@ export function armHtmlMediaElement(media: HTMLMediaElement) {
     // Attribute is optional.
   }
   try {
-    if (typeof document === 'undefined' || media.isConnected) return
     media.setAttribute('aria-hidden', 'true')
+    // Keep the element off-screen. A 1px node at bottom:0 is where iOS draws
+    // the native "The object can not be found here" media error banner.
     media.style.position = 'fixed'
-    media.style.left = '0'
-    media.style.bottom = '0'
+    media.style.left = '-9999px'
+    media.style.top = '0'
     media.style.width = '1px'
     media.style.height = '1px'
-    media.style.opacity = '0.01'
+    media.style.opacity = '0'
     media.style.pointerEvents = 'none'
+  } catch {
+    // Fake media objects in tests.
+  }
+  try {
+    if (typeof document === 'undefined' || media.isConnected) return
     document.body?.appendChild(media)
   } catch {
     // Tests and documents without a body.
   }
+}
+
+export function guessAudioMime(url: string, fallback = 'audio/wav'): string {
+  if (/^data:audio\/(?:mpeg|mp3)/i.test(url) || /\.mp3(?:$|\?)/i.test(url)) return 'audio/mpeg'
+  if (/^data:audio\/wav/i.test(url) || /\.wav(?:$|\?)/i.test(url)) return 'audio/wav'
+  if (/^data:audio\/(?:mp4|aac|m4a)/i.test(url) || /\.m4a(?:$|\?)/i.test(url)) return 'audio/mp4'
+  return fallback
+}
+
+/** iOS HTMLAudio needs an audio/* blob type — octet-stream / empty type fails to play. */
+export function typedAudioBlob(blob: Blob, fallbackType = 'audio/wav'): Blob {
+  const type = blob.type && /^audio\//i.test(blob.type) ? blob.type : fallbackType
+  return blob.type === type ? blob : new Blob([blob], { type })
+}
+
+/**
+ * Pause without emptying src. iOS Safari treats `removeAttribute('src')` +
+ * `load()` as "play the current page" and toasts "The object can not be found here."
+ */
+export function pauseHtmlMediaElement(media: HTMLMediaElement | null | undefined) {
+  if (!media) return
+  try {
+    media.onended = null
+    media.onerror = null
+  } catch {
+    // ignore
+  }
+  try {
+    media.pause()
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Point an HTMLAudio element at a playable URL. Never assigns an empty src.
+ * On iOS, a `<source type>` child hints MIME for blob:/extensionless URLs.
+ */
+export function setHtmlMediaSrc(media: HTMLMediaElement, url: string, mimeType?: string) {
+  if (!url) return
+  const type = mimeType || guessAudioMime(url)
+  try {
+    while (media.firstChild) media.removeChild(media.firstChild)
+  } catch {
+    // Tests / detached elements.
+  }
+  if (isIosWebKit()) {
+    try {
+      if (typeof document !== 'undefined') {
+        const source = document.createElement('source')
+        source.src = url
+        source.type = type
+        media.appendChild(source)
+      }
+    } catch {
+      // Fake Audio in tests may not be a real Node.
+    }
+  }
+  if (media.src !== url) media.src = url
 }
 
 /**
