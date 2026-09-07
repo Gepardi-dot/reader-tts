@@ -540,7 +540,7 @@ export class TtsRuntime {
    */
   private recoverIfStalled(generation: number) {
     if (generation !== this.generation) return
-    if (this.phase === 'idle' || this.phase === 'paused') return
+    if (this.phase === 'idle' || this.phase === 'paused' || this.clock.isPaused) return
     const state = this.clock.contextState as string
     if (state !== 'running') this.clock.unlock()
     if (this.clock.bufferedAheadSeconds() > 0.08) return

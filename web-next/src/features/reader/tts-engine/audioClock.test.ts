@@ -101,7 +101,7 @@ class FakeHtmlAudio {
   onended: (() => void) | null = null
   onerror: (() => void) | null = null
   preload = 'auto'
-  readonly play = vi.fn(async () => {
+  play = vi.fn(async () => {
     this.paused = false
   })
   readonly pause = vi.fn(() => {
@@ -297,6 +297,95 @@ describe('AudioClock', () => {
     expect(fake.load).not.toHaveBeenCalled()
     expect(fake.removeAttribute).not.toHaveBeenCalledWith('src')
     expect(fake.src.startsWith('data:audio/wav')).toBe(true)
+    clock.close()
+  })
+
+  it('keeps Web Audio paused when the next tap unlocks the context', async () => {
+    const clock = new AudioClock()
+    clock.append(audioBuffer(1), { chunkIndex: 0 })
+    const ctx = contexts[0]!
+    await clock.pause()
+    expect(clock.isPaused).toBe(true)
+    expect(ctx.state).toBe('suspended')
+
+    clock.unlock()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(clock.isPaused).toBe(true)
+    expect(ctx.state).toBe('suspended')
+
+    await clock.resume()
+    expect(clock.isPaused).toBe(false)
+    expect(ctx.state).toBe('running')
+    clock.close()
+  })
+
+  it('re-suspends if unlock resume resolves after pause', async () => {
+    const clock = new AudioClock()
+    clock.unlock()
+    const ctx = contexts[0]!
+    ctx.state = 'suspended'
+    clock.unlock()
+    await clock.pause()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(clock.isPaused).toBe(true)
+    expect(ctx.state).toBe('suspended')
+    clock.close()
+  })
+
+  it('does not restart HTMLAudio when paused and unlock runs', async () => {
+    const fake = new FakeHtmlAudio()
+    vi.stubGlobal('Audio', class {
+      constructor() {
+        return fake
+      }
+    })
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:fake'),
+      revokeObjectURL: vi.fn(),
+    })
+
+    const clock = new AudioClock()
+    clock.setRate(1.5)
+    clock.append(audioBuffer(0.5), { chunkIndex: 0 })
+    await Promise.resolve()
+    expect(fake.paused).toBe(false)
+
+    await clock.pause()
+    expect(fake.paused).toBe(true)
+    const playCalls = fake.play.mock.calls.length
+    clock.unlock()
+    await Promise.resolve()
+    expect(fake.paused).toBe(true)
+    expect(fake.play.mock.calls.length).toBe(playCalls)
+    clock.close()
+  })
+
+  it('pauses HTMLAudio again if play() resolves after pause', async () => {
+    const fake = new FakeHtmlAudio()
+    fake.play = vi.fn(async () => {
+      await Promise.resolve()
+      fake.paused = false
+    })
+    vi.stubGlobal('Audio', class {
+      constructor() {
+        return fake
+      }
+    })
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:fake'),
+      revokeObjectURL: vi.fn(),
+    })
+
+    const clock = new AudioClock()
+    clock.setRate(1.5)
+    clock.append(audioBuffer(0.5), { chunkIndex: 0 })
+    await clock.pause()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(clock.isPaused).toBe(true)
+    expect(fake.paused).toBe(true)
     clock.close()
   })
 })
