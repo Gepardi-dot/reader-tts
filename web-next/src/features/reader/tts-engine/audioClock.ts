@@ -171,11 +171,25 @@ export class AudioClock {
   unlock() {
     armNavigatorAudioSession()
     const ctx = this.ensureContext()
+    // Pause tap also fires the global pointerdown unlock. Do not resume content
+    // (or an in-flight ctx.resume from that gesture) while the user paused.
+    if (this.paused) {
+      this.pauseUnlockHtml()
+      return
+    }
     this.ensureKeepAlive(ctx)
     this.primeHtmlUnlock()
     if ((ctx.state as string) !== 'running') {
       this.kickWebAudio(ctx)
-      void ctx.resume().catch(() => undefined)
+      const session = this.sessionToken
+      void ctx.resume()
+        .then(() => {
+          if (this.paused || session !== this.sessionToken) {
+            return ctx.suspend()
+          }
+          return undefined
+        })
+        .catch(() => undefined)
     }
   }
 
@@ -244,9 +258,17 @@ export class AudioClock {
           // Autoplay race; user gesture should already have unlocked.
         }
       }
+      if (this.paused) {
+        this.htmlAudio?.pause()
+        return
+      }
       return
     }
     const ctx = this.ctx
+    if (this.paused) {
+      if (ctx && ctx.state === 'running') await ctx.suspend().catch(() => undefined)
+      return
+    }
     if (ctx && (ctx.state === 'suspended' || (ctx.state as string) === 'interrupted')) {
       await ctx.resume().catch(() => undefined)
     }
@@ -254,12 +276,17 @@ export class AudioClock {
 
   async pause() {
     this.paused = true
+    this.pauseUnlockHtml()
     if (this.useHtmlLane()) {
-      this.htmlAudio?.pause()
+      try {
+        this.htmlAudio?.pause()
+      } catch {
+        // ignore
+      }
       return
     }
     const ctx = this.ctx
-    if (ctx && ctx.state === 'running') await ctx.suspend()
+    if (ctx && ctx.state === 'running') await ctx.suspend().catch(() => undefined)
   }
 
   stop() {
@@ -393,6 +420,7 @@ export class AudioClock {
   }
 
   private async playHtmlAt(index: number) {
+    if (this.paused) return
     if (index < 0 || index >= this.htmlQueue.length) {
       this.htmlQueueIndex = -1
       this.stopProgress()
@@ -439,27 +467,37 @@ export class AudioClock {
           }, { once: true })
         }
       }
-      if (!this.paused) {
-        await audio.play()
+      if (this.paused || gen !== this.htmlPlayGeneration) {
+        audio.pause()
+        return
       }
+      await audio.play()
     } catch {
       if (gen !== this.htmlPlayGeneration) return
+      if (this.paused) {
+        audio.pause()
+        return
+      }
       // Skip broken unit.
       void this.playHtmlAt(index + 1)
       return
     }
 
     if (gen !== this.htmlPlayGeneration) return
+    if (this.paused) {
+      audio.pause()
+      return
+    }
 
     this.activeUnitId = unit.unitId
     this.handlers.onUnitStart?.(unit)
 
     audio.onended = () => {
-      if (gen !== this.htmlPlayGeneration) return
+      if (gen !== this.htmlPlayGeneration || this.paused) return
       void this.playHtmlAt(index + 1)
     }
     audio.onerror = () => {
-      if (gen !== this.htmlPlayGeneration) return
+      if (gen !== this.htmlPlayGeneration || this.paused) return
       void this.playHtmlAt(index + 1)
     }
   }
@@ -644,7 +682,7 @@ export class AudioClock {
           this.handlers.onUnitStart?.(unit)
         }
         this.handlers.onProgress?.(unit, this.htmlAudio.currentTime)
-      } else if (unit && this.htmlAudio && (this.htmlAudio.ended || this.htmlAudio.error)) {
+      } else if (unit && this.htmlAudio && !this.paused && (this.htmlAudio.ended || this.htmlAudio.error)) {
         void this.playHtmlAt(this.htmlQueueIndex + 1)
         return
       }

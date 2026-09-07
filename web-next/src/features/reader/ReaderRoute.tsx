@@ -2449,6 +2449,18 @@ interface AudioHandle {
   stop: () => void
 }
 
+/** pointerdown + click both fire on iOS; collapsing them so pause cannot immediately resume. */
+const PLAY_BAR_TOGGLE_MS = 400
+
+function togglePlayBarOnce(btn: HTMLButtonElement, handle: AudioHandle | null) {
+  if (!handle) return
+  const now = Date.now()
+  const last = Number(btn.dataset.playBarToggleAt || '0')
+  if (now - last < PLAY_BAR_TOGGLE_MS) return
+  btn.dataset.playBarToggleAt = String(now)
+  handle.toggle()
+}
+
 function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, colors, handle, onOpenSheet, statusText, followPaused, onResumeFollow }: {
   phase:        AudioPhase
   curIdx:       number
@@ -2555,16 +2567,10 @@ function PlayBar({ phase, curIdx, totalChunks, voiceLabel, rate, onRateChange, c
           onPointerDown={(e) => {
             if (e.pointerType === 'mouse') return
             e.preventDefault()
-            ;(e.currentTarget as HTMLButtonElement).dataset.iosToggle = '1'
-            handle?.toggle()
+            togglePlayBarOnce(e.currentTarget, handle)
           }}
           onClick={(e) => {
-            const btn = e.currentTarget
-            if (btn.dataset.iosToggle === '1') {
-              delete btn.dataset.iosToggle
-              return
-            }
-            handle?.toggle()
+            togglePlayBarOnce(e.currentTarget, handle)
           }}
           disabled={!handle}
           aria-label={primaryLabel}
