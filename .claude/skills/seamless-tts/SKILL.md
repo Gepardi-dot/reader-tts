@@ -64,7 +64,7 @@ If a user reports a quality problem, suspect the implementation before defending
 - **Kokoro streams sentence PCM** via `synthesizeLocalStreaming` → `pcmToAudioBuffer` → clock.append as each frame arrives (first-audio no longer waits for full WAV). Full WAV still cached to IndexedDB on complete.
 - **Gemini** loads full live-audio chunks (edge/R2 cache) and appends when decoded; cold miss shows buffering, never silent browser-speech mask.
 - **Live-audio bytes** are served from `GET /api/audio/files/:digest` (R2 + short-lived memory), not a megabyte `data:` JSON body. Local wrangler used to drop those bodies (`Network connection lost`) so Play never started.
-- **Live-audio fetch** has a 50s client timeout and one retry on 502/timeout so a hung Fly request cannot occupy the in-memory cache forever.
+- **Live-audio fetch** has a 50s client timeout. In-flight requests are shared by waiter count: cancelling warmup/scroll must not abort Play. Disconnects (frozen tab, Worker recycle, `AbortError`) retry once; 502/timeout retry in the chunk loader. After the tab is hidden ≥5 minutes (or restored from bfcache), in-flight work is dropped and hosted Kokoro is poked awake so the next Play does not join a corpse. Never surface raw `Audio request aborted.` — tell the user to tap Play again.
 - **Browser speech** is a selected provider only (`browser`), not a hidden fallback for native voices.
 - **On-device Kokoro model path** unchanged: worker + `kokoro-model-v1` SW cache + COOP/COEP for WASM threads.
 - **Chunk sizes** (approx): Kokoro first ~95 / mid ~160 / steady ~280; Gemini first ~110 / follow ~280; Kokoro prefetch ahead 2, Gemini 1.

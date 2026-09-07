@@ -42,8 +42,26 @@ const LIVE_AUDIO_MEMORY_TTL_MS = 10 * 60_000
 const LIVE_AUDIO_RATE_LIMIT_FALLBACK_MS = 60_000
 /** Client wall-clock cap so a hung Fly/Worker request cannot deadlock Play. */
 export const LIVE_AUDIO_FETCH_TIMEOUT_MS = 50_000
-const liveAudioMemoryCache = new Map<string, { expiresAt: number; promise: Promise<LiveAudioResult> }>()
+/** One reconnect after a frozen-tab / Worker-kill abort. Timeouts stay a single cap. */
+const LIVE_AUDIO_DISCONNECT_ATTEMPTS = 2
+const LIVE_AUDIO_DISCONNECT_RETRY_MS = 400
+/** Tab hidden this long → drop in-flight fetches (browsers abort them on freeze). */
+export const LIVE_AUDIO_STALE_HIDDEN_MS = 5 * 60_000
+export const LIVE_AUDIO_ABORTED_MESSAGE = 'Audio request aborted.'
+
+type LiveAudioMemoryEntry = { expiresAt: number; promise: Promise<LiveAudioResult> }
+type LiveAudioInflight = {
+  key: string
+  waiters: Set<symbol>
+  controller: AbortController
+  promise: Promise<LiveAudioResult>
+}
+
+const liveAudioMemoryCache = new Map<string, LiveAudioMemoryEntry>()
+const liveAudioInflight = new Map<string, LiveAudioInflight>()
 let liveAudioCooldownUntil = 0
+let liveAudioHiddenAt = 0
+let liveAudioLifecycleBound = false
 
 function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
   return JSON.stringify([
@@ -88,7 +106,138 @@ export function liveAudioCooldownRemainingMs(provider: string) {
 
 export function resetLiveAudioCooldownForTests() {
   liveAudioCooldownUntil = 0
+  dropStaleLiveAudioWork()
+  liveAudioHiddenAt = 0
+}
+
+function callerAbortError() {
+  return new Error(LIVE_AUDIO_ABORTED_MESSAGE)
+}
+
+export function isCallerCancelledAudioError(error: unknown) {
+  return error instanceof Error && error.message === LIVE_AUDIO_ABORTED_MESSAGE
+}
+
+function errorText(error: unknown) {
+  if (error instanceof Error) {
+    return `${error.name} ${error.message}`
+  }
+  return String(error)
+}
+
+/** Browser/Worker disconnected the fetch — retryable if *this* Play is still active. */
+export function isDisconnectedAudioError(error: unknown) {
+  if (isCallerCancelledAudioError(error)) return false
+  if (typeof error === 'object' && error && 'name' in error && (error as { name?: string }).name === 'AbortError') {
+    return true
+  }
+  return /Failed to fetch|NetworkError|Network connection lost|The user aborted|operation was aborted|signal is aborted|connection refused|ECONNRESET|ERR_NETWORK/i.test(
+    errorText(error),
+  )
+}
+
+export function isTransientLiveAudioError(error: unknown) {
+  if (isCallerCancelledAudioError(error)) return false
+  const raw = errorText(error)
+  if (/429|RESOURCE_EXHAUSTED|quota|rate limit|cooling down|Invalid live audio|does not match|not configured|Authentication|Unauthorized|Open a book|session expired/i.test(raw)) {
+    return false
+  }
+  return isDisconnectedAudioError(error)
+    || /502|503|504|timeout|timed out|unreachable|Audio fetch failed|decode|empty audio/i.test(raw)
+}
+
+function waitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(callerAbortError())
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(callerAbortError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
+}
+
+function sleep(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(callerAbortError())
+      return
+    }
+    const timer = setTimeout(resolve, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(callerAbortError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function dropStaleLiveAudioWork() {
+  for (const entry of liveAudioInflight.values()) {
+    entry.controller.abort()
+  }
+  liveAudioInflight.clear()
   liveAudioMemoryCache.clear()
+}
+
+function pokeHostedKokoroWake() {
+  void request('/api/providers/warmup', {
+    method: 'POST',
+    body: JSON.stringify({ provider: 'kokoro' }),
+  }).catch(() => undefined)
+}
+
+function bindLiveAudioLifecycle() {
+  if (liveAudioLifecycleBound || typeof document === 'undefined') return
+  liveAudioLifecycleBound = true
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      liveAudioHiddenAt = Date.now()
+      return
+    }
+    const hiddenFor = liveAudioHiddenAt > 0 ? Date.now() - liveAudioHiddenAt : 0
+    liveAudioHiddenAt = 0
+    if (hiddenFor < LIVE_AUDIO_STALE_HIDDEN_MS) return
+    // Frozen / backgrounded tabs abort in-flight fetch. Don't let Play join a corpse.
+    dropStaleLiveAudioWork()
+    pokeHostedKokoroWake()
+  })
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted) return
+    dropStaleLiveAudioWork()
+    pokeHostedKokoroWake()
+  })
+  window.addEventListener('online', () => {
+    pokeHostedKokoroWake()
+  })
+}
+
+function subscribeInflight(entry: LiveAudioInflight, signal?: AbortSignal): Promise<LiveAudioResult> {
+  if (signal?.aborted) return Promise.reject(callerAbortError())
+  const token = Symbol('live-audio-waiter')
+  entry.waiters.add(token)
+  const release = () => {
+    if (!entry.waiters.delete(token)) return
+    if (entry.waiters.size > 0) return
+    queueMicrotask(() => {
+      if (entry.waiters.size > 0) return
+      if (liveAudioInflight.get(entry.key) !== entry) return
+      entry.controller.abort()
+    })
+  }
+  if (signal) signal.addEventListener('abort', release, { once: true })
+  return waitWithSignal(entry.promise, signal).finally(() => {
+    signal?.removeEventListener('abort', release)
+    release()
+  })
 }
 
 function noteLiveAudioFailure(error: unknown) {
@@ -156,27 +305,27 @@ async function persistClientLiveAudio(
   }
 }
 
-/**
- * Fetch live audio for a book range.
- * Lookup order: in-memory → IndexedDB (survives refresh) → network (Worker edge/R2/synth).
- */
-async function fetchLiveAudioJson(
-  bookId: string,
-  payload: LiveAudioPayload,
-  signal?: AbortSignal,
-): Promise<LiveAudioResult> {
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), LIVE_AUDIO_FETCH_TIMEOUT_MS)
-  const onParentAbort = () => ctrl.abort()
-  signal?.addEventListener('abort', onParentAbort, { once: true })
-  const timeoutError = payload.provider === 'kokoro'
+function timeoutErrorFor(payload: LiveAudioPayload) {
+  return payload.provider === 'kokoro'
     ? 'Hosted Kokoro timed out'
     : 'Live audio timed out. Try Play again.'
+}
+
+async function fetchLiveAudioJsonOnce(
+  bookId: string,
+  payload: LiveAudioPayload,
+  sharedSignal: AbortSignal,
+): Promise<LiveAudioResult> {
+  const timeoutError = timeoutErrorFor(payload)
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), LIVE_AUDIO_FETCH_TIMEOUT_MS)
+  const onSharedAbort = () => ctrl.abort()
+  sharedSignal.addEventListener('abort', onSharedAbort, { once: true })
   try {
-    if (signal?.aborted) throw new Error('Audio request aborted.')
+    if (sharedSignal.aborted) throw callerAbortError()
     return await new Promise<LiveAudioResult>((resolve, reject) => {
       const onAbort = () => {
-        reject(new Error(signal?.aborted ? 'Audio request aborted.' : timeoutError))
+        reject(new Error(sharedSignal.aborted ? LIVE_AUDIO_ABORTED_MESSAGE : timeoutError))
       }
       ctrl.signal.addEventListener('abort', onAbort, { once: true })
       request<LiveAudioResult>(`/api/books/${bookId}/live-audio`, {
@@ -188,8 +337,12 @@ async function fetchLiveAudioJson(
         resolve(value)
       }).catch((error) => {
         ctrl.signal.removeEventListener('abort', onAbort)
-        if (ctrl.signal.aborted && !signal?.aborted) {
+        if (ctrl.signal.aborted && !sharedSignal.aborted) {
           reject(new Error(timeoutError))
+          return
+        }
+        if (sharedSignal.aborted) {
+          reject(callerAbortError())
           return
         }
         reject(error)
@@ -197,8 +350,37 @@ async function fetchLiveAudioJson(
     })
   } finally {
     clearTimeout(timer)
-    signal?.removeEventListener('abort', onParentAbort)
+    sharedSignal.removeEventListener('abort', onSharedAbort)
   }
+}
+
+/**
+ * Network fetch for a book range. Shared across waiters so warmup abort cannot
+ * cancel Play. Disconnects (frozen tab, Worker recycle) retry once.
+ */
+async function fetchLiveAudioJson(
+  bookId: string,
+  payload: LiveAudioPayload,
+  sharedSignal: AbortSignal,
+): Promise<LiveAudioResult> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < LIVE_AUDIO_DISCONNECT_ATTEMPTS; attempt += 1) {
+    if (sharedSignal.aborted) throw callerAbortError()
+    try {
+      return await fetchLiveAudioJsonOnce(bookId, payload, sharedSignal)
+    } catch (error) {
+      lastError = error
+      if (
+        sharedSignal.aborted
+        || !isDisconnectedAudioError(error)
+        || attempt === LIVE_AUDIO_DISCONNECT_ATTEMPTS - 1
+      ) {
+        throw error
+      }
+      await sleep(LIVE_AUDIO_DISCONNECT_RETRY_MS * (attempt + 1), sharedSignal)
+    }
+  }
+  throw lastError
 }
 
 export async function requestLiveAudio(
@@ -206,57 +388,83 @@ export async function requestLiveAudio(
   payload: LiveAudioPayload,
   signal?: AbortSignal,
 ) {
+  bindLiveAudioLifecycle()
   const cooldownMs = liveAudioCooldownRemainingMs(payload.provider)
   if (cooldownMs > 0) {
     return Promise.reject(new Error(`Gemini TTS is cooling down after a rate limit. Retry in ${Math.ceil(cooldownMs / 1000)}s.`))
   }
   if (signal?.aborted) {
-    return Promise.reject(new Error('Audio request aborted.'))
+    return Promise.reject(callerAbortError())
   }
 
   const key = liveAudioCacheKey(bookId, payload)
   const clientKey = clientLiveCacheKey(bookId, payload)
   const now = Date.now()
   const cached = liveAudioMemoryCache.get(key)
-  if (cached && cached.expiresAt > now) return cached.promise
+  if (cached && cached.expiresAt > now) {
+    return waitWithSignal(cached.promise, signal)
+  }
   if (cached) liveAudioMemoryCache.delete(key)
 
+  const existing = liveAudioInflight.get(key)
+  if (existing && !existing.controller.signal.aborted) {
+    return subscribeInflight(existing, signal)
+  }
+
+  const controller = new AbortController()
+  const entry: LiveAudioInflight = {
+    key,
+    waiters: new Set(),
+    controller,
+    promise: new Promise(() => undefined),
+  }
+
   const promise = (async (): Promise<LiveAudioResult> => {
-    // Durable client cache — works after browser refresh.
-    const idb = await getCachedAudio(clientKey, LIVE_CLIENT_CACHE_VERSION).catch(() => null)
-    if (idb?.blob) {
+    try {
+      const idb = await getCachedAudio(clientKey, LIVE_CLIENT_CACHE_VERSION).catch(() => null)
+      if (idb?.blob) {
+        return {
+          url: '',
+          duration: idb.duration,
+          cues: (idb.cues ?? []) as LiveAudioCue[],
+          cacheKey: clientKey,
+          cacheVersion: LIVE_CLIENT_CACHE_VERSION,
+          contentType: idb.contentType,
+          byteLength: idb.byteLength,
+          cacheHit: true,
+          cacheStorage: 'indexeddb',
+        }
+      }
+
+      const result = await fetchLiveAudioJson(bookId, payload, controller.signal)
+
+      // Fire-and-forget durable write so the next session/refresh is instant.
+      void persistClientLiveAudio(clientKey, result)
+
       return {
-        url: '',
-        duration: idb.duration,
-        cues: (idb.cues ?? []) as LiveAudioCue[],
+        ...result,
         cacheKey: clientKey,
         cacheVersion: LIVE_CLIENT_CACHE_VERSION,
-        contentType: idb.contentType,
-        byteLength: idb.byteLength,
-        cacheHit: true,
-        cacheStorage: 'indexeddb',
       }
+    } catch (error) {
+      noteLiveAudioFailure(error)
+      liveAudioMemoryCache.delete(key)
+      throw error
+    } finally {
+      if (liveAudioInflight.get(key) === entry) liveAudioInflight.delete(key)
     }
+  })()
 
-    const result = await fetchLiveAudioJson(bookId, payload, signal)
+  entry.promise = promise
+  liveAudioInflight.set(key, entry)
+  promise.then((result) => {
+    liveAudioMemoryCache.set(key, {
+      expiresAt: Date.now() + LIVE_AUDIO_MEMORY_TTL_MS,
+      promise: Promise.resolve(result),
+    })
+  }).catch(() => undefined)
 
-    // Fire-and-forget durable write so the next session/refresh is instant.
-    void persistClientLiveAudio(clientKey, result)
-
-    return {
-      ...result,
-      // Prefer client key so loadLiveAudioBlob reads IDB without re-fetching the data URL.
-      cacheKey: clientKey,
-      cacheVersion: LIVE_CLIENT_CACHE_VERSION,
-    }
-  })().catch((error) => {
-    noteLiveAudioFailure(error)
-    liveAudioMemoryCache.delete(key)
-    throw error
-  })
-
-  liveAudioMemoryCache.set(key, { expiresAt: now + LIVE_AUDIO_MEMORY_TTL_MS, promise })
-  return promise
+  return subscribeInflight(entry, signal)
 }
 
 function isCacheableLiveAudio(result: LiveAudioResult): result is LiveAudioResult & { cacheKey: string; cacheVersion: number } {
@@ -341,6 +549,13 @@ export function audioErrorMessage(error: unknown) {
 
   if (/Authentication required|Unauthorized|Session expired/i.test(message)) {
     return 'Your session expired. Sign in again, then try audio playback.'
+  }
+  if (
+    isCallerCancelledAudioError(error)
+    || /Audio request aborted|The user aborted|operation was aborted|signal is aborted/i.test(message)
+    || (typeof error === 'object' && error && 'name' in error && (error as { name?: string }).name === 'AbortError')
+  ) {
+    return 'Could not start audio. Tap Play again.'
   }
   if (/not configured|configured yet/i.test(message)) {
     return message.length < 180 ? message : 'Hosted voice is not configured on the server.'

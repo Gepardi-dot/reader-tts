@@ -21,6 +21,8 @@ import {
   pacingForPlaybackRate,
 } from '../audioPlayback'
 import {
+  isCallerCancelledAudioError,
+  isTransientLiveAudioError,
   liveAudioCooldownRemainingMs,
   loadLiveAudioBlob,
   requestLiveAudio,
@@ -249,11 +251,8 @@ async function loadKokoroStreaming(
 }
 
 function isRetryableLiveAudioError(error: unknown) {
-  const raw = error instanceof Error ? error.message : String(error)
-  if (/429|RESOURCE_EXHAUSTED|quota|rate limit|cooling down|Invalid live audio|does not match|not configured|Authentication|Unauthorized|Open a book/i.test(raw)) {
-    return false
-  }
-  return /502|503|504|timeout|timed out|unreachable|Failed to fetch|NetworkError|Audio fetch failed|decode|empty audio/i.test(raw)
+  if (isCallerCancelledAudioError(error)) return false
+  return isTransientLiveAudioError(error)
 }
 
 function sleep(ms: number, signal: AbortSignal) {
