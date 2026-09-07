@@ -114,6 +114,79 @@ describe('live audio quota backoff', () => {
     vi.useRealTimers()
   })
 
+  it('does not let a cancelled warmup abort an in-flight Play for the same passage', async () => {
+    let resolveRequest: ((value: { url: string; duration: number }) => void) | undefined
+    requestMock.mockImplementation(() => new Promise((resolve) => {
+      resolveRequest = resolve
+    }))
+
+    const warm = new AbortController()
+    const play = new AbortController()
+    const warmPending = requestLiveAudio('book-1', payload(), warm.signal)
+    const playPending = requestLiveAudio('book-1', payload(), play.signal)
+    await vi.waitFor(() => expect(requestMock).toHaveBeenCalledTimes(1))
+
+    warm.abort()
+    await expect(warmPending).rejects.toThrow(/Audio request aborted/)
+
+    resolveRequest?.({ url: 'data:audio/wav;base64,test', duration: 1.5 })
+    await expect(playPending).resolves.toMatchObject({ duration: 1.5 })
+    expect(play.signal.aborted).toBe(false)
+    expect(requestMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries a disconnected live-audio fetch so idle/frozen tabs can Play again', async () => {
+    vi.useFakeTimers()
+    requestMock
+      .mockRejectedValueOnce(Object.assign(new Error('The user aborted a request.'), { name: 'AbortError' }))
+      .mockResolvedValueOnce({
+        url: 'data:audio/wav;base64,test',
+        duration: 2,
+      })
+
+    const pending = requestLiveAudio('book-1', { ...payload(), provider: 'kokoro' })
+    const expectation = expect(pending).resolves.toMatchObject({ duration: 2 })
+    await vi.advanceTimersByTimeAsync(500)
+    await expectation
+    expect(requestMock).toHaveBeenCalledTimes(2)
+    vi.useRealTimers()
+  })
+
+  it('starts a fresh fetch after warmup is cancelled with no Play waiter', async () => {
+    requestMock.mockImplementation(() => new Promise(() => {}))
+    const warm = new AbortController()
+    const warmPending = requestLiveAudio('book-1', payload(), warm.signal)
+    await vi.waitFor(() => expect(requestMock).toHaveBeenCalledTimes(1))
+    warm.abort()
+    await expect(warmPending).rejects.toThrow(/Audio request aborted/)
+
+    requestMock.mockReset()
+    requestMock.mockResolvedValue({
+      url: 'data:audio/wav;base64,test',
+      duration: 3,
+    })
+    await expect(requestLiveAudio('book-1', payload())).resolves.toMatchObject({ duration: 3 })
+    expect(requestMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry when this Play was cancelled', async () => {
+    requestMock.mockImplementation(() => new Promise(() => {}))
+    const play = new AbortController()
+    const pending = requestLiveAudio('book-1', payload(), play.signal)
+    await vi.waitFor(() => expect(requestMock).toHaveBeenCalledTimes(1))
+    play.abort()
+    await expect(pending).rejects.toThrow(/Audio request aborted/)
+    expect(requestMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('maps leftover abort errors to a retry prompt instead of the raw message', () => {
+    expect(audioErrorMessage(new Error('Audio request aborted.'))).toBe(
+      'Could not start audio. Tap Play again.',
+    )
+    expect(audioErrorMessage(Object.assign(new Error('The user aborted a request.'), { name: 'AbortError' })))
+      .toBe('Could not start audio. Tap Play again.')
+  })
+
   it('serves IndexedDB hits without calling the network (survives refresh)', async () => {
     getCachedAudioMock.mockResolvedValueOnce({
       cacheKey: 'client-key',

@@ -1767,7 +1767,16 @@ async function synthesizeGeminiAudio(env: Env, options: {
   }
 }
 
-async function synthesizeKokoroRemote(
+function isRetryableKokoroRemoteError(error: unknown) {
+  if (error instanceof ApiError) {
+    if (error.status === 400 || error.status === 401 || error.status === 403 || error.status === 429) return false
+    return error.status >= 500
+  }
+  const message = error instanceof Error ? error.message : String(error)
+  return /abort|timeout|TimeoutError|network|refused|reset|unreachable|fetch/i.test(message)
+}
+
+async function synthesizeKokoroRemoteOnce(
   env: Env,
   input: {
     text: string
@@ -1838,6 +1847,24 @@ async function synthesizeKokoroRemote(
     voice,
     wav,
     duration,
+  }
+}
+
+async function synthesizeKokoroRemote(
+  env: Env,
+  input: {
+    text: string
+    voice: string | null
+    lengthScale: number
+  },
+): Promise<{ model: string; voice: string; wav: Uint8Array; duration: number }> {
+  try {
+    return await synthesizeKokoroRemoteOnce(env, input)
+  } catch (error) {
+    if (!isRetryableKokoroRemoteError(error)) throw error
+    // Idle / scale-to-zero: ping health to wake the machine, then synth once more.
+    await keepKokoroWarm(env, { synth: false }).catch(() => undefined)
+    return await synthesizeKokoroRemoteOnce(env, input)
   }
 }
 
