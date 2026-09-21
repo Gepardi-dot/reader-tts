@@ -430,3 +430,7 @@ export async function requestPersistentStorage(): Promise<boolean> {
     return false
   }
 }
+
+if (typeof document !== 'undefined' && document.documentElement) {
+  applyDisplayModeClass()
+}
