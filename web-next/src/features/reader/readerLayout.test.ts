@@ -44,13 +44,26 @@ describe('readerUsesWindowScroll', () => {
     expect(readerUsesWindowScroll('continuous')).toBe(true)
     expect(readerUsesWindowScroll('paginated')).toBe(false)
   })
+
+  it('keeps continuous on an inner scroller in the installed PWA', () => {
+    expect(readerUsesWindowScroll('continuous', true)).toBe(false)
+    expect(readerUsesWindowScroll('paginated', true)).toBe(false)
+  })
 })
 
 describe('readerScrollerStyle', () => {
   it('lets continuous grow with the document instead of an inner scrollport', () => {
     expect(readerScrollerStyle('continuous')).toEqual({
-      overflowX: 'hidden',
+      overflowX: 'clip',
       overflowY: 'visible',
+      touchAction: 'pan-y',
+    })
+  })
+
+  it('gives installed-PWA continuous a bounded inner scrollport', () => {
+    expect(readerScrollerStyle('continuous', true)).toEqual({
+      overflowX: 'hidden',
+      overflowY: 'auto',
       touchAction: 'pan-y',
     })
   })
@@ -75,6 +88,22 @@ describe('readerScrollerStyle', () => {
     applyReaderScrollerStyle(el, 'continuous')
     expect(el.style.overflow).toBe('')
     expect(el.style.overflowY).toBe('visible')
+    expect(el.style.overflowX).toBe('clip')
+    expect(el.style.touchAction).toBe('pan-y')
+  })
+
+  it('restores PWA continuous to overflow-y auto after the sheet closes', () => {
+    const el = {
+      style: {
+        overflow: 'hidden',
+        overflowX: 'hidden',
+        overflowY: 'hidden',
+        touchAction: 'none',
+      },
+    }
+    applyReaderScrollerStyle(el, 'continuous', true)
+    expect(el.style.overflow).toBe('')
+    expect(el.style.overflowY).toBe('auto')
     expect(el.style.overflowX).toBe('hidden')
     expect(el.style.touchAction).toBe('pan-y')
   })
