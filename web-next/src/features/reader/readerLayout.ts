@@ -20,23 +20,65 @@ export function normalizeReaderLayout(value: unknown): ReaderLayout {
 }
 
 export type ReaderScrollerStyle = {
-  overflowX: 'hidden'
+  overflowX: 'hidden' | 'clip'
   overflowY: 'hidden' | 'auto' | 'visible'
   touchAction: 'none' | 'pan-y'
 }
 
-/** Continuous reads on the document so iOS Safari/Chrome can collapse their chrome. */
-export function readerUsesWindowScroll(layout: ReaderLayout) {
-  return layout !== 'paginated'
+function detectStandaloneDisplay(): boolean {
+  if (typeof document !== 'undefined' && document.documentElement.classList.contains('pwa-standalone')) {
+    return true
+  }
+  if (typeof window === 'undefined') return false
+  const nav = window.navigator as Navigator & { standalone?: boolean }
+  if (nav.standalone === true) return true
+  if (typeof window.matchMedia !== 'function') return false
+  return (
+    window.matchMedia('(display-mode: standalone)').matches
+    || window.matchMedia('(display-mode: window-controls-overlay)').matches
+    || window.matchMedia('(display-mode: minimal-ui)').matches
+  )
 }
 
-/** Axis-specific overflow so a sheet lock cannot leave `overflow: hidden` stuck. */
-export function readerScrollerStyle(layout: ReaderLayout): ReaderScrollerStyle {
-  const paginated = layout === 'paginated'
+/**
+ * Continuous in a browser tab scrolls the document so iOS Safari/Chrome can
+ * collapse their chrome. Installed PWAs have no chrome, and standalone
+ * WKWebView will not move the document — use an inner scrollport there.
+ */
+export function readerUsesWindowScroll(layout: ReaderLayout, standalone = detectStandaloneDisplay()) {
+  return layout !== 'paginated' && !standalone
+}
+
+/**
+ * Axis-specific overflow so a sheet lock cannot leave `overflow: hidden` stuck.
+ *
+ * Browser continuous MUST use overflow-x: clip (not hidden). `hidden` +
+ * `visible` is invalid: CSS computes overflow-y to `auto`, the inner box
+ * becomes a scrollport, and pan/wheel die there because the box grew to
+ * fit the book.
+ */
+export function readerScrollerStyle(
+  layout: ReaderLayout,
+  standalone = detectStandaloneDisplay(),
+): ReaderScrollerStyle {
+  if (layout === 'paginated') {
+    return {
+      overflowX: 'hidden',
+      overflowY: 'hidden',
+      touchAction: 'none',
+    }
+  }
+  if (readerUsesWindowScroll(layout, standalone)) {
+    return {
+      overflowX: 'clip',
+      overflowY: 'visible',
+      touchAction: 'pan-y',
+    }
+  }
   return {
     overflowX: 'hidden',
-    overflowY: paginated ? 'hidden' : 'visible',
-    touchAction: paginated ? 'none' : 'pan-y',
+    overflowY: 'auto',
+    touchAction: 'pan-y',
   }
 }
 
@@ -50,8 +92,9 @@ export function applyReaderScrollerStyle(
     }
   },
   layout: ReaderLayout,
+  standalone = detectStandaloneDisplay(),
 ): void {
-  const next = readerScrollerStyle(layout)
+  const next = readerScrollerStyle(layout, standalone)
   // Clear the shorthand first: `overflow: hidden` would override overflowY.
   el.style.overflow = ''
   el.style.overflowX = next.overflowX

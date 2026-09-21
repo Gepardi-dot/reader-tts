@@ -177,7 +177,8 @@
     min-height: 100dvh;
   }
 
-  /* Continuous reader: document scroll so iOS Safari/Chrome can collapse chrome. */
+  /* Continuous reader (browser tab): document scroll so iOS Safari/Chrome
+     can collapse chrome. */
   html.reader-window-scroll,
   html.reader-window-scroll body {
     height: auto;
@@ -189,6 +190,17 @@
     height: auto;
     min-height: 100svh;
     overflow: visible;
+  }
+
+  /* Continuous reader (installed PWA): standalone WKWebView will not scroll
+     the document, so lock the shell and scroll inside the reader. */
+  html.pwa-standalone:has([data-reader-layout="continuous"]),
+  html.pwa-standalone:has([data-reader-layout="continuous"]) body,
+  html.pwa-standalone:has([data-reader-layout="continuous"]) #root {
+    height: 100%;
+    height: 100dvh;
+    overflow: hidden;
+    overscroll-behavior: none;
   }
 }
 
@@ -258,11 +270,32 @@
 }
 
 /* Continuous must not trap scroll in an inner box — iOS only hides the
-   address/tab bars when the document itself is scrolling. */
-[data-reader-layout="continuous"]:not([data-reader-sheet-lock]) [data-reader-scroll] {
-  overflow-x: hidden !important;
+   address/tab bars when the document itself is scrolling.
+   overflow-x MUST be clip (not hidden): hidden + visible computes overflow-y
+   to auto and swallows pan/wheel in a box that cannot actually scroll. */
+html:not(.pwa-standalone) [data-reader-layout="continuous"]:not([data-reader-sheet-lock]) [data-reader-scroll] {
+  overflow-x: clip !important;
   overflow-y: visible !important;
   touch-action: pan-y !important;
+}
+/* Installed PWA has no browser chrome, and the document does not scroll.
+   Pin the reader to the screen and give continuous a real inner scrollport. */
+html.pwa-standalone [data-reader-layout="continuous"] {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+html.pwa-standalone [data-reader-layout="continuous"]:not([data-reader-sheet-lock]) [data-reader-scroll],
+[data-reader-layout="continuous"][data-reader-scroll-mode="inner"]:not([data-reader-sheet-lock]) [data-reader-scroll] {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  touch-action: pan-y !important;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 [data-reader-layout="continuous"] [data-reader-text] {
   clip-path: none !important;
