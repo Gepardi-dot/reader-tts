@@ -4,9 +4,9 @@
  * Every gloss that reaches the card is short, capitalized, and finished.
  */
 
-import { isGrammaticalFormDefinition } from './dictionaryMorphology'
+import { extractFormOfLemmaFromText, isGrammaticalFormDefinition } from './dictionaryMorphology'
 
-export const DICTIONARY_GLOSS_VERSION = 2
+export const DICTIONARY_GLOSS_VERSION = 3
 
 export interface GlossDefinition {
   definition: string
@@ -63,6 +63,119 @@ export function hasRealGloss(payload: { entries?: GlossEntry[] } | null | undefi
     }
   }
   return false
+}
+
+const LEADING_SPECIALIST_LABEL =
+  /^\s*\((?:archaic|obsolete|rare|dated|historical|dialect|music|musical|law|legal|medicine|medical|grammar|linguistics|heraldry|nautical|botany|zoology|anatomy)\)/i
+
+const SPECIALIST_WORD =
+  /\b(?:fugue|dux|heraldry|blazon|phoneme|morpheme|accusative|nominative|genitive|dative|vocative|subjunctive|counterpoint|taxonomy)\b/i
+
+/** A rare technical sense, not the meaning a reader needs for an ordinary word. */
+export function isSpecialistGloss(text: string | null | undefined): boolean {
+  const gloss = (text ?? '').trim()
+  if (!gloss) return false
+  if (LEADING_SPECIALIST_LABEL.test(gloss)) return true
+  if (SPECIALIST_WORD.test(gloss)) return true
+  return false
+}
+
+export function canonicalGlossPos(raw: string | null | undefined): string {
+  const key = (raw ?? '').trim().toLowerCase().split(/[\s,/]+/)[0] ?? ''
+  const aliases: Record<string, string> = {
+    n: 'noun',
+    v: 'verb',
+    adj: 'adjective',
+    adv: 'adverb',
+  }
+  return aliases[key] || key
+}
+
+export type AuthoritativeReading =
+  | { kind: 'sense'; partOfSpeech: string; definition: string; examples: string[]; everyday: boolean }
+  | { kind: 'inflection'; lemma: string; partOfSpeech: string }
+
+interface ListedSense {
+  partOfSpeech: string
+  definition: string
+  examples: string[]
+  everyday: boolean
+  inflection: { lemma: string; partOfSpeech: string } | null
+}
+
+function inflectionOf(def: GlossDefinition, partOfSpeech: string): { lemma: string; partOfSpeech: string } | null {
+  const pos = canonicalGlossPos(partOfSpeech) || 'verb'
+  const linked = (def.formOf || '').trim().toLowerCase()
+  if (linked) return { lemma: linked, partOfSpeech: pos }
+  const text = def.definition || ''
+  if (!isGrammaticalFormDefinition(text)) return null
+  if (!/\b(third[- ]person|first[- ]person|second[- ]person|plural|past tense|present tense|participle|gerund|indicative|infinitive)\b/i.test(text)) {
+    return null
+  }
+  const lemma = extractFormOfLemmaFromText(text)
+  if (!lemma) return null
+  return { lemma, partOfSpeech: pos }
+}
+
+/**
+ * Dictionary order, not a score.
+ * An ordinary sense wins. A line that only says "form of come" sends us to that base word.
+ * A rare sense such as the fugue noun "comes" is used only when the word has no ordinary meaning
+ * and is not an inflection.
+ */
+export function authoritativeReading(
+  payload: { entries?: GlossEntry[] } | null | undefined,
+  preferPos?: string | null,
+): AuthoritativeReading | null {
+  const listed: ListedSense[] = []
+  for (const entry of payload?.entries ?? []) {
+    const pos = canonicalGlossPos(entry.partOfSpeech)
+    for (const def of entry.definitions ?? []) {
+      const definition = (def.definition || '').trim()
+      if (!definition) continue
+      const inflection = inflectionOf(def, pos)
+      const everyday = !inflection && isUsableGloss(definition, def.formOf) && !isSpecialistGloss(definition)
+      if (!everyday && !inflection && !isUsableGloss(definition, def.formOf)) continue
+      listed.push({
+        partOfSpeech: pos,
+        definition,
+        examples: (def.examples ?? []).map((example) => example.trim()).filter(Boolean),
+        everyday,
+        inflection,
+      })
+    }
+  }
+
+  const wanted = canonicalGlossPos(preferPos)
+  const everyday = listed.filter((sense) => sense.everyday)
+  const everydayPool = wanted ? everyday.filter((sense) => sense.partOfSpeech === wanted) : everyday
+  const chosenEveryday = (everydayPool.length ? everydayPool : everyday)[0]
+  if (chosenEveryday) {
+    return {
+      kind: 'sense',
+      partOfSpeech: chosenEveryday.partOfSpeech || 'word',
+      definition: chosenEveryday.definition,
+      examples: chosenEveryday.examples,
+      everyday: true,
+    }
+  }
+
+  const inflections = listed
+    .map((sense) => sense.inflection)
+    .filter((item): item is { lemma: string; partOfSpeech: string } => Boolean(item))
+  const inflectionPool = wanted ? inflections.filter((item) => item.partOfSpeech === wanted) : inflections
+  const inflection = (inflectionPool.length ? inflectionPool : inflections)[0]
+  if (inflection) return { kind: 'inflection', ...inflection }
+
+  const fallback = listed.find((sense) => isUsableGloss(sense.definition))
+  if (!fallback) return null
+  return {
+    kind: 'sense',
+    partOfSpeech: fallback.partOfSpeech || 'word',
+    definition: fallback.definition,
+    examples: fallback.examples,
+    everyday: false,
+  }
 }
 
 /** Same wording every time: keep Free Dictionary when it has a real sense. */

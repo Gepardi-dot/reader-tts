@@ -204,6 +204,28 @@ describe('buildDictionaryCard', () => {
     expect(card!.groups[0]!.senses[0]!.example).toBe('a changing world')
   })
 
+  it('does not show the rare fugue sense of comes when the verb meaning is present', () => {
+    const card = buildDictionaryCard({
+      term: 'come',
+      queriedTerm: 'comes',
+      available: true,
+      source: 'online',
+      preferPos: 'verb',
+      entries: [
+        {
+          partOfSpeech: 'noun',
+          definitions: [{ definition: 'The answer to the theme, or dux, in a fugue.' }],
+        },
+        {
+          partOfSpeech: 'verb',
+          definitions: [{ definition: 'To move toward the speaker or a place.' }],
+        },
+      ],
+    }, { queriedTerm: 'comes', maxPos: 1 })
+    expect(card!.groups[0]!.partOfSpeech).toBe('verb')
+    expect(card!.groups[0]!.senses[0]!.definition).toMatch(/move toward/i)
+  })
+
   it('uses the surrounding sentence to pick the sense', () => {
     const card = buildDictionaryCard({
       term: 'bank',

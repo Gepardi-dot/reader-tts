@@ -4078,7 +4078,7 @@ async function providers(env: Env) {
 async function dictionaryLookup(url: URL, env: Env, ctx: ExecutionContext) {
   const term = normalizeDictionaryTerm(url.searchParams.get('term') ?? '')
   if (!term) throw new ApiError(400, 'Dictionary term is required.')
-  const cacheKey = `https://dictionary-cache.higgsread.internal/lookup?v=5&q=${encodeURIComponent(term)}`
+  const cacheKey = `https://dictionary-cache.higgsread.internal/lookup?v=6&q=${encodeURIComponent(term)}`
   try {
     const cached = await caches.default.match(cacheKey)
     if (cached) return cached
