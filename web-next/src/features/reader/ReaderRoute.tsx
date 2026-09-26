@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo, type ReactNode } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowRight, Languages, MessageSquare, Settings2, Volume2, X,
@@ -9,7 +9,7 @@ import {
   ChevronLeft, ChevronRight, ChevronDown,
 } from 'lucide-react'
 import { AppearanceContent } from './AppearanceContent'
-import { DictionaryPanel } from './DictionaryPanel'
+import { DictionaryPanel, type DictionarySaveEntry } from './DictionaryPanel'
 import { READER_THEMES } from './readerTheme'
 import { api, AuthError } from '@/shared/api/client'
 import {
@@ -185,7 +185,7 @@ interface ReaderParagraph {
 }
 
 type SecondaryPanel =
-  | { kind: 'dictionary'; word: string; context?: string }
+  | { kind: 'dictionary'; word: string; context?: string; start?: number; end?: number }
   | { kind: 'notes'; text: string; start: number; end: number }
   | { kind: 'askai'; text: string }
   | { kind: 'translate'; text: string }
@@ -699,6 +699,58 @@ async function getOrCreateDeck(): Promise<string | null> {
   return firstVocabularyDeckId().catch(() => null)
 }
 
+async function saveDictionaryEntry(
+  entry: DictionarySaveEntry,
+  source: { context?: string; start?: number; end?: number; bookId: string },
+  queryClient: QueryClient,
+  showToast: (msg: string) => void,
+) {
+  try {
+    const deckId = await getOrCreateDeck()
+    if (!deckId) {
+      showToast('No vocabulary deck')
+      throw new Error('No vocabulary deck')
+    }
+    const front = entry.word.trim()
+    const passage = (source.context || '').trim()
+    const exampleSentence = passage.toLowerCase().includes(front.toLowerCase())
+      ? passage
+      : (entry.example || passage)
+    await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
+      noteType: 'basic',
+      front,
+      back: entry.definition,
+      extra: entry.pronunciation,
+      exampleSentence,
+      topic: 'Reading',
+      tags: ['reader'],
+      sourceRef: `reader-vocab:${front.toLowerCase()}`,
+      metadata: {
+        source: 'reader-definition',
+        bookId: source.bookId,
+        start: source.start,
+        end: source.end,
+        context: passage,
+        dictionarySource: entry.definition ? 'define-card' : null,
+        partOfSpeech: entry.partOfSpeech,
+        rankedDefinition: true,
+      },
+    })
+    queryClient.invalidateQueries({ queryKey: ['decks'] })
+    queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
+    showToast(entry.definition ? 'Saved to Vocabulary ✓' : 'Saved (no definition found)')
+  } catch (err) {
+    if (err instanceof Error && err.message === 'No vocabulary deck') throw err
+    console.error('Vocabulary save failed', err)
+    if (err instanceof AuthError) showToast('Sign in to save')
+    else {
+      const msg = err instanceof Error ? err.message : String(err)
+      showToast(`Could not save: ${msg.slice(0, 60)}`)
+    }
+    throw err
+  }
+}
+
 // ── BottomSheet ───────────────────────────────────────────────────────────────
 
 function BottomSheet({ open, onClose, children, bg = '#ffffff' }: {
@@ -894,6 +946,8 @@ function SelectionMenu({
           kind: 'dictionary',
           word: sel.text,
           context: readingContext(fullText, sel.startOffset, sel.endOffset),
+          start: sel.startOffset,
+          end: sel.endOffset,
         })
         onClose()
         break
@@ -4557,7 +4611,18 @@ export function ReaderRoute() {
           const p = panel ?? panelSnapshotRef.current
           if (!p) return null
           if (p.kind === 'dictionary') return (
-            <DictionaryPanel word={p.word} context={p.context} onClose={closePanel} colors={colors} />
+            <DictionaryPanel
+              word={p.word}
+              context={p.context}
+              onClose={closePanel}
+              colors={colors}
+              onSave={(entry) => saveDictionaryEntry(
+                entry,
+                { context: p.context, start: p.start, end: p.end, bookId: bookId! },
+                queryClient,
+                showToast,
+              )}
+            />
           )
           if (p.kind === 'notes') return (
             <NotesPanel text={p.text} start={p.start} end={p.end}

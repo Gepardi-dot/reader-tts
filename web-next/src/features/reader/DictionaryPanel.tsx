@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Volume2, X } from 'lucide-react'
+import { BookMarked, Volume2, X } from 'lucide-react'
 import { READER_THEMES } from './readerTheme'
 import {
   dictionaryQueryOptions,
@@ -17,15 +17,25 @@ import {
 
 type ReaderColors = typeof READER_THEMES['paper']
 
+export interface DictionarySaveEntry {
+  word: string
+  definition: string | null
+  pronunciation: string | null
+  example: string | null
+  partOfSpeech: string | null
+}
+
 export function DictionaryPanel({
   word: initialWord,
   context,
   onClose,
+  onSave,
   colors,
 }: {
   word: string
   context?: string | null
   onClose: () => void
+  onSave?: (entry: DictionarySaveEntry) => Promise<void>
   colors: ReaderColors
 }) {
   const lookupWord = normalizeLookupWord(initialWord) || initialWord
@@ -43,6 +53,10 @@ export function DictionaryPanel({
   })
   const showLoading = !card && (isFetching || !dictData)
   const [speaking, setSpeaking] = useState(false)
+  const [savingWord, setSavingWord] = useState<string | null>(null)
+  const [savedWord, setSavedWord] = useState<string | null>(null)
+  const saving = savingWord === lookupWord
+  const saved = savedWord === lookupWord
   const speakLock = useRef(false)
 
   useEffect(() => {
@@ -63,6 +77,26 @@ export function DictionaryPanel({
     } finally {
       speakLock.current = false
       setSpeaking(false)
+    }
+  }
+
+  async function save() {
+    const sense = card?.groups[0]?.senses[0]
+    if (!onSave || !card || saving || saved) return
+    setSavingWord(lookupWord)
+    try {
+      await onSave({
+        word: card.term || lookupWord,
+        definition: sense?.definition ?? null,
+        pronunciation: card.pronunciation,
+        example: sense?.example ?? null,
+        partOfSpeech: card.groups[0]?.partOfSpeech ?? null,
+      })
+      setSavedWord(lookupWord)
+    } catch {
+      setSavedWord((current) => (current === lookupWord ? null : current))
+    } finally {
+      setSavingWord((current) => (current === lookupWord ? null : current))
     }
   }
 
@@ -123,15 +157,27 @@ export function DictionaryPanel({
             )}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="p-1.5 rounded-full transition-opacity shrink-0"
-          style={{ color: faint }}
-          aria-label="Close"
-        >
-          <X size={16} />
-        </button>
+        <div className="flex items-center gap-0.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={!card || saving || saved || !onSave}
+            aria-label={saved ? 'Saved to vocabulary' : 'Save to vocabulary'}
+            className="p-1.5 rounded-full transition-opacity shrink-0 disabled:opacity-35"
+            style={{ color: saved ? accent : faint }}
+          >
+            <BookMarked size={15} strokeWidth={1.75} fill={saved ? accent : 'none'} />
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 rounded-full transition-opacity shrink-0"
+            style={{ color: faint }}
+            aria-label="Close"
+          >
+            <X size={16} />
+          </button>
+        </div>
       </div>
 
       <div className="px-5 pt-4 pb-2" style={{ maxHeight: '62vh', overflowY: 'auto', minHeight: 96 }}>
