@@ -9,6 +9,8 @@ export interface DictionaryDefinition {
   definition: string
   examples?: string[]
   synonyms?: string[]
+  /** Lemma when this gloss is a grammatical form-of line ("inspires" → "inspire"). */
+  formOf?: string | null
 }
 
 export interface DictionaryEntry {
@@ -23,6 +25,26 @@ export interface DictionaryResponse {
   pronunciation?: string | null
   entries?: DictionaryEntry[]
   relatedTerms?: string[]
+  /** `online` / `gemini` beat the WordNet seed for learner-quality glosses. */
+  source?: 'seed' | 'online' | 'gemini' | 'local' | null
+  /** Syllable form like `jeal·ous·y` when the source provides hyphenation. */
+  hyphenation?: string | null
+  /** Word the reader actually selected, when the payload was resolved to a lemma. */
+  queriedTerm?: string | null
+  /** POS to prefer when ranking (e.g. verb for -ing forms). */
+  preferPos?: string | null
+  /** Root word for derived forms (brilliantly → brilliant). */
+  origin?: DictionaryOrigin | null
+  /** 2 = one-source settled gloss. Older cached payloads are fetched again. */
+  glossVersion?: number
+}
+
+export interface DictionaryOrigin {
+  term: string
+  pronunciation?: string | null
+  partOfSpeech?: string | null
+  definition: string
+  example?: string | null
 }
 
 interface DictionarySeed {
@@ -59,6 +81,27 @@ function normalizeTerm(term: string) {
 
 export function hasDictionaryDefinitions(payload: DictionaryResponse | null | undefined) {
   return Boolean(payload?.entries?.some((entry) => (entry.definitions?.length ?? 0) > 0))
+}
+
+function longestDefinitionLength(payload: DictionaryResponse) {
+  let max = 0
+  for (const entry of payload.entries ?? []) {
+    for (const def of entry.definitions ?? []) {
+      const n = def.definition?.trim().length ?? 0
+      if (n > max) max = n
+    }
+  }
+  return max
+}
+
+/** True when the payload looks like a real dictionary, not a WordNet stub. */
+export function isQualityDictionaryPayload(payload: DictionaryResponse | null | undefined) {
+  if (!payload || !hasDictionaryDefinitions(payload)) return false
+  const longest = longestDefinitionLength(payload)
+  if (payload.source === 'online' || payload.source === 'gemini') return longest >= 12
+  if (longest < 20) return false
+  const phon = payload.pronunciation ?? ''
+  return phon.includes('/') || phon.includes('[') || /[ˈˌəɪæʌθʃʒŋ]/.test(phon)
 }
 
 function idbAvailable() {
@@ -132,9 +175,12 @@ export function ensureDictionarySeed(): Promise<Map<string, DictionaryResponse> 
       seedMap = new Map(
         Object.entries(seed.terms).map(([k, v]) => [normalizeTerm(k), v]),
       )
-      // Promote whole seed into the hot memory ring (capped by MEMORY_CAP via insert order).
+      // Promote seed into memory, but never clobber a better cached lookup.
       for (const [k, v] of seedMap) {
-        if (hasDictionaryDefinitions(v)) remember(k, v)
+        if (!hasDictionaryDefinitions(v)) continue
+        const existing = memory.get(k)
+        if (existing && isQualityDictionaryPayload(existing)) continue
+        remember(k, v)
       }
       return seedMap
     })
@@ -167,9 +213,9 @@ export async function lookupStaticDictionary(term: string) {
 export async function getCachedDictionary(term: string) {
   const key = normalizeTerm(term)
   const mem = memory.get(key)
-  if (mem) return mem
+  if (mem && isQualityDictionaryPayload(mem)) return mem
 
-  if (!idbAvailable()) return null
+  if (!idbAvailable()) return mem ?? null
   const userId = activeUserId ?? LOCAL_USER_ID
 
   try {
@@ -186,22 +232,18 @@ export async function getCachedDictionary(term: string) {
           return local.payload
         }
       }
-      return null
+      return mem ?? null
     }
 
-    record.lastAccessedAt = Date.now()
-    await withStore('readwrite', (store) => {
-      store.put(record)
-    })
     remember(key, record.payload)
     return record.payload
   } catch {
-    return null
+    return mem ?? null
   }
 }
 
 export async function putCachedDictionary(term: string, payload: DictionaryResponse) {
-  if (!hasDictionaryDefinitions(payload)) return
+  if (!isQualityDictionaryPayload(payload)) return
   const normalized = normalizeTerm(term)
   remember(normalized, payload)
 
@@ -233,18 +275,15 @@ export async function resolveLocalDictionary(term: string): Promise<DictionaryRe
   const key = normalizeTerm(term)
   if (!key) return null
 
-  const mem = memory.get(key)
-  if (mem) return mem
+  const cached = await getCachedDictionary(key)
+  if (hasDictionaryDefinitions(cached) && isQualityDictionaryPayload(cached)) return cached
 
-  // Kick seed load; if already ready this is immediate.
   const seeded = await lookupStaticDictionary(key)
+  if (hasDictionaryDefinitions(seeded) && isQualityDictionaryPayload(seeded)) return seeded
+
+  if (hasDictionaryDefinitions(cached)) return cached
   if (hasDictionaryDefinitions(seeded)) return seeded
-
-  const learned = await getCachedDictionary(key)
-  if (hasDictionaryDefinitions(learned)) return learned
-
-  // Seed may have a partial/empty stub — return it only if nothing better.
-  return seeded ?? learned ?? null
+  return cached ?? seeded ?? null
 }
 
 export async function clearDictionaryCacheForUser(userId: string) {

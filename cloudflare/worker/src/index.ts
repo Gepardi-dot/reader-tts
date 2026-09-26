@@ -1,3 +1,4 @@
+import { resolveDictionary, normalizeDictionaryTerm } from './dictionary'
 import {
   NotionHttpError,
   disconnectNotion,
@@ -260,7 +261,7 @@ async function route(request: Request, env: Env, url: URL, ctx: ExecutionContext
   if (path === '/api/providers' && request.method === 'GET') return providers(env)
   // Public warmup: ping hosted Kokoro so Fly stays warm before the user plays audio.
   if (path === '/api/providers/warmup' && request.method === 'POST') return providersWarmup(request, env, ctx)
-  if (path === '/api/dictionary/lookup' && request.method === 'GET') return dictionaryLookup(url, env)
+  if (path === '/api/dictionary/lookup' && request.method === 'GET') return dictionaryLookup(url, env, ctx)
 
   const user = await requireUser(request, env)
 
@@ -4074,174 +4075,37 @@ async function providers(env: Env) {
   })
 }
 
-function dictionaryTermVariants(term: string): string[] {
-  const base = term.trim().toLowerCase().replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '')
-  if (!base) return []
-  const out: string[] = [base]
-  const push = (v: string) => {
-    const t = v.trim().toLowerCase()
-    if (t && t.length >= 2 && !out.includes(t)) out.push(t)
-  }
-  // possessives / trailing punctuation already stripped
-  if (base.endsWith("'s") || base.endsWith("’s")) push(base.slice(0, -2))
-  if (base.endsWith('ies') && base.length > 4) push(`${base.slice(0, -3)}y`)
-  if (base.endsWith('ves') && base.length > 4) push(`${base.slice(0, -3)}f`)
-  if (base.endsWith('ing') && base.length > 5) {
-    push(base.slice(0, -3))
-    push(`${base.slice(0, -3)}e`)
-  }
-  if (base.endsWith('ed') && base.length > 4) {
-    push(base.slice(0, -2))
-    push(`${base.slice(0, -1)}`) // loved -> love
-    push(base.slice(0, -2))
-  }
-  if (base.endsWith('es') && base.length > 3) push(base.slice(0, -2))
-  if (base.endsWith('s') && !base.endsWith('ss') && base.length > 3) push(base.slice(0, -1))
-  if (base.endsWith('ly') && base.length > 4) push(base.slice(0, -2))
-  return out
-}
-
-function normalizeFreeDictionaryJson(raw: unknown, term: string) {
-  const rows = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? [raw] : [])
-  const first = rows[0] as Record<string, unknown> | undefined
-  if (!first) {
-    return {
-      term,
-      available: false,
-      message: 'No definition found.',
-      pronunciation: null as string | null,
-      entries: [] as Array<Record<string, unknown>>,
-      relatedTerms: [] as string[],
-      source: 'none',
-    }
-  }
-
-  const meanings = Array.isArray(first.meanings) ? first.meanings as Array<Record<string, unknown>> : []
-  const phonetics = Array.isArray(first.phonetics) ? first.phonetics as Array<Record<string, unknown>> : []
-  const phoneticText = stringField(first.phonetic)
-    || phonetics.map((p) => stringField(p.text)).find(Boolean)
-    || null
-
-  const entries = meanings.slice(0, 6).map((m) => {
-    const defs = Array.isArray(m.definitions) ? m.definitions as Array<Record<string, unknown>> : []
-    const meaningSynonyms = Array.isArray(m.synonyms) ? m.synonyms.map(String) : []
-    return {
-      partOfSpeech: stringField(m.partOfSpeech) || '',
-      definitions: defs.slice(0, 5).map((d) => ({
-        definition: stringField(d.definition),
-        examples: stringField(d.example) ? [stringField(d.example)] : [],
-        synonyms: [
-          ...(Array.isArray(d.synonyms) ? d.synonyms.map(String) : []),
-          ...meaningSynonyms,
-        ].filter(Boolean).slice(0, 8),
-      })).filter((d) => d.definition),
-    }
-  }).filter((e) => e.definitions.length > 0)
-
-  return {
-    term: stringField(first.word) || term,
-    available: entries.length > 0,
-    message: entries.length > 0 ? null : 'No definition found.',
-    pronunciation: phoneticText,
-    entries,
-    relatedTerms: [] as string[],
-    source: 'online',
-  }
-}
-
-async function fetchFreeDictionaryNormalized(term: string) {
-  const upstream = await fetch(
-    `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`,
-    { signal: AbortSignal.timeout(7000) },
-  )
-  if (!upstream.ok) return null
-  const raw = await upstream.json().catch(() => null)
-  const normalized = normalizeFreeDictionaryJson(raw, term)
-  return normalized.available ? normalized : null
-}
-
-async function geminiDefineWord(env: Env, term: string) {
-  if (!env.GEMINI_API_KEY?.trim()) return null
-  try {
-    const text = await geminiGenerateText(env, {
-      system: (
-        'You are a concise English dictionary. '
-        + 'Given a headword, reply with plain text only in this exact format:\n'
-        + 'POS: <part of speech>\n'
-        + 'DEF: <one clear definition, max 28 words>\n'
-        + 'DEF2: <optional second sense, or NONE>\n'
-        + 'EX: <short example sentence using the word, or NONE>\n'
-        + 'Do not add any other lines.'
-      ),
-      contents: [{ role: 'user', parts: [{ text: `Define the English word: ${term}` }] }],
-      maxOutputTokens: 220,
-      temperature: 0.2,
-    })
-    const pos = text.match(/^POS:\s*(.+)$/im)?.[1]?.trim() || 'word'
-    const def1 = text.match(/^DEF:\s*(.+)$/im)?.[1]?.trim()
-    const def2Raw = text.match(/^DEF2:\s*(.+)$/im)?.[1]?.trim()
-    const exRaw = text.match(/^EX:\s*(.+)$/im)?.[1]?.trim()
-    const defs = [def1, def2Raw && def2Raw.toUpperCase() !== 'NONE' ? def2Raw : null]
-      .filter((d): d is string => Boolean(d && d.length > 3 && d.toUpperCase() !== 'NONE'))
-    if (defs.length === 0) return null
-    const example = exRaw && exRaw.toUpperCase() !== 'NONE' ? [exRaw] : []
-    return {
-      term,
-      available: true,
-      message: null as string | null,
-      pronunciation: null as string | null,
-      entries: [{
-        partOfSpeech: pos,
-        definitions: defs.map((definition, i) => ({
-          definition,
-          examples: i === 0 ? example : [],
-          synonyms: [] as string[],
-        })),
-      }],
-      relatedTerms: [] as string[],
-      source: 'gemini',
-    }
-  } catch {
-    return null
-  }
-}
-
-async function dictionaryLookup(url: URL, env: Env) {
-  const term = url.searchParams.get('term')?.trim()
+async function dictionaryLookup(url: URL, env: Env, ctx: ExecutionContext) {
+  const term = normalizeDictionaryTerm(url.searchParams.get('term') ?? '')
   if (!term) throw new ApiError(400, 'Dictionary term is required.')
-  const variants = dictionaryTermVariants(term)
-  if (variants.length === 0) {
-    return json({
-      term,
-      available: false,
-      message: 'No definition found.',
-      pronunciation: null,
-      entries: [],
-      relatedTerms: [],
-      source: 'none',
-    })
+  const cacheKey = `https://dictionary-cache.higgsread.internal/lookup?v=5&q=${encodeURIComponent(term)}`
+  try {
+    const cached = await caches.default.match(cacheKey)
+    if (cached) return cached
+  } catch {
+    // Cache API is optional in some runtimes.
   }
 
-  for (const candidate of variants) {
-    try {
-      const hit = await fetchFreeDictionaryNormalized(candidate)
-      if (hit) return json(hit)
-    } catch {
-      // try next variant / fallback
-    }
-  }
-
-  // Last resort: Gemini so uncommon / missing Free Dictionary terms still define.
-  const gemini = await geminiDefineWord(env, variants[0])
-  if (gemini) return json(gemini)
-
-  return json({
-    term: variants[0],
-    available: false,
-    message: 'No definition found.',
-    pronunciation: null,
-    entries: [],
-    relatedTerms: [],
-    source: 'none',
+  const body = await resolveDictionary(term, {
+    generate: async (system, prompt) => {
+      if (!env.GEMINI_API_KEY?.trim()) return null
+      try {
+        return await geminiGenerateText(env, {
+          system,
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          maxOutputTokens: 160,
+          temperature: 0.1,
+        })
+      } catch {
+        return null
+      }
+    },
   })
+
+  const headers = body.available
+    ? { 'Cache-Control': 'public, max-age=86400, s-maxage=604800' }
+    : { 'Cache-Control': 'public, max-age=600' }
+  const response = json(body as JsonValue, 200, headers)
+  ctx.waitUntil(caches.default.put(cacheKey, response.clone()).catch(() => undefined))
+  return response
 }

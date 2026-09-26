@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   formatStudyDefinition,
   isFabricatedContextSentence,
+  isInflectionHeader,
   isNicheDomainDefinition,
   isRealBookSentence,
   pickBestDefinition,
@@ -72,6 +73,13 @@ describe('pickBestDefinition', () => {
   it('returns null for empty payload', () => {
     expect(pickBestDefinition(null)).toBeNull()
     expect(pickBestDefinition({ term: 'x', available: false, entries: [] })).toBeNull()
+  })
+})
+
+describe('isInflectionHeader', () => {
+  it('rejects grammar form lines and keeps real glosses', () => {
+    expect(isInflectionHeader('noun: jealousy; plural noun: jealousies')).toBe(true)
+    expect(isInflectionHeader('the state or feeling of being jealous.')).toBe(false)
   })
 })
 

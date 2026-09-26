@@ -9,14 +9,12 @@
  */
 
 import {
-  ensureDictionarySeed,
-  hasDictionaryDefinitions,
-  putCachedDictionary,
-  resolveLocalDictionary,
+  isQualityDictionaryPayload,
   type DictionaryDefinition,
   type DictionaryEntry,
   type DictionaryResponse,
 } from './dictionaryCache'
+import { isGrammaticalFormDefinition } from './dictionaryMorphology'
 
 export interface WordDefinitionHit {
   term: string
@@ -36,9 +34,10 @@ export interface LookupDefinitionOptions {
   preferPos?: string | null
 }
 
-interface RankedSense {
+export interface RankedSense {
   definition: string
   example: string | null
+  examples: string[]
   partOfSpeech: string | null
   score: number
   index: number
@@ -88,6 +87,20 @@ function overlapScore(a: Set<string>, b: Set<string>): number {
  * True when a stored gloss is usable as text but looks like a niche/technical
  * sense that should be re-ranked against common reading senses.
  */
+/** Grammar/inflection lines like "noun: jealousy; plural noun: jealousies". */
+export function isInflectionHeader(text: string | null | undefined): boolean {
+  if (!text) return false
+  const t = text.trim()
+  if (!t) return false
+  if (
+    /^(?:(?:plural|proper|mass|count)\s+)?(?:noun|verb|adjective|adverb|pronoun|preposition|conjunction|interjection|determiner|exclamation)s?\s*:/i.test(t)
+  ) {
+    return true
+  }
+  if (/noun:\s+\S+;\s+plural noun:/i.test(t)) return true
+  return false
+}
+
 export function isNicheDomainDefinition(def: string | null | undefined): boolean {
   if (!def) return false
   const text = def.trim()
@@ -236,6 +249,7 @@ function scoreSense(input: {
   score += posPrior(partOfSpeech, hasContext)
   score += lengthScore(definition)
   score -= domainPenalty(definition)
+  if (example) score += 16
 
   // Prefer earlier senses only lightly (API order is often wrong for reading).
   score -= Math.min(12, index * 2)
@@ -279,13 +293,13 @@ function scoreSense(input: {
 }
 
 /**
- * Rank every sense in a dictionary payload and return the best for reading vocab.
+ * Rank every usable sense in a dictionary payload for reading.
  */
-export function pickBestDefinition(
+export function collectRankedSenses(
   payload: DictionaryResponse | null | undefined,
   options: LookupDefinitionOptions = {},
-): WordDefinitionHit | null {
-  if (!payload?.entries?.length) return null
+): RankedSense[] {
+  if (!payload?.entries?.length) return []
 
   const term = (payload.term ?? '').trim()
   const contextTokens = contentTokens(options.context ?? '')
@@ -297,10 +311,13 @@ export function pickBestDefinition(
     for (const def of entry.definitions ?? [] as DictionaryDefinition[]) {
       const text = def.definition?.trim()
       if (!text || text.length < 8) continue
+      if (isInflectionHeader(text)) continue
+      if (isGrammaticalFormDefinition(text)) continue
       if (text.toLowerCase() === term.toLowerCase()) continue
       if (text.split(/\s+/).length < 2) continue
 
-      const example = def.examples?.find((ex) => ex.trim())?.trim() ?? null
+      const examples = (def.examples ?? []).map((ex) => ex.trim()).filter(Boolean)
+      const example = examples[0] ?? null
       const score = scoreSense({
         definition: text,
         example,
@@ -313,6 +330,7 @@ export function pickBestDefinition(
       candidates.push({
         definition: text,
         example,
+        examples,
         partOfSpeech: pos,
         score,
         index,
@@ -321,9 +339,21 @@ export function pickBestDefinition(
     }
   }
 
+  candidates.sort((a, b) => b.score - a.score || a.index - b.index)
+  return candidates
+}
+
+/**
+ * Rank every sense in a dictionary payload and return the best for reading vocab.
+ */
+export function pickBestDefinition(
+  payload: DictionaryResponse | null | undefined,
+  options: LookupDefinitionOptions = {},
+): WordDefinitionHit | null {
+  const candidates = collectRankedSenses(payload, options)
   if (candidates.length === 0) return null
 
-  candidates.sort((a, b) => b.score - a.score || a.index - b.index)
+  const term = (payload?.term ?? '').trim()
   const best = candidates[0]
 
   // Safety: if the winner is still heavily niche and a non-niche alternative exists, prefer it.
@@ -333,7 +363,7 @@ export function pickBestDefinition(
       return {
         term: term || better.definition,
         definition: better.definition,
-        pronunciation: payload.pronunciation ?? null,
+        pronunciation: payload?.pronunciation ?? null,
         example: better.example,
         partOfSpeech: better.partOfSpeech,
         source: 'local',
@@ -345,90 +375,11 @@ export function pickBestDefinition(
   return {
     term: term || best.definition,
     definition: best.definition,
-    pronunciation: payload.pronunciation ?? null,
+    pronunciation: payload?.pronunciation ?? null,
     example: best.example,
     partOfSpeech: best.partOfSpeech,
     source: 'local',
     score: best.score,
-  }
-}
-
-function lemmaVariants(term: string): string[] {
-  const base = term.trim().toLowerCase().replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '')
-  if (!base) return []
-  const out: string[] = [base]
-  const push = (v: string) => {
-    const t = v.trim().toLowerCase()
-    if (t && t.length >= 2 && !out.includes(t)) out.push(t)
-  }
-  if (base.endsWith("'s") || base.endsWith('’s')) push(base.slice(0, -2))
-  if (base.endsWith('ies') && base.length > 4) push(`${base.slice(0, -3)}y`)
-  if (base.endsWith('ing') && base.length > 5) {
-    push(base.slice(0, -3))
-    push(`${base.slice(0, -3)}e`)
-  }
-  if (base.endsWith('ed') && base.length > 4) {
-    push(base.slice(0, -2))
-    push(base.slice(0, -1))
-  }
-  if (base.endsWith('es') && base.length > 3) push(base.slice(0, -2))
-  if (base.endsWith('s') && !base.endsWith('ss') && base.length > 3) push(base.slice(0, -1))
-  if (base.endsWith('ly') && base.length > 4) push(base.slice(0, -2))
-  return out
-}
-
-/**
- * Preferred path under COEP require-corp: same-origin Worker proxies Free Dictionary
- * (browser → dictionaryapi.dev often fails without CORP on that CDN).
- */
-async function fetchWorkerDictionary(term: string): Promise<DictionaryResponse | null> {
-  try {
-    const { request } = await import('@/shared/api/client')
-    const data = await request<DictionaryResponse>(
-      `/api/dictionary/lookup?term=${encodeURIComponent(term)}`,
-    )
-    if (hasDictionaryDefinitions(data)) return data
-    return null
-  } catch {
-    return null
-  }
-}
-
-async function fetchFreeDictionary(term: string): Promise<DictionaryResponse | null> {
-  try {
-    const r = await fetch(
-      `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`,
-      { signal: AbortSignal.timeout(5000), mode: 'cors' },
-    )
-    if (!r.ok) return null
-    const j = await r.json() as Array<{
-      word?: string
-      phonetic?: string
-      meanings?: Array<{
-        partOfSpeech?: string
-        definitions?: Array<{ definition?: string; example?: string }>
-        synonyms?: string[]
-      }>
-    }>
-    const fe = j?.[0]
-    if (!fe) return null
-    return {
-      term: fe.word || term,
-      available: true,
-      message: null,
-      pronunciation: fe.phonetic ?? null,
-      entries: (fe.meanings ?? []).slice(0, 8).map((m) => ({
-        partOfSpeech: m.partOfSpeech,
-        definitions: (m.definitions ?? []).slice(0, 6).map((d) => ({
-          definition: d.definition ?? '',
-          examples: d.example ? [d.example] : [],
-          synonyms: (m.synonyms ?? []).slice(0, 6),
-        })),
-      })),
-      relatedTerms: [],
-    }
-  } catch {
-    return null
   }
 }
 
@@ -437,38 +388,15 @@ export async function lookupWordDefinition(
   term: string,
   options: LookupDefinitionOptions = {},
 ): Promise<WordDefinitionHit | null> {
-  const variants = lemmaVariants(term)
-  if (variants.length === 0) return null
-
-  await ensureDictionarySeed().catch(() => {})
-
-  for (const candidate of variants) {
-    const local = await resolveLocalDictionary(candidate)
-    const hit = pickBestDefinition(local, options)
-    if (hit) return { ...hit, term: term.trim() || hit.term, source: 'local' }
+  const { fetchClientDictionary } = await import('./dictionaryClient')
+  const payload = await fetchClientDictionary(term)
+  const hit = pickBestDefinition(payload, options)
+  if (!hit) return null
+  return {
+    ...hit,
+    term: term.trim() || hit.term,
+    source: isQualityDictionaryPayload(payload) ? 'online' : 'local',
   }
-
-  // Worker proxy first (works with COEP / production Cloudflare host).
-  for (const candidate of variants) {
-    const viaWorker = await fetchWorkerDictionary(candidate)
-    if (hasDictionaryDefinitions(viaWorker)) {
-      void putCachedDictionary(candidate, viaWorker as DictionaryResponse)
-      const hit = pickBestDefinition(viaWorker, options)
-      if (hit) return { ...hit, term: term.trim() || hit.term, source: 'online' }
-    }
-  }
-
-  // Direct Free Dictionary (may fail under COEP in production).
-  for (const candidate of variants) {
-    const free = await fetchFreeDictionary(candidate)
-    if (hasDictionaryDefinitions(free)) {
-      void putCachedDictionary(candidate, free as DictionaryResponse)
-      const hit = pickBestDefinition(free, options)
-      if (hit) return { ...hit, term: term.trim() || hit.term, source: 'online' }
-    }
-  }
-
-  return null
 }
 
 /**

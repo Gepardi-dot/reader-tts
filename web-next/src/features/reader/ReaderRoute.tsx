@@ -3,25 +3,27 @@ import { useParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-  ArrowRight, Languages, MessageSquare, Settings2, Type, Volume2, X,
+  ArrowRight, Languages, MessageSquare, Settings2, Volume2, X,
   Play, Pause,
-  Copy, BookMarked, Globe, BookOpen, Mic, NotebookPen, Sparkles, Search,
+  Copy, BookMarked, Globe, BookOpen, Mic, NotebookPen, Sparkles,
   ChevronLeft, ChevronRight, ChevronDown,
 } from 'lucide-react'
 import { AppearanceContent } from './AppearanceContent'
+import { DictionaryPanel } from './DictionaryPanel'
 import { READER_THEMES } from './readerTheme'
 import { api, AuthError } from '@/shared/api/client'
 import {
-  ensureDictionarySeed,
-  hasDictionaryDefinitions,
-  putCachedDictionary,
-  resolveLocalDictionary,
   type DictionaryResponse,
 } from '@/shared/storage/dictionaryCache'
 import {
   formatStudyDefinition,
   pickBestDefinition,
 } from '@/shared/storage/dictionaryLookup'
+import {
+  dictionaryQueryOptions,
+  fetchClientDictionary,
+  normalizeLookupWord,
+} from '@/shared/storage/dictionaryClient'
 import {
   flushPerformanceTelemetry,
 } from '@/shared/telemetry/performanceTelemetry'
@@ -47,7 +49,7 @@ import {
 import {
   primeBrowserSpeechVoices,
 } from './browserSpeech'
-import { speakStudioText } from '@/features/studio/studioVoice'
+
 import { AudioPreviewPanel } from './AudioPreviewPanel'
 import {
   normalizeTtsProviders,
@@ -183,7 +185,7 @@ interface ReaderParagraph {
 }
 
 type SecondaryPanel =
-  | { kind: 'dictionary'; word: string }
+  | { kind: 'dictionary'; word: string; context?: string }
   | { kind: 'notes'; text: string; start: number; end: number }
   | { kind: 'askai'; text: string }
   | { kind: 'translate'; text: string }
@@ -208,6 +210,13 @@ const HIGHLIGHT_BG: Record<'amber' | 'rose' | 'sky', string> = {
 }
 
 type ReaderHighlight = ReaderPayload['highlights'][number]
+
+function readingContext(fullText: string, start: number, end: number) {
+  if (!fullText) return ''
+  const from = Math.max(0, start - 160)
+  const to = Math.min(fullText.length, Math.max(end, start) + 160)
+  return fullText.slice(from, to).replace(/\s+/g, ' ').trim()
+}
 
 function firstDictionaryDefinition(
   payload: DictionaryResponse | null | undefined,
@@ -788,11 +797,7 @@ function SelectionMenu({
     const normalized = normalizeLookupWord(sel.text)
     if (sel.mode !== 'word' || !normalized || normalized.includes(' ')) return
     // Prefetch full client path (seed/IDB first) so Define opens with data ready.
-    void queryClient.prefetchQuery({
-      queryKey: dictionaryQueryKey(normalized),
-      queryFn: () => fetchClientDictionary(normalized),
-      staleTime: DICTIONARY_STALE_TIME_MS,
-    })
+    void queryClient.prefetchQuery(dictionaryQueryOptions(normalized))
   }, [queryClient, sel.mode, sel.text])
 
   const menuW = sel.mode === 'word' ? 300 : 320
@@ -884,12 +889,12 @@ function SelectionMenu({
         break
       }
       case 'dictionary':
-        void queryClient.prefetchQuery({
-          queryKey: dictionaryQueryKey(sel.text),
-          queryFn: () => fetchClientDictionary(sel.text),
-          staleTime: DICTIONARY_STALE_TIME_MS,
+        void queryClient.prefetchQuery(dictionaryQueryOptions(sel.text))
+        onOpenPanel({
+          kind: 'dictionary',
+          word: sel.text,
+          context: readingContext(fullText, sel.startOffset, sel.endOffset),
         })
-        onOpenPanel({ kind: 'dictionary', word: sel.text })
         onClose()
         break
       case 'google':
@@ -1006,10 +1011,15 @@ function SelectionMenu({
               else handleSentence(id)
             }}
             onPointerDown={(e) => {
-              if (id !== 'play') return
-              // Start on press so iOS still has a user gesture when Audio.play() runs.
-              e.stopPropagation()
-              startPlayFromGesture()
+              if (id === 'play') {
+                // Start on press so iOS still has a user gesture when Audio.play() runs.
+                e.stopPropagation()
+                startPlayFromGesture()
+                return
+              }
+              if (id === 'dictionary' && sel.mode === 'word') {
+                void queryClient.prefetchQuery(dictionaryQueryOptions(sel.text))
+              }
             }}
             disabled={busyAction === id}
             className="flex-1 flex flex-col items-center gap-1.5 py-3 px-1 text-white hover:bg-white/10 active:bg-white/15 transition-colors disabled:opacity-40"
@@ -1047,651 +1057,6 @@ function SelectionMenu({
         </div>
       </div>
     </motion.div>
-  )
-}
-
-// ── Dictionary types ──────────────────────────────────────────────────────────
-
-interface DictEntry {
-  partOfSpeech?: string
-  definitions?: Array<{ definition: string; examples?: string[]; synonyms?: string[] }>
-}
-interface DictResponse {
-  term: string; available: boolean; message?: string | null
-  pronunciation?: string | null
-  entries?: DictEntry[]
-  relatedTerms?: string[]
-}
-
-// Free Dictionary API (freedictionary.dev) — used as fallback when offline dict has no definitions
-interface FreeDef { definition: string; example?: string; synonyms?: string[] }
-interface FreeMeaning { partOfSpeech: string; definitions: FreeDef[]; synonyms: string[] }
-interface FreeEntry  { word: string; phonetic?: string; meanings: FreeMeaning[] }
-
-// Unified display shape consumed by the render tree
-interface DisplayEntry {
-  partOfSpeech: string
-  definitions: Array<{ definition: string; examples: string[]; synonyms: string[] }>
-}
-interface DisplayData {
-  term: string; pronunciation: string | null
-  entries: DisplayEntry[]; relatedTerms: string[]
-  source: 'offline' | 'online'
-}
-
-const DICTIONARY_STALE_TIME_MS = 5 * 60_000
-
-function normalizeLookupWord(value: string) {
-  return value
-    .trim()
-    .toLowerCase()
-    // strip wrapping quotes / punctuation commonly selected with words
-    .replace(/^[\s"'“”‘’([{«]+/u, '')
-    .replace(/[\s"'“”‘’)}\],.;:!?»]+$/gu, '')
-    .replace(/[’']/g, "'")
-}
-
-/** Candidate headwords to try when the exact form is missing (masters → master). */
-function dictionaryLookupVariants(term: string): string[] {
-  const base = normalizeLookupWord(term)
-  if (!base) return []
-  const out: string[] = [base]
-  const push = (v: string) => {
-    const t = normalizeLookupWord(v)
-    if (t && t.length >= 2 && !out.includes(t)) out.push(t)
-  }
-  if (base.endsWith("'s")) push(base.slice(0, -2))
-  if (base.endsWith('ies') && base.length > 4) push(`${base.slice(0, -3)}y`)
-  if (base.endsWith('ves') && base.length > 4) push(`${base.slice(0, -3)}f`)
-  if (base.endsWith('ing') && base.length > 5) {
-    push(base.slice(0, -3))
-    push(`${base.slice(0, -3)}e`)
-  }
-  if (base.endsWith('ed') && base.length > 4) {
-    push(base.slice(0, -2))
-    push(base.slice(0, -1))
-  }
-  if (base.endsWith('es') && base.length > 3) push(base.slice(0, -2))
-  if (base.endsWith('s') && !base.endsWith('ss') && base.length > 3) push(base.slice(0, -1))
-  if (base.endsWith('ly') && base.length > 4) push(base.slice(0, -2))
-  return out
-}
-
-function dictionaryQueryKey(word: string) {
-  return ['dictionary', normalizeLookupWord(word)] as const
-}
-
-function fetchOfflineDictionary(word: string) {
-  return api.get<DictResponse | FreeEntry[] | FreeEntry>(
-    `/api/dictionary/lookup?term=${encodeURIComponent(normalizeLookupWord(word))}`,
-  )
-}
-
-function dictionaryHasDefinitions(payload: DictResponse | null | undefined) {
-  return hasDictionaryDefinitions(payload as DictionaryResponse | null)
-}
-
-/** Accept both our DictResponse shape and raw Free Dictionary API payloads. */
-function coerceDictionaryPayload(raw: unknown, fallbackTerm: string): DictResponse | null {
-  if (!raw || typeof raw !== 'object') return null
-
-  // Already normalized worker/client shape
-  const asDict = raw as DictResponse
-  if (Array.isArray(asDict.entries)) {
-    if (dictionaryHasDefinitions(asDict)) {
-      return {
-        ...asDict,
-        term: asDict.term || fallbackTerm,
-        available: true,
-        message: null,
-        pronunciation: asDict.pronunciation ?? null,
-        relatedTerms: asDict.relatedTerms ?? [],
-      }
-    }
-    return null
-  }
-
-  // Raw Free Dictionary: [{ word, meanings, phonetic }]
-  const rows = Array.isArray(raw) ? raw : [raw]
-  const fe = rows[0] as FreeEntry | undefined
-  if (!fe?.meanings?.length) return null
-
-  const payload: DictResponse = {
-    term: fe.word || fallbackTerm,
-    available: true,
-    message: null,
-    pronunciation: fe.phonetic ?? null,
-    entries: fe.meanings.slice(0, 5).map((m) => ({
-      partOfSpeech: m.partOfSpeech,
-      definitions: (m.definitions ?? []).slice(0, 5).map((d) => ({
-        definition: d.definition,
-        examples: d.example ? [d.example] : [],
-        synonyms: [...(d.synonyms ?? []), ...(m.synonyms ?? [])].slice(0, 8),
-      })),
-    })),
-    relatedTerms: [],
-  }
-  return dictionaryHasDefinitions(payload) ? payload : null
-}
-
-async function fetchFreeDictionary(term: string): Promise<DictResponse | null> {
-  try {
-    const r = await fetch(
-      `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`,
-      { signal: AbortSignal.timeout(7000) },
-    )
-    if (!r.ok) return null
-    return coerceDictionaryPayload(await r.json(), term)
-  } catch {
-    return null
-  }
-}
-
-async function fetchBackendDictionary(term: string): Promise<DictResponse | null> {
-  try {
-    const raw = await fetchOfflineDictionary(term)
-    return coerceDictionaryPayload(raw, term)
-  } catch {
-    return null
-  }
-}
-
-/**
- * Instant-first dictionary resolve with strong fallbacks:
- * 1) memory/seed/IDB
- * 2) Free Dictionary + worker proxy (normalized)
- * 3) lemma variants (masters → master)
- * Never cache empty misses for long — UI can retry.
- */
-async function fetchClientDictionary(word: string): Promise<DictResponse> {
-  const variants = dictionaryLookupVariants(word)
-  const primary = variants[0] || normalizeLookupWord(word) || word.trim().toLowerCase()
-  await ensureDictionarySeed()
-
-  for (const candidate of variants) {
-    const local = await resolveLocalDictionary(candidate)
-    if (dictionaryHasDefinitions(local)) {
-      const hit = local as DictResponse
-      // Also remember under the original typed form.
-      if (candidate !== primary) void putCachedDictionary(primary, hit as DictionaryResponse)
-      return { ...hit, term: hit.term || primary }
-    }
-  }
-
-  for (const candidate of variants) {
-    // Prefer worker proxy (handles CORS + Gemini last resort) in parallel with direct free dict.
-    const [free, backend] = await Promise.all([
-      fetchFreeDictionary(candidate),
-      fetchBackendDictionary(candidate),
-    ])
-    const winner = (dictionaryHasDefinitions(backend) ? backend : null)
-      ?? (dictionaryHasDefinitions(free) ? free : null)
-    if (winner) {
-      void putCachedDictionary(candidate, winner as DictionaryResponse)
-      void putCachedDictionary(primary, winner as DictionaryResponse)
-      return { ...winner, term: winner.term || primary, available: true }
-    }
-  }
-
-  // Soft empty — short-lived so the next open retries network/Gemini.
-  return {
-    term: primary,
-    available: false,
-    message: 'No definition found.',
-    pronunciation: null,
-    entries: [],
-    relatedTerms: [],
-  }
-}
-
-// ── Dictionary Panel ──────────────────────────────────────────────────────────
-
-function DictionaryPanel({ word: initialWord, bookId, onClose, colors }: {
-  word: string
-  bookId?: string
-  onClose: () => void
-  colors: typeof THEMES['paper']
-}) {
-  const [lookupWord, setLookupWord] = useState(() => normalizeLookupWord(initialWord) || initialWord)
-  const [inputValue, setInputValue] = useState(initialWord)
-  const [speaking,   setSpeaking]   = useState(false)
-  const [vocabState, setVocabState] = useState<'idle' | 'busy' | 'saved' | 'error'>('idle')
-  const [vocabError, setVocabError] = useState<string | null>(null)
-  const queryClient = useQueryClient()
-
-  // Single query: local seed/IDB first, then raced network. Prefetch on word
-  // selection often means this resolves from React Query cache instantly.
-  const { data: dictData, isLoading, isFetching, refetch } = useQuery({
-    queryKey: dictionaryQueryKey(lookupWord),
-    queryFn: () => fetchClientDictionary(lookupWord),
-    // Default warm cache; empty results are not written to IDB and expire via gc.
-    staleTime: DICTIONARY_STALE_TIME_MS,
-    gcTime: DICTIONARY_STALE_TIME_MS,
-    retry: 2,
-    retryDelay: 600,
-    })
-
-  const hasDefs = dictionaryHasDefinitions(dictData ?? null)
-  const autoRetryRef = useRef<string | null>(null)
-
-  // One automatic retry on a miss (covers transient Free Dict / worker failures).
-  useEffect(() => {
-    if (isLoading || isFetching || hasDefs || !dictData) return
-    if (autoRetryRef.current === lookupWord) return
-    autoRetryRef.current = lookupWord
-    const t = window.setTimeout(() => { void refetch() }, 1200)
-    return () => window.clearTimeout(t)
-  }, [dictData, hasDefs, isFetching, isLoading, lookupWord, refetch])
-
-  // Unified DisplayData from the single resolved payload
-  const displayData = useMemo((): DisplayData | null => {
-    if (!dictData) return null
-    const entries = (dictData.entries ?? []).map((e) => ({
-      partOfSpeech: e.partOfSpeech ?? '',
-      definitions: (e.definitions ?? []).map((d) => ({
-        definition: d.definition,
-        examples: d.examples ?? [],
-        synonyms: d.synonyms ?? [],
-      })),
-    }))
-    // Heuristic: free-dict payloads often lack relatedTerms from our seed.
-    const source: DisplayData['source'] =
-      hasDefs && (dictData.relatedTerms?.length ?? 0) === 0 && entries.length > 0
-        ? 'online'
-        : 'offline'
-    return {
-      term: dictData.term ?? lookupWord,
-      pronunciation: dictData.pronunciation ?? null,
-      entries,
-      relatedTerms: dictData.relatedTerms ?? [],
-      source: hasDefs ? source : 'offline',
-    }
-  }, [dictData, hasDefs, lookupWord])
-
-  // Show skeleton while first load OR while a miss is being re-fetched.
-  const showLoading = (isLoading || isFetching) && !hasDefs
-
-  async function speak() {
-    const term = displayData?.term ?? lookupWord
-    if (!term?.trim()) return
-    setSpeaking(true)
-    try {
-      await speakStudioText(term)
-    } finally {
-      setSpeaking(false)
-    }
-  }
-
-  function navigate(w: string) {
-    const t = w.trim().toLowerCase()
-    if (!t) return
-    setLookupWord(t)
-    setInputValue(t)
-    setVocabState('idle')
-  }
-
-  async function saveToVocab() {
-    if (vocabState === 'busy' || vocabState === 'saved') return
-    setVocabState('busy')
-    setVocabError(null)
-    try {
-      const deckId = await getOrCreateDeck()
-      if (!deckId) {
-        setVocabState('error')
-        setVocabError('Could not open vocabulary deck')
-        return
-      }
-      const resolved = firstDictionaryDefinition({
-        term: displayData?.term ?? lookupWord,
-        available: Boolean(displayData),
-        pronunciation: displayData?.pronunciation ?? null,
-        entries: displayData?.entries ?? [],
-        relatedTerms: displayData?.relatedTerms ?? [],
-      })
-      const front = (resolved.term || lookupWord).trim()
-      const firstExample = resolved.example
-        ?? displayData?.entries
-          ?.flatMap((e) => e.definitions.flatMap((d) => d.examples))
-          .find((ex) => ex.trim())
-      await api.post(`/api/vocabulary/decks/${deckId}/notes`, {
-        noteType: 'basic',
-        front,
-        back: resolved.definition,
-        extra: resolved.pronunciation,
-        exampleSentence: firstExample,
-        topic: 'Reading',
-        tags: ['reader', 'dictionary'],
-        sourceRef: `reader-vocab:${front.toLowerCase()}`,
-        metadata: {
-          source: 'dictionary',
-          bookId: bookId ?? null,
-          dictionarySource: displayData?.source ? `${displayData.source}-ranked` : 'dictionary-ranked',
-          partOfSpeech: resolved.partOfSpeech,
-          rankedDefinition: true,
-        },
-      })
-      queryClient.invalidateQueries({ queryKey: ['decks'] })
-      queryClient.invalidateQueries({ queryKey: ['deck-dashboard'] })
-      setVocabState('saved')
-    } catch (err) {
-      console.error('Dictionary vocab save failed', err)
-      setVocabState('error')
-      if (err instanceof AuthError) setVocabError('Sign in to save words')
-      else setVocabError(err instanceof Error ? err.message.slice(0, 80) : 'Could not save word')
-    }
-  }
-
-  const POS_PILL: Record<string, { bg: string; color: string }> = {
-    noun:        { bg: '#dbeafe', color: '#1d4ed8' },
-    verb:        { bg: '#dcfce7', color: '#15803d' },
-    adjective:   { bg: '#f3e8ff', color: '#7e22ce' },
-    adverb:      { bg: '#fff7ed', color: '#c2410c' },
-    pronoun:     { bg: '#fef9c3', color: '#854d0e' },
-    preposition: { bg: '#f1f5f9', color: '#475569' },
-    conjunction: { bg: '#ffe4e6', color: '#be123c' },
-  }
-  function posPill(pos: string) {
-    const key = pos.toLowerCase().split(' ')[0]
-    return POS_PILL[key] ?? { bg: `${colors.text}10`, color: `${colors.text}70` }
-  }
-
-  return (
-    <div style={{ color: colors.text, paddingBottom: 'max(env(safe-area-inset-bottom,0px),28px)' }}>
-
-      {/* ── Search bar ──────────────────────────────────────── */}
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ borderColor: `${colors.text}12` }}>
-        <Search size={15} className="opacity-35 shrink-0" />
-        <input
-          value={inputValue}
-          onChange={e => setInputValue(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') navigate(inputValue) }}
-          placeholder="Look up a word…"
-          className="flex-1 text-sm bg-transparent outline-none min-w-0"
-          style={{ color: colors.text }}
-          autoComplete="off" autoCorrect="off" spellCheck={false}
-        />
-        {inputValue.trim() && inputValue.trim() !== lookupWord && (
-          <button onClick={() => navigate(inputValue)}
-            className="text-xs font-medium px-2 py-0.5 rounded-md"
-            style={{ color: '#f59e0b', backgroundColor: '#f59e0b18' }}>
-            Go
-          </button>
-        )}
-        <button onClick={onClose} className="p-0.5 ml-1 opacity-35 hover:opacity-70 transition-opacity shrink-0">
-          <X size={15} />
-        </button>
-      </div>
-
-      {/* ── Content ─────────────────────────────────────────── */}
-      <div className="overflow-y-auto" style={{ maxHeight: '65vh' }}>
-
-        {/* Loading skeleton — only when we have nothing to show yet */}
-        {showLoading && (
-          <div className="px-5 pt-5 pb-4 animate-pulse space-y-3">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full shrink-0" style={{ background: `${colors.text}08` }} />
-              <div className="flex-1 space-y-2">
-                <div className="h-7 w-32 rounded-lg" style={{ background: `${colors.text}10` }} />
-                <div className="h-3 w-20 rounded" style={{ background: `${colors.text}07` }} />
-              </div>
-            </div>
-            <div className="h-5 w-14 rounded-full" style={{ background: `${colors.text}08` }} />
-            {[100, 88, 72, 90, 64].map((w, i) => (
-              <div key={i} className="h-3.5 rounded" style={{ background: `${colors.text}07`, width: `${w}%` }} />
-            ))}
-          </div>
-        )}
-
-        {/* Result */}
-        {!showLoading && displayData && (
-          <div>
-            {/* ── Word hero ───────────────────────────────────── */}
-            <div className="px-5 pt-5 pb-4" style={{ borderBottom: `1px solid ${colors.text}0e` }}>
-              <div className="flex items-start justify-between gap-3">
-                {/* Left: audio + word */}
-                <div className="flex items-start gap-3 min-w-0">
-                  <button
-                    onClick={speak}
-                    aria-label="Pronounce"
-                    className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-all active:scale-90 mt-1"
-                    style={{
-                      background: speaking ? '#f59e0b' : '#f59e0b18',
-                      boxShadow: speaking ? '0 0 0 4px #f59e0b22' : 'none',
-                    }}
-                  >
-                    <Volume2 size={17} strokeWidth={2} style={{ color: speaking ? '#fff' : '#f59e0b' }} />
-                  </button>
-                  <div className="min-w-0">
-                    <h2
-                      className="leading-tight break-words"
-                      style={{
-                        fontFamily: 'Lora, Georgia, serif',
-                        fontSize: 30,
-                        fontWeight: 600,
-                        color: colors.text,
-                        letterSpacing: '-0.01em',
-                      }}
-                    >
-                      {displayData.term}
-                    </h2>
-                    {displayData.pronunciation && (
-                      <p style={{ fontSize: 13, color: `${colors.text}55`, fontFamily: '"SF Mono", Consolas, monospace', marginTop: 3 }}>
-                        {displayData.pronunciation}
-                      </p>
-                    )}
-                  </div>
-                </div>
-
-                {/* Right: save to vocabulary */}
-                <div className="flex flex-col items-end gap-1 mt-1 shrink-0">
-                  <button
-                    onClick={() => void saveToVocab()}
-                    aria-label="Save to vocabulary"
-                    disabled={vocabState === 'busy' || vocabState === 'saved'}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full transition-all active:scale-95"
-                    style={{
-                      background: vocabState === 'saved'
-                        ? '#22c55e18'
-                        : vocabState === 'error'
-                          ? '#ef444418'
-                          : `${colors.text}0c`,
-                      color: vocabState === 'saved'
-                        ? '#22c55e'
-                        : vocabState === 'error'
-                          ? '#ef4444'
-                          : `${colors.text}60`,
-                      border: `1px solid ${
-                        vocabState === 'saved'
-                          ? '#22c55e33'
-                          : vocabState === 'error'
-                            ? '#ef444433'
-                            : `${colors.text}14`
-                      }`,
-                      fontSize: 11.5,
-                      fontWeight: 600,
-                      letterSpacing: '0.01em',
-                    }}
-                  >
-                    {vocabState === 'busy' ? (
-                      <div className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
-                    ) : vocabState === 'saved' ? (
-                      <span>✓ Saved</span>
-                    ) : vocabState === 'error' ? (
-                      <span>Retry save</span>
-                    ) : (
-                      <><Type size={11} /> Save</>
-                    )}
-                  </button>
-                  {vocabError && (
-                    <span style={{ fontSize: 10, color: '#ef4444', maxWidth: 140, textAlign: 'right' }}>
-                      {vocabError}
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* ── Entries ──────────────────────────────────────── */}
-            <div className="px-5 pt-4 pb-5 space-y-6">
-              {displayData.entries.map((entry, ei) => (
-                <div key={ei}>
-                  {/* Part of speech pill */}
-                  {entry.partOfSpeech && (() => {
-                    const { bg, color } = posPill(entry.partOfSpeech)
-                    return (
-                      <div className="mb-3">
-                        <span style={{
-                          display: 'inline-flex', alignItems: 'center',
-                          padding: '3px 10px', borderRadius: 99,
-                          background: bg, color,
-                          fontSize: 10.5, fontWeight: 700,
-                          letterSpacing: '0.07em', textTransform: 'uppercase',
-                        }}>
-                          {entry.partOfSpeech}
-                        </span>
-                      </div>
-                    )
-                  })()}
-
-                  {/* Definitions */}
-                  <div className="space-y-4">
-                    {entry.definitions.map((def, di) => (
-                      <div key={di} className="flex gap-3">
-                        {/* Numbered badge */}
-                        <span style={{
-                          minWidth: 22, height: 22,
-                          background: '#f59e0b18',
-                          color: '#f59e0b',
-                          fontSize: 11, fontWeight: 800,
-                          borderRadius: 6,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          flexShrink: 0, marginTop: 2,
-                        }}>
-                          {di + 1}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <p style={{ fontSize: 14.5, lineHeight: 1.65, color: colors.text }}>
-                            {def.definition}
-                          </p>
-                          {def.examples.slice(0, 2).map((ex, xi) => (
-                            <div key={xi} style={{
-                              borderLeft: `2px solid #f59e0b55`,
-                              paddingLeft: 10,
-                              marginTop: 8,
-                            }}>
-                              <p style={{ fontSize: 13, fontStyle: 'italic', lineHeight: 1.55, color: `${colors.text}55` }}>
-                                "{ex}"
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Synonyms */}
-                  {(() => {
-                    const unique = [...new Set(entry.definitions.flatMap(d => d.synonyms))].slice(0, 7)
-                    return unique.length > 0 ? (
-                      <div className="flex flex-wrap items-center gap-1.5 mt-3 pt-3" style={{ borderTop: `1px solid ${colors.text}0a` }}>
-                        <span style={{ fontSize: 11, color: `${colors.text}40`, fontWeight: 600, letterSpacing: '0.04em' }}>
-                          SIMILAR
-                        </span>
-                        {unique.map(s => (
-                          <button key={s} onClick={() => navigate(s)}
-                            className="transition-all hover:opacity-80 active:scale-95"
-                            style={{
-                              padding: '2px 9px', borderRadius: 99,
-                              fontSize: 12, color: `${colors.text}65`,
-                              background: `${colors.text}08`,
-                              border: `1px solid ${colors.text}12`,
-                            }}>
-                            {s}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null
-                  })()}
-                </div>
-              ))}
-
-              {/* No definitions */}
-              {displayData.entries.length === 0 && (
-                <div className="space-y-3">
-                  <p style={{ fontSize: 14, color: `${colors.text}45`, fontStyle: 'italic' }}>
-                    No definition found for this word yet.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => void refetch()}
-                    disabled={isFetching}
-                    className="text-xs font-semibold px-3 py-1.5 rounded-full"
-                    style={{
-                      background: `${colors.text}0c`,
-                      color: `${colors.text}70`,
-                      border: `1px solid ${colors.text}14`,
-                      opacity: isFetching ? 0.6 : 1,
-                    }}
-                  >
-                    {isFetching ? 'Looking up…' : 'Try again'}
-                  </button>
-                </div>
-              )}
-
-              {/* Related terms */}
-              {displayData.relatedTerms.length > 0 && (
-                <div className="pt-4" style={{ borderTop: `1px solid ${colors.text}0e` }}>
-                  <p style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: `${colors.text}35`, marginBottom: 10 }}>
-                    Related
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {displayData.relatedTerms.slice(0, 10).map(t => (
-                      <button key={t} onClick={() => navigate(t)}
-                        className="transition-all hover:opacity-80 active:scale-95"
-                        style={{
-                          padding: '4px 12px', borderRadius: 99,
-                          fontSize: 12.5, color: `${colors.text}60`,
-                          border: `1px solid ${colors.text}18`,
-                        }}>
-                        {t}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {displayData.source === 'online' && (
-                <p style={{ fontSize: 10, textAlign: 'center', color: `${colors.text}25`, paddingTop: 4 }}>
-                  via Free Dictionary API
-                </p>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Truly nothing */}
-        {!showLoading && !displayData && (
-          <div className="px-5 pt-5 space-y-3">
-            <p className="text-sm" style={{ color: `${colors.text}50` }}>
-              No definition found for "{lookupWord}".
-            </p>
-            <button
-              type="button"
-              onClick={() => void refetch()}
-              disabled={isFetching}
-              className="text-xs font-semibold px-3 py-1.5 rounded-full"
-              style={{
-                background: `${colors.text}0c`,
-                color: `${colors.text}70`,
-                border: `1px solid ${colors.text}14`,
-              }}
-            >
-              {isFetching ? 'Looking up…' : 'Try again'}
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
   )
 }
 
@@ -5192,7 +4557,7 @@ export function ReaderRoute() {
           const p = panel ?? panelSnapshotRef.current
           if (!p) return null
           if (p.kind === 'dictionary') return (
-            <DictionaryPanel word={p.word} bookId={bookId} onClose={closePanel} colors={colors} />
+            <DictionaryPanel word={p.word} context={p.context} onClose={closePanel} colors={colors} />
           )
           if (p.kind === 'notes') return (
             <NotesPanel text={p.text} start={p.start} end={p.end}
