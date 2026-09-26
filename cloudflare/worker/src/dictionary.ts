@@ -1,14 +1,12 @@
 /**
- * Define lookup: one fast request, one dictionary voice, one settled gloss.
- * Free Dictionary is the source. Wiktionary fills words it doesn't have.
- * Gemini runs only after both miss, and the result is cached like the others.
+ * Define lookup. An ordinary sense wins. An inflection is defined from its base word,
+ * so "comes" is the verb "come" and not the rare fugue noun.
  */
 
 import {
-  chooseGlossSource,
-  hasRealGloss,
+  authoritativeReading,
+  isSpecialistGloss,
   isUsableGloss,
-  lemmaCandidates,
   polishGloss,
   preferredGlossPos,
   settleGlossPayload,
@@ -17,7 +15,6 @@ import {
 import {
   extractFormOfLemmaFromHtml,
   extractFormOfLemmaFromText,
-  isGrammaticalFormDefinition,
 } from '../../../web-next/src/shared/storage/dictionaryMorphology'
 
 const WIKTIONARY_UA = 'HiggsRead/1.0 (https://higgsread.com; dictionary lookup)'
@@ -150,7 +147,21 @@ async function fetchJson(url: string, timeoutMs: number, headers?: HeadersInit) 
   }
 }
 
-async function gather(term: string): Promise<GlossPayload | null> {
+function mergePayloads(free: GlossPayload | null, wiki: GlossPayload | null, term: string): GlossPayload | null {
+  if (!free && !wiki) return null
+  return {
+    term: free?.term || wiki?.term || term,
+    available: true,
+    message: null,
+    pronunciation: free?.pronunciation || wiki?.pronunciation || null,
+    hyphenation: free?.hyphenation || wiki?.hyphenation || null,
+    entries: [...(free?.entries ?? []), ...(wiki?.entries ?? [])],
+    relatedTerms: [],
+    source: 'online',
+  }
+}
+
+async function fetchDictionaryPair(term: string): Promise<GlossPayload | null> {
   const freePromise = fetchJson(
     `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`,
     FREE_TIMEOUT_MS,
@@ -164,27 +175,35 @@ async function gather(term: string): Promise<GlossPayload | null> {
       'Api-User-Agent': WIKTIONARY_UA,
     },
   ).then((raw) => payloadFromWiktionary(raw, term))
-
-  const free = await freePromise
-  if (hasRealGloss(free)) return free
-  const wiki = await wikiPromise
-  return chooseGlossSource(free, wiki)
+  const [free, wiki] = await Promise.all([freePromise, wikiPromise])
+  return mergePayloads(free, wiki, term)
 }
 
-function lemmaHint(payload: GlossPayload | null): string | null {
-  for (const entry of payload?.entries ?? []) {
-    for (const def of entry.definitions ?? []) {
-      const hinted = (def.formOf || '').trim().toLowerCase()
-      if (hinted) return hinted
-      const fromText = extractFormOfLemmaFromText(def.definition || '')
-      if (fromText) return fromText
-      if (isGrammaticalFormDefinition(def.definition)) {
-        const loose = def.definition.match(/\bof\s+([a-z][a-z'-]{1,40})\s*\.?$/i)?.[1]
-        if (loose) return loose.toLowerCase()
-      }
-    }
-  }
-  return null
+function payloadFromReading(
+  surface: string,
+  source: GlossPayload,
+  reading: { partOfSpeech: string; definition: string; examples: string[] },
+): GlossPayload {
+  return settleGlossPayload({
+    term: source.term || surface,
+    available: true,
+    message: null,
+    pronunciation: source.pronunciation ?? null,
+    hyphenation: source.hyphenation ?? null,
+    entries: [{
+      partOfSpeech: reading.partOfSpeech,
+      definitions: [{
+        definition: reading.definition,
+        examples: reading.examples.slice(0, 1),
+        synonyms: [],
+        formOf: null,
+      }],
+    }],
+    relatedTerms: [],
+    source: 'online',
+    queriedTerm: surface,
+    preferPos: reading.partOfSpeech,
+  })
 }
 
 function payloadFromGeminiText(text: string, term: string): GlossPayload | null {
@@ -192,7 +211,7 @@ function payloadFromGeminiText(text: string, term: string): GlossPayload | null 
   const def = text.match(/^DEF:\s*(.+)$/im)?.[1]?.trim() || ''
   const example = text.match(/^EX:\s*(.+)$/im)?.[1]?.trim() || ''
   const polished = polishGloss(def)
-  if (!def || /^none$/i.test(def) || !isUsableGloss(polished)) return null
+  if (!def || /^none$/i.test(def) || !isUsableGloss(polished) || isSpecialistGloss(polished)) return null
   return settleGlossPayload({
     term,
     available: true,
@@ -229,6 +248,14 @@ async function withTimeout<T>(work: Promise<T | null>, timeoutMs: number): Promi
   }
 }
 
+async function meaningOfLemma(surface: string, lemma: string, partOfSpeech: string): Promise<GlossPayload | null> {
+  if (!lemma || lemma === surface) return null
+  const payload = await fetchDictionaryPair(lemma)
+  const reading = authoritativeReading(payload, partOfSpeech)
+  if (!payload || reading?.kind !== 'sense') return null
+  return payloadFromReading(surface, payload, reading)
+}
+
 export async function resolveDictionary(
   rawTerm: string,
   options: {
@@ -238,39 +265,23 @@ export async function resolveDictionary(
   const term = normalizeDictionaryTerm(rawTerm)
   if (!term) return miss(rawTerm)
 
-  let hit = await gather(term)
-  if (!hasRealGloss(hit)) {
-    const hinted = lemmaHint(hit)
-    const candidates = [hinted, ...lemmaCandidates(term)].filter((value): value is string => Boolean(value))
-    const seen = new Set<string>([term])
-    let tries = 0
-    for (const lemma of candidates) {
-      if (seen.has(lemma)) continue
-      seen.add(lemma)
-      tries += 1
-      const next = await gather(lemma)
-      if (hasRealGloss(next)) {
-        hit = next
-        break
-      }
-      if (tries >= 2) break
-    }
+  const surface = await fetchDictionaryPair(term)
+  const reading = authoritativeReading(surface)
+  if (surface && reading?.kind === 'sense' && reading.everyday) {
+    return payloadFromReading(term, surface, reading)
   }
-
-  if (hasRealGloss(hit) && hit) {
-    const settled = settleGlossPayload({
-      ...hit,
-      term: hit.term || term,
-      queriedTerm: term,
-      preferPos: preferredGlossPos(term),
-      source: 'online',
-    })
-    if (settled.available) return settled
+  if (reading?.kind === 'inflection') {
+    const followed = await meaningOfLemma(term, reading.lemma, reading.partOfSpeech)
+    if (followed?.available) return followed
+  }
+  if (surface && reading?.kind === 'sense') {
+    return payloadFromReading(term, surface, reading)
   }
 
   if (options.generate) {
     const system = [
-      'You write one everyday English dictionary sense.',
+      'You write the ordinary English meaning a reader needs.',
+      'Do not answer with a rare technical, musical, legal, or archaic sense when a common meaning exists.',
       'Reply with exactly these lines and nothing else:',
       'POS: noun or verb or adjective or adverb',
       'DEF: one clear meaning, 8 to 22 words',

@@ -4,7 +4,7 @@
  */
 
 import type { DictionaryOrigin, DictionaryResponse } from './dictionaryCache'
-import { polishGloss } from './dictionaryGloss'
+import { isSpecialistGloss, polishGloss } from './dictionaryGloss'
 import {
   collectRankedSenses,
   isInflectionHeader,
@@ -126,7 +126,9 @@ export function buildDictionaryCard(
     if (isGrammaticalFormDefinition(sense.definition)) return false
     return true
   })
-  const everyday = rankedAll.filter((sense) => !isNicheDomainDefinition(sense.definition))
+  const everyday = rankedAll.filter((sense) =>
+    !isNicheDomainDefinition(sense.definition) && !isSpecialistGloss(sense.definition),
+  )
   const ranked = everyday.length > 0 ? everyday : rankedAll
   if (ranked.length === 0) return null
 

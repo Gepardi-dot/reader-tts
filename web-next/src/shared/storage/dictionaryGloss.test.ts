@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  authoritativeReading,
   chooseGlossSource,
   lemmaCandidates,
   polishGloss,
@@ -54,6 +55,69 @@ describe('lemmaCandidates', () => {
   })
 })
 
+describe('authoritativeReading', () => {
+  it('follows comes to the verb come and ignores the fugue noun', () => {
+    const reading = authoritativeReading({
+      entries: [
+        {
+          partOfSpeech: 'Verb',
+          definitions: [{
+            definition: 'third-person singular simple present indicative of come',
+            formOf: 'come',
+          }],
+        },
+        {
+          partOfSpeech: 'Noun',
+          definitions: [{
+            definition: 'The answer to the theme, or dux, in a fugue.',
+          }],
+        },
+      ],
+    })
+    expect(reading).toEqual({ kind: 'inflection', lemma: 'come', partOfSpeech: 'verb' })
+  })
+
+  it('keeps an ordinary noun when the word is not only an inflection', () => {
+    const reading = authoritativeReading({
+      entries: [
+        {
+          partOfSpeech: 'Noun',
+          definitions: [{ definition: 'A structure with a roof and walls.' }],
+        },
+        {
+          partOfSpeech: 'Verb',
+          definitions: [{ definition: 'present participle of build', formOf: 'build' }],
+        },
+      ],
+    })
+    expect(reading).toMatchObject({
+      kind: 'sense',
+      partOfSpeech: 'noun',
+      everyday: true,
+    })
+  })
+
+  it('uses the verb sense of the base word when that part of speech is known', () => {
+    const reading = authoritativeReading({
+      entries: [
+        {
+          partOfSpeech: 'Noun',
+          definitions: [{ definition: 'A change of position or location.' }],
+        },
+        {
+          partOfSpeech: 'Verb',
+          definitions: [{ definition: 'To move toward a person or place.' }],
+        },
+      ],
+    }, 'verb')
+    expect(reading).toMatchObject({
+      kind: 'sense',
+      partOfSpeech: 'verb',
+      definition: 'To move toward a person or place.',
+    })
+  })
+})
+
 describe('settleGlossPayload', () => {
   it('drops form-of lines and stores one settled voice', () => {
     const settled = settleGlossPayload({
@@ -68,7 +132,7 @@ describe('settleGlossPayload', () => {
       }],
       source: 'online',
     })
-    expect(settled.glossVersion).toBe(2)
+    expect(settled.glossVersion).toBe(3)
     expect(settled.entries?.[0]?.definitions?.map((def) => def.definition)).toEqual([
       'To fill with the urge to do something bold.',
     ])
