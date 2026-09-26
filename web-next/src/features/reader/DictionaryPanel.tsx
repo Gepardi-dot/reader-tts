@@ -157,16 +157,27 @@ export function DictionaryPanel({
             )}
           </div>
         </div>
-        <div className="flex items-center gap-0.5 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0 mt-1">
           <button
             type="button"
             onClick={() => void save()}
             disabled={!card || saving || saved || !onSave}
             aria-label={saved ? 'Saved to vocabulary' : 'Save to vocabulary'}
-            className="p-1.5 rounded-full transition-opacity shrink-0 disabled:opacity-35"
-            style={{ color: saved ? accent : faint }}
+            className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 transition-opacity shrink-0 disabled:opacity-35 active:scale-95"
+            style={{
+              border: `1px solid ${saved ? accent : rule}`,
+              background: saved
+                ? (dark ? 'rgba(196,176,138,0.18)' : 'rgba(154,123,79,0.14)')
+                : (dark ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.45)'),
+              color: saved ? accent : colors.text,
+              fontFamily: 'Lora, Georgia, serif',
+              fontSize: 13,
+              fontStyle: 'italic',
+              lineHeight: 1.2,
+            }}
           >
-            <BookMarked size={15} strokeWidth={1.75} fill={saved ? accent : 'none'} />
+            <BookMarked size={13} strokeWidth={1.75} fill={saved ? accent : 'none'} />
+            {saved ? 'Saved' : saving ? 'Saving' : 'Save'}
           </button>
           <button
             type="button"
