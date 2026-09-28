@@ -110,7 +110,9 @@
         "application/xhtml+xml": [".xhtml"],
         "text/csv": [".csv"],
         "application/json": [".json"],
-        "application/x-fictionbook+xml": [".fb2"]
+        "application/x-fictionbook+xml": [".fb2"],
+        "application/x-mobipocket-ebook": [".mobi", ".prc"],
+        "application/vnd.amazon.ebook": [".azw", ".azw3"]
       }
     }
   ]

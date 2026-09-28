@@ -70,7 +70,7 @@ export function looksLikeBookTitle(raw: string): boolean {
   const title = raw.replace(/\s+/g, ' ').trim()
   if (title.length < 3 || title.length > 180) return false
   if (/^(untitled|unknown|document|microsoft word|scan|image)\b/i.test(title)) return false
-  if (/\.(pdf|epub|docx?|fb2|txt|html?|rtf|odt)$/i.test(title)) return false
+  if (/\.(pdf|epub|docx?|fb2|txt|html?|rtf|odt|mobi|azw3?|prc)$/i.test(title)) return false
   return /[A-Za-z\u00C0-\u024F]/.test(title)
 }
 

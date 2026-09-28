@@ -47,6 +47,7 @@ describe('bookFormats', () => {
     for (const name of [
       'a.pdf', 'b.epub', 'c.docx', 'd.odt', 'e.rtf', 'f.fb2',
       'g.txt', 'h.md', 'i.html', 'j.csv', 'k.json',
+      'l.mobi', 'm.azw', 'n.azw3', 'o.prc',
     ]) {
       const file = new File(['x'], name, { type: '' })
       expect(isSupportedBookFile(file), name).toBe(true)
@@ -55,7 +56,7 @@ describe('bookFormats', () => {
   })
 
   it('rejects unsupported binary formats', () => {
-    expect(isSupportedBookFile(new File(['x'], 'book.mobi'))).toBe(false)
+    expect(isSupportedBookFile(new File(['x'], 'book.kfx'))).toBe(false)
     expect(isSupportedBookFile(new File(['x'], 'scan.png'))).toBe(false)
     expect(isSupportedBookFile(new File(['x'], 'old.doc'))).toBe(false)
   })
@@ -68,8 +69,13 @@ describe('bookFormats', () => {
     })
     try {
       const accept = bookFileInputAccept()
+      expect(accept.startsWith('application/octet-stream')).toBe(true)
       expect(accept).toMatch(/\.pdf/)
+      expect(accept).toMatch(/\.epub/)
+      expect(accept).toMatch(/\.mobi/)
+      expect(accept).toMatch(/\.azw3/)
       expect(accept).not.toMatch(/application\/pdf/)
+      expect(accept).not.toMatch(/image\//)
     } finally {
       Object.defineProperty(navigator, 'userAgent', { configurable: true, value: original })
     }
