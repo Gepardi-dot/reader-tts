@@ -1,5 +1,6 @@
 import { guessAudioMime, typedAudioBlob } from '@/lib/browser'
 import { request, requestBlob } from '@/shared/api/client'
+import { speechTextWithoutPageNumbers } from '@/shared/books/pageNumbers'
 import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 
 export interface LiveAudioPayload {
@@ -33,6 +34,8 @@ export interface LiveAudioResult {
   byteLength?: number | null
   cacheHit?: boolean
   cacheStorage?: 'edge' | 'r2' | 'generated' | 'indexeddb' | 'memory' | string
+  /** Set by the API once synthesis leaves printed page numbers unspoken. */
+  omitsPageNumbers?: boolean
 }
 
 /** Survives browser refresh (IndexedDB). Bump if payload fields change. */
@@ -63,6 +66,11 @@ let liveAudioCooldownUntil = 0
 let liveAudioHiddenAt = 0
 let liveAudioLifecycleBound = false
 
+function liveAudioOmitsPageNumbers(payload: LiveAudioPayload, result: LiveAudioResult): boolean {
+  if (result.omitsPageNumbers === true) return true
+  return speechTextWithoutPageNumbers(payload.text) === payload.text
+}
+
 function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
   return JSON.stringify([
     bookId,
@@ -75,7 +83,7 @@ function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
     payload.sentence_silence,
     payload.start,
     payload.end,
-    payload.text,
+    speechTextWithoutPageNumbers(payload.text),
   ])
 }
 
@@ -438,8 +446,11 @@ export async function requestLiveAudio(
 
       const result = await fetchLiveAudioJson(bookId, payload, controller.signal)
 
-      // Fire-and-forget durable write so the next session/refresh is instant.
-      void persistClientLiveAudio(clientKey, result)
+      // Don't keep audio that may still speak a printed page number. An API
+      // from before this change has no flag; refetch until it does.
+      if (liveAudioOmitsPageNumbers(payload, result)) {
+        void persistClientLiveAudio(clientKey, result)
+      }
 
       return {
         ...result,
@@ -458,6 +469,7 @@ export async function requestLiveAudio(
   entry.promise = promise
   liveAudioInflight.set(key, entry)
   promise.then((result) => {
+    if (!liveAudioOmitsPageNumbers(payload, result)) return
     liveAudioMemoryCache.set(key, {
       expiresAt: Date.now() + LIVE_AUDIO_MEMORY_TTL_MS,
       promise: Promise.resolve(result),

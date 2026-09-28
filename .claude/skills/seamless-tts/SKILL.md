@@ -23,7 +23,7 @@ Line numbers drift — grep for symbols. This file separates correctness rules (
 ## Hard invariants — violating these breaks correctness
 
 **Cache key bump on field change.**
-`build_live_audio_payload` SHA-1s: bookId / provider / voice / model / outputFormat / narrationStyle / lengthScale / sentenceSilence / start / end. Adding or removing any field → bump `LIVE_AUDIO_CACHE_VERSION` (current: 7). Skipping the bump orphans every cached S3 audio file.
+`build_live_audio_payload` SHA-1s: bookId / provider / voice / model / outputFormat / narrationStyle / lengthScale / sentenceSilence / start / end, plus a hash of the text that is actually spoken. Adding or removing any field → bump `LIVE_AUDIO_CACHE_VERSION` (current: 7). Skipping the bump orphans every cached S3 audio file. Printed page-number lines are omitted from that spoken hash (and from the Worker digest). Do not hash the raw slice again — chunks without a page number keep their cache hit; chunks that had one must miss, or playback keeps saying the number.
 
 **No module-global caches on Vercel.**
 Per-process dicts/sets only persist within one lambda invocation. Any cache must be S3 / Supabase / external — never in-memory.
@@ -71,6 +71,7 @@ If a user reports a quality problem, suspect the implementation before defending
 - **Paginated follow**: each visual line stores the first source character on that line. Reusing the paragraph start on every wrapped line made `pageIndexForOffset` jump to the last page of the paragraph.
 - **Continuous follow**: keep the spoken line around the middle of the readable column (header → play bar). Clock `onProgress` passes `follow=false`; the reader still follows the spoken offset unless the user scrolled away. Drift outside the middle band glides the line back with a critically damped spring (~400ms, retargets without restarting). Reduced-motion users still jump.
 - **Spoken wash**: overlay line bars only — never a word cursor and never inline `<mark>`. `resolveReadingWindow` holds ~3 sentences until that span is spoken, then advances to the next ~3. Continuous follow recenters when the window changes, not on each word. Wrapped `\n` is not a sentence end; blank lines still are.
+- **Printed page numbers**: a line that is only a page number (`42`, `Page 12`, `- 18 -`) is hidden in the reader and left out of speech (hosted Kokoro/Gemini, on-device Kokoro, browser speech). The stored book text is unchanged, so highlights and taps keep their offsets. Years on their own line (1000–2099) and sentences that contain a number stay. A slice that is only a page number plays a short silence.
 - **Layout switch**: paginated ↔ continuous keep the same column (fixed header, same padding) so line wrapping does not change. Continuous → paginated freezes the live Y in the same frame — it does not relayout the whole book.
 
 ---
