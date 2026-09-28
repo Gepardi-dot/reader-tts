@@ -272,6 +272,69 @@ describe('AudioClock', () => {
     clock.close()
   })
 
+  it('plays through HTMLAudio on Android at 1× and keeps going when the screen locks', async () => {
+    const fake = new FakeHtmlAudio()
+    const handlers = new Map<string, () => void>()
+    vi.stubGlobal('Audio', class {
+      constructor() {
+        return fake
+      }
+    })
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:encoded'),
+      revokeObjectURL: vi.fn(),
+    })
+    vi.stubGlobal('MediaMetadata', class {
+      init: MediaMetadataInit
+      constructor(init: MediaMetadataInit) {
+        this.init = init
+      }
+    })
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      maxTouchPoints: 5,
+      platform: 'Linux armv8l',
+      mediaSession: {
+        metadata: null as MediaMetadata | null,
+        playbackState: 'none' as MediaSessionPlaybackState,
+        setActionHandler: vi.fn(),
+        setPositionState: vi.fn(),
+      },
+    })
+    vi.stubGlobal('document', {
+      visibilityState: 'visible',
+      addEventListener: (type: string, fn: () => void) => {
+        handlers.set(type, fn)
+      },
+      removeEventListener: vi.fn(),
+      body: { appendChild: vi.fn() },
+    })
+
+    const clock = new AudioClock()
+    const unit = clock.append(audioBuffer(0.5), { chunkIndex: 0, objectUrl: 'blob:live-chunk' })
+    expect(unit).not.toBeNull()
+    await Promise.resolve()
+    expect(contexts).toHaveLength(0)
+    expect(fake.src).toBe('blob:live-chunk')
+    expect(fake.paused).toBe(false)
+    expect(navigator.mediaSession.playbackState).toBe('playing')
+
+    ;(document as unknown as { visibilityState: string }).visibilityState = 'hidden'
+    handlers.get('visibilitychange')?.()
+    expect(fake.pause).not.toHaveBeenCalled()
+    expect(fake.paused).toBe(false)
+    expect(navigator.mediaSession.playbackState).toBe('playing')
+
+    clock.append(audioBuffer(0.4), { chunkIndex: 1, objectUrl: 'blob:next' })
+    await Promise.resolve()
+    await Promise.resolve()
+    fake.onended?.()
+    await Promise.resolve()
+    expect(fake.src).toBe('blob:next')
+    expect(fake.paused).toBe(false)
+    clock.close()
+  })
+
   it('does not load an empty src when Play stop() runs after the iOS unlock tap', async () => {
     const fake = new FakeHtmlAudio()
     vi.stubGlobal('Audio', class {

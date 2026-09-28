@@ -52,6 +52,13 @@ export interface TtsRuntimeHooks {
  * Gemini: BufferPool + live-audio chunks.
  */
 export class TtsRuntime {
+  constructor() {
+    this.clock.setTransport({
+      play: () => this.resume(),
+      pause: () => this.pause(),
+    })
+  }
+
   private generation = 0
   private controller: AbortController | null = null
   private phase: TtsPhase = 'idle'
@@ -541,8 +548,12 @@ export class TtsRuntime {
   private recoverIfStalled(generation: number) {
     if (generation !== this.generation) return
     if (this.phase === 'idle' || this.phase === 'paused' || this.clock.isPaused) return
-    const state = this.clock.contextState as string
-    if (state !== 'running') this.clock.unlock()
+    // Phones play through HTMLAudio. Waking a suspended AudioContext here is
+    // what makes the OS stop speech when the screen is off.
+    if (!this.clock.usesHtmlOutput()) {
+      const state = this.clock.contextState as string
+      if (state !== 'running') this.clock.unlock()
+    }
     if (this.clock.bufferedAheadSeconds() > 0.08) return
     if (!this.pool || !this.controller) return
 

@@ -5,6 +5,7 @@ import {
   createAudioContext,
   decodeAudioDataSafe,
   guessAudioMime,
+  isAndroid,
   isAppleWebKit,
   isIosWebKit,
   isMacSafari,
@@ -22,6 +23,12 @@ describe('isAppleWebKit', () => {
     expect(isAppleWebKit('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 5, 'MacIntel')).toBe(true)
     expect(isMacSafari('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) Safari/17.0', 0, 'MacIntel')).toBe(true)
     expect(isAppleWebKit('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) Safari/17.0', 0, 'MacIntel')).toBe(true)
+  })
+
+  it('matches Android phones and not iPhone or desktop', () => {
+    expect(isAndroid('Mozilla/5.0 (Linux; Android 14; Pixel 8)')).toBe(true)
+    expect(isAndroid('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)')).toBe(false)
+    expect(isAndroid('Mozilla/5.0 (Windows NT 10.0)')).toBe(false)
   })
 
   it('does not match Chrome or Windows', () => {

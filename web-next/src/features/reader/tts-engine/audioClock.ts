@@ -2,6 +2,7 @@ import {
   armHtmlMediaElement,
   armNavigatorAudioSession,
   createAudioContext,
+  isAndroid,
   isIosWebKit,
   pauseHtmlMediaElement,
   setHtmlMediaSrc,
@@ -57,11 +58,11 @@ function isWebAudioRate(rate: number) {
 /**
  * Append-only audio scheduler.
  *
- * - Rate ≈ 1.0 (desktop): Web Audio BufferSource (gapless, native pitch).
- * - Rate ≠ 1.0, or any rate on iOS WebKit: HTMLAudioElement with preservesPitch.
- *   iOS Safari/Chrome mute Web Audio under the Ring/Silent switch and drop
- *   AudioContext.resume() after an awaited fetch unless HTMLAudio was primed
- *   in the same tap.
+ * - Rate ≈ 1.0 on desktop: Web Audio BufferSource (gapless, native pitch).
+ * - Phones (iOS and Android) and any non-1.0 rate: HTMLAudioElement with
+ *   preservesPitch. A running AudioContext is suspended by the OS when the
+ *   screen locks, and that interruption also stops HTML audio. Phone speech
+ *   stays on one media element plus the media session so it keeps playing.
  *
  * BufferSource.playbackRate is intentionally never used for speed ≠ 1 — it
  * changes pitch and is what made sped-up Gemini sound robotic.
@@ -84,14 +85,34 @@ export class AudioClock {
   private detachCtxListeners: (() => void) | null = null
   private visibilityBound = false
   private pageShowBound = false
+  private transportPlay: (() => void) | null = null
+  private transportPause: (() => void) | null = null
+  private nowPlayingTitle = 'HiggsRead'
   private readonly onVisibility = () => {
-    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return
+    if (typeof document === 'undefined') return
+    if (document.visibilityState !== 'visible') {
+      // Screen off. Do not pause the media element. Suspend Web Audio so the
+      // OS interruption does not take the narration with it.
+      if (!this.active || this.paused || !this.useHtmlLane()) return
+      this.pauseUnlockHtml()
+      this.releaseWebAudioSession()
+      this.syncMediaSession()
+      return
+    }
     if (!this.active || this.paused) return
+    if (this.useHtmlLane()) {
+      this.holdHtmlPlayback()
+      return
+    }
     this.unlock()
     void this.resume()
   }
   private readonly onPageShow = () => {
     if (!this.active || this.paused) return
+    if (this.useHtmlLane()) {
+      this.holdHtmlPlayback()
+      return
+    }
     this.unlock()
     void this.resume()
   }
@@ -160,6 +181,7 @@ export class AudioClock {
       this.horizon = 0
     }
     this.attachContextListeners(this.ctx)
+    if (this.useHtmlLane()) this.releaseWebAudioSession()
     return this.ctx
   }
 
@@ -168,11 +190,45 @@ export class AudioClock {
    * iOS Safari/Chrome: resume Web Audio, play a silent buffer, and start a
    * looping silent HTMLAudio so the audio session survives the TTS fetch.
    */
+  /** Lock-screen play/pause. Wired by the runtime so the UI phase stays in sync. */
+  setTransport(transport: { play?: () => void; pause?: () => void }) {
+    this.transportPlay = transport.play ?? null
+    this.transportPause = transport.pause ?? null
+  }
+
+  setNowPlaying(title: string) {
+    const next = title.trim()
+    if (!next) return
+    this.nowPlayingTitle = next
+    this.syncMediaSession()
+  }
+
+  /** True when audible output is HTMLAudio (phones, and desktop speed ≠ 1). */
+  usesHtmlOutput() {
+    return this.useHtmlLane()
+  }
+
   unlock() {
+    this.bindVisibility()
     armNavigatorAudioSession()
+    if (this.useHtmlLane()) {
+      // Pause tap also fires the global pointerdown unlock.
+      if (this.paused) {
+        this.pauseUnlockHtml()
+        return
+      }
+      // Speech is already on the media element. A running AudioContext or a
+      // second silent element is what the OS cuts when the screen locks.
+      if (this.htmlAudible()) {
+        this.pauseUnlockHtml()
+        this.releaseWebAudioSession()
+        this.syncMediaSession()
+        return
+      }
+      this.primeHtmlUnlock()
+      return
+    }
     const ctx = this.ensureContext()
-    // Pause tap also fires the global pointerdown unlock. Do not resume content
-    // (or an in-flight ctx.resume from that gesture) while the user paused.
     if (this.paused) {
       this.pauseUnlockHtml()
       return
@@ -221,8 +277,16 @@ export class AudioClock {
   }
 
   private useHtmlLane() {
-    // iOS Chrome is WKWebView — same Web Audio silent-switch / autoplay rules as Safari.
-    return !isWebAudioRate(this.rate) || isIosWebKit()
+    // iOS Chrome is WKWebView — same Web Audio silent-switch rules as Safari.
+    // Android Chrome suspends AudioContext when the screen turns off.
+    return !isWebAudioRate(this.rate) || isIosWebKit() || isAndroid()
+  }
+
+  private htmlAudible() {
+    return this.htmlQueueIndex >= 0
+      && this.htmlAudio !== null
+      && !this.htmlAudio.paused
+      && !this.htmlAudio.ended
   }
 
   /**
@@ -260,8 +324,10 @@ export class AudioClock {
       }
       if (this.paused) {
         this.htmlAudio?.pause()
+        this.syncMediaSession()
         return
       }
+      this.syncMediaSession()
       return
     }
     const ctx = this.ctx
@@ -283,6 +349,7 @@ export class AudioClock {
       } catch {
         // ignore
       }
+      this.syncMediaSession()
       return
     }
     const ctx = this.ctx
@@ -313,6 +380,7 @@ export class AudioClock {
     this.paused = false
     this.expectMore = false
     this.handlers = {}
+    this.clearMediaSession()
   }
 
   close() {
@@ -411,6 +479,7 @@ export class AudioClock {
     }
     this.htmlQueue.push(unit)
     this.active = true
+    this.bindVisibility()
 
     if (this.htmlQueueIndex < 0 && !this.paused) {
       void this.playHtmlAt(0)
@@ -491,6 +560,8 @@ export class AudioClock {
 
     this.activeUnitId = unit.unitId
     this.handlers.onUnitStart?.(unit)
+    this.releaseWebAudioSession()
+    this.syncMediaSession()
 
     audio.onended = () => {
       if (gen !== this.htmlPlayGeneration || this.paused) return
@@ -747,6 +818,10 @@ export class AudioClock {
     if (this.detachCtxListeners) return
     const onState = () => {
       if (!this.active || this.paused) return
+      if (this.useHtmlLane()) {
+        this.releaseWebAudioSession()
+        return
+      }
       const state = ctx.state as string
       if (state === 'suspended' || state === 'interrupted') {
         void ctx.resume().catch(() => undefined)
@@ -828,6 +903,80 @@ export class AudioClock {
     } catch {
       // HTMLAudio may be missing in tests.
     }
+  }
+
+  /** Keep the phone media element playing and Web Audio out of the session. */
+  private holdHtmlPlayback() {
+    armNavigatorAudioSession()
+    this.pauseUnlockHtml()
+    this.releaseWebAudioSession()
+    const audio = this.htmlAudio
+    if (audio && this.htmlQueueIndex >= 0 && audio.paused && !audio.ended && !this.paused) {
+      void audio.play().catch(() => undefined)
+    }
+    this.syncMediaSession()
+  }
+
+  private releaseWebAudioSession() {
+    if (!this.useHtmlLane()) return
+    this.stopKeepAlive()
+    const ctx = this.ctx
+    const state = ctx?.state as string | undefined
+    if (ctx && state === 'running') void ctx.suspend().catch(() => undefined)
+  }
+
+  private syncMediaSession() {
+    if (typeof navigator === 'undefined' || !navigator.mediaSession) return
+    const session = navigator.mediaSession
+    const audible = this.active && (this.useHtmlLane() ? this.htmlQueueIndex >= 0 : this.sources.length > 0)
+    if (!audible && !this.paused) {
+      this.clearMediaSession()
+      return
+    }
+    try {
+      if (typeof MediaMetadata !== 'undefined') {
+        session.metadata = new MediaMetadata({
+          title: this.nowPlayingTitle,
+          artist: 'HiggsRead',
+        })
+      }
+      session.playbackState = this.paused ? 'paused' : 'playing'
+      const play = () => {
+        if (this.transportPlay) this.transportPlay()
+        else void this.resume()
+      }
+      const pause = () => {
+        if (this.transportPause) this.transportPause()
+        else void this.pause()
+      }
+      session.setActionHandler('play', play)
+      session.setActionHandler('pause', pause)
+      const audio = this.htmlAudio
+      if (
+        audio
+        && typeof session.setPositionState === 'function'
+        && Number.isFinite(audio.duration)
+        && audio.duration > 0
+      ) {
+        const position = Math.min(Math.max(0, audio.currentTime || 0), audio.duration)
+        session.setPositionState({
+          duration: audio.duration,
+          playbackRate: audio.playbackRate || 1,
+          position,
+        })
+      }
+    } catch {
+      // Older WebViews omit parts of the media session.
+    }
+  }
+
+  private clearMediaSession() {
+    if (typeof navigator === 'undefined' || !navigator.mediaSession) return
+    const session = navigator.mediaSession
+    try { session.playbackState = 'none' } catch { /* ignore */ }
+    try { session.metadata = null } catch { /* ignore */ }
+    try { session.setActionHandler('play', null) } catch { /* ignore */ }
+    try { session.setActionHandler('pause', null) } catch { /* ignore */ }
   }
 
   private pauseUnlockHtml() {
