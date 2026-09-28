@@ -186,6 +186,27 @@ describe('modelCache state machine', () => {
     expect(updates).toEqual(['downloading', 'downloading', 'ready'])
   })
 
+  it('synthesizeLocal speaks past a printed page number', async () => {
+    const mc = await loadModule()
+    mc.startWarmup()
+    MockWorker.instances[0].emit({ type: 'ready' })
+
+    const pending = mc.synthesizeLocal('He left.\n\n42\n\nShe stayed.', 'af_heart', 1)
+    await Promise.resolve()
+    await Promise.resolve()
+    const lastMsg = MockWorker.instances[0].posted.at(-1) as { type: string; id: string; text: string }
+    expect(lastMsg.type).toBe('synthesize')
+    expect(lastMsg.text).toBe('He left.\n\nShe stayed.')
+    MockWorker.instances[0].emit({
+      type: 'result',
+      id: lastMsg.id,
+      wav: new ArrayBuffer(8),
+      sampleRate: 24000,
+      durationSec: 0.2,
+    })
+    await pending
+  })
+
   it('synthesizeLocal returns null when model is not ready', async () => {
     const mc = await loadModule()
     const result = await mc.synthesizeLocal('hello', 'af_heart', 1)

@@ -142,6 +142,7 @@ def env_float_value(name: str, default: float) -> float:
         return default
 
 import pdf_to_audio
+from server.page_numbers import speech_text_without_page_numbers, write_silent_wav
 from server.gemma_provider import (
     build_gemma_answer_coach,
     build_gemma_context_generator,
@@ -3803,7 +3804,7 @@ def build_audio_manifest_payload(book_id: str, request: AudioManifestRequest) ->
     manifest_chunks: list[dict[str, Any]] = []
     ready_chunks = 0
     for idx, chunk in enumerate(chunks):
-        canonical_text = normalize_highlight_text(chunk["text"])
+        canonical_text = normalize_highlight_text(speech_text_without_page_numbers(chunk["text"]))
         identity = build_live_audio_cache_identity(
             book_id=book_id,
             provider_id=request.provider,
@@ -5062,8 +5063,10 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
     if canonical_text != submitted_text:
         raise HTTPException(status_code=400, detail="Live audio text does not match the selected range.")
 
-    synthesis_text = selected_text.strip()
-    if not synthesis_text:
+    spoken_text = speech_text_without_page_numbers(selected_text)
+    synthesis_text = spoken_text.strip()
+    page_number_only = not synthesis_text
+    if not selected_text.strip():
         raise HTTPException(status_code=400, detail="Live audio selection cannot be only whitespace.")
     trimmed_start = request.start + len(selected_text) - len(selected_text.lstrip())
 
@@ -5090,7 +5093,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         "sentenceSilence": request.sentence_silence,
         "start": request.start,
         "end": request.end,
-        "textHash": hashlib.sha256(canonical_text.encode("utf-8")).hexdigest(),
+        "textHash": hashlib.sha256(normalize_highlight_text(spoken_text).encode("utf-8")).hexdigest(),
     }
     digest = hashlib.sha1(json.dumps(cache_key, sort_keys=True).encode("utf-8")).hexdigest()[:20]
     client_cache_key = f"live-audio:v{LIVE_AUDIO_CACHE_VERSION}:{digest}"
@@ -5110,8 +5113,15 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
             write_json(timing_path, timing_manifest)
 
     resolved_model = chosen_model or ""
-    chunks = prepare_live_synthesis_chunks(synthesis_text, request.provider)
-    if not cached:
+    chunks: list[str] = []
+    if page_number_only:
+        if not cached:
+            write_silent_wav(output_path)
+        if timing_manifest is None:
+            timing_manifest = {"duration": 0.12, "cues": []}
+    else:
+        chunks = prepare_live_synthesis_chunks(synthesis_text, request.provider)
+    if not cached and not page_number_only:
         chunk_dir = output_dir / f".{output_path.stem}-chunks"
         shutil.rmtree(chunk_dir, ignore_errors=True)
         chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -5186,6 +5196,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         "cached": cached,
         "duration": duration,
         "cues": timing_manifest.get("cues", []) if timing_manifest else [],
+        "omitsPageNumbers": True,
     }
 
 

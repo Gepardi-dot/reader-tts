@@ -12,6 +12,8 @@
 // Storage bucket — see web-next/public/sw.js), so a fresh tab/session reuses
 // the bytes downloaded by any prior tab without re-fetching.
 
+import { silentSpeechWav, speechTextWithoutPageNumbers } from '../books/pageNumbers'
+
 export type ModelStatus = 'idle' | 'downloading' | 'warming' | 'ready' | 'error'
 
 export interface ModelState {
@@ -246,6 +248,19 @@ export function synthesizeLocalStreaming(
   speed: number,
   handle: StreamHandle,
 ): { cancel: () => void } | null {
+  const spoken = speechTextWithoutPageNumbers(text).trim()
+  if (!spoken) {
+    queueMicrotask(() => {
+      const silence = silentSpeechWav()
+      handle.onChunk?.(silence.pcm, silence.sampleRate, 0)
+      handle.onComplete({
+        wav: silence.wav,
+        sampleRate: silence.sampleRate,
+        durationSec: silence.durationSec,
+      })
+    })
+    return { cancel: () => {} }
+  }
   if (state.status !== 'ready') return null
   const w = worker
   if (!w) return null
@@ -269,7 +284,7 @@ export function synthesizeLocalStreaming(
       synthWaiters.set(id, { resolve, reject: () => resolve() })
     })
     try {
-      activeWorker.postMessage({ type: 'synthesize', id, text, voice, speed })
+      activeWorker.postMessage({ type: 'synthesize', id, text: spoken, voice, speed })
     } catch (err) {
       pending.delete(id)
       synthWaiters.delete(id)
@@ -309,8 +324,9 @@ export function synthesizeLocalStreaming(
 export const LOCAL_KOKORO_CACHE_VERSION = 1
 
 export async function localKokoroCacheKey(voice: string, speed: number, text: string): Promise<string> {
+  const spoken = speechTextWithoutPageNumbers(text)
   const encoder = new TextEncoder()
-  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(text))
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(spoken))
   const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
   return `local:kokoro:v${LOCAL_KOKORO_CACHE_VERSION}:${voice}:${speed.toFixed(3)}:${hex}`
 }

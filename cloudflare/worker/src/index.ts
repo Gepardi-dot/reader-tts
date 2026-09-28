@@ -1,4 +1,5 @@
 import { resolveDictionary, normalizeDictionaryTerm } from './dictionary'
+import { speechTextWithoutPageNumbers } from './pageNumbers'
 import {
   NotionHttpError,
   disconnectNotion,
@@ -1558,6 +1559,7 @@ function liveAudioPayloadFromFile(
     byteLength: options.byteLength ?? null,
     cacheHit: false,
     cacheStorage: options.cacheStorage ?? 'generated',
+    omitsPageNumbers: true,
   }
 }
 
@@ -1896,8 +1898,9 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
     throw new ApiError(400, 'Live audio text does not match the selected range.')
   }
 
-  const synthesisText = selectedText.trim()
-  if (!synthesisText) throw new ApiError(400, 'Live audio selection cannot be empty.')
+  const spokenText = speechTextWithoutPageNumbers(selectedText)
+  const synthesisText = spokenText.trim()
+  if (!selectedText.trim()) throw new ApiError(400, 'Live audio selection cannot be empty.')
 
   const lengthScale = Number(body.length_scale ?? body.lengthScale ?? 1)
   const sentenceSilence = Number(body.sentence_silence ?? body.sentenceSilence ?? 0.2)
@@ -1910,7 +1913,7 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
     ? configuredGeminiVoice(stringField(body.voice) || null)
     : configuredKokoroVoice(stringField(body.voice) || null)
   const narrationStyle = stringField(body.narration_style ?? body.narrationStyle)
-  const normalizedText = normalizeSelectionText(synthesisText)
+  const normalizedText = normalizeSelectionText(spokenText)
   const cacheDigest = await geminiLiveAudioCacheDigest({
     bookId,
     provider,
@@ -1935,7 +1938,14 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
     return json({ ...durableCached, cacheHit: true, cacheStorage: 'r2' })
   }
 
-  const result = provider === 'google'
+  const result = !synthesisText
+    ? {
+      model: provider === 'google' ? model : 'kokoro-remote',
+      voice,
+      wav: pcmToWav(new Uint8Array(Math.floor(0.12 * 24000) * 2), 24000),
+      duration: 0.12,
+    }
+    : provider === 'google'
     ? await synthesizeGeminiAudio(env, {
       text: synthesisText,
       voice,

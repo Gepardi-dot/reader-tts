@@ -1,3 +1,4 @@
+import { speechTextWithoutPageNumbers } from '@/shared/books/pageNumbers'
 import { preferredBrowserSpeechVoice, supportsBrowserSpeech } from '../browserSpeech'
 
 export interface BrowserSpeechChunk {
@@ -30,7 +31,17 @@ export class BrowserSpeechLane {
     if (!this.canSpeak()) return false
     this.stop()
 
-    const utterance = new SpeechSynthesisUtterance(chunk.text)
+    const spoken = speechTextWithoutPageNumbers(chunk.text).trim()
+    if (!spoken) {
+      queueMicrotask(() => {
+        if (signal.aborted) return
+        onStart()
+        onEnd()
+      })
+      return true
+    }
+
+    const utterance = new SpeechSynthesisUtterance(spoken)
     const voice = preferredBrowserSpeechVoice()
     if (voice) utterance.voice = voice
     utterance.lang = voice?.lang || 'en-US'

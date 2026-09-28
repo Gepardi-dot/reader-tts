@@ -11,6 +11,7 @@ import {
 import { AppearanceContent } from './AppearanceContent'
 import { DictionaryPanel, type DictionarySaveEntry } from './DictionaryPanel'
 import { READER_THEMES } from './readerTheme'
+import { isPageNumberBlock, splitPageNumberLines } from '@/shared/books/pageNumbers'
 import { api, AuthError } from '@/shared/api/client'
 import {
   type DictionaryResponse,
@@ -300,6 +301,18 @@ function toBionicNodes(text: string): ReactNode[] {
   })
 }
 
+function readerRunNodes(text: string, bionic: boolean): ReactNode {
+  const runs = splitPageNumberLines(text)
+  if (runs.length === 1 && !runs[0]?.pageNumber) {
+    return bionic ? toBionicNodes(text) : text
+  }
+  return runs.map((run, index) => (
+    run.pageNumber
+      ? <span key={index} data-reader-page-number="" hidden>{run.text}</span>
+      : <span key={index}>{bionic ? toBionicNodes(run.text) : run.text}</span>
+  ))
+}
+
 function splitParagraphByHighlights(
   text: string,
   paragraphStart: number,
@@ -377,8 +390,11 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
   return (
     <>
       {paragraphs.map((p, i) => {
-        const parts = splitParagraphByHighlights(p.text, p.startOffset, highlights, null)
-        const skipLayout = virtualize && (
+        const pageNumberBlock = isPageNumberBlock(p.text)
+        const parts = pageNumberBlock
+          ? []
+          : splitParagraphByHighlights(p.text, p.startOffset, highlights, null)
+        const skipLayout = !pageNumberBlock && virtualize && (
           layoutEnd <= layoutStart
           || p.startOffset + p.text.length < layoutStart
           || p.startOffset > layoutEnd
@@ -386,15 +402,17 @@ const ReaderParagraphs = memo(function ReaderParagraphs({
         return (
           <p
             key={`${p.startOffset}-${i}`}
+            hidden={pageNumberBlock || undefined}
             className={cn(
-              'mb-[1.4em]',
+              !pageNumberBlock && 'mb-[1.4em]',
               skipLayout && '[content-visibility:auto] [contain-intrinsic-size:auto_6em]',
             )}
             data-reader-paragraph-start={p.startOffset}
+            data-reader-page-number={pageNumberBlock ? '' : undefined}
             data-reader-layout-skip={skipLayout ? '' : undefined}
           >
-            {parts.map((part) => {
-              const content = bionic ? toBionicNodes(part.text) : part.text
+            {pageNumberBlock ? p.text : parts.map((part) => {
+              const content = readerRunNodes(part.text, bionic)
               if (!part.color) {
                 return <span key={part.key}>{content}</span>
               }
