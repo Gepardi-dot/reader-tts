@@ -3,6 +3,8 @@
  * Extraction always happens in the browser and uploads plain text to the API.
  */
 
+import { isIosWebKit } from '@/lib/browser'
+
 export type BookFormatKind =
   | 'pdf'
   | 'plain'
@@ -13,6 +15,7 @@ export type BookFormatKind =
   | 'fb2'
   | 'rtf'
   | 'json'
+  | 'mobi'
 
 export interface BookFormatMeta {
   extensions: string[]
@@ -86,6 +89,16 @@ export const BOOK_FORMATS: BookFormatMeta[] = [
     kind: 'json',
     label: 'JSON',
   },
+  {
+    extensions: ['mobi', 'azw', 'azw3', 'prc'],
+    mimeTypes: [
+      'application/x-mobipocket-ebook',
+      'application/vnd.amazon.ebook',
+      'application/x-mobi',
+    ],
+    kind: 'mobi',
+    label: 'Kindle (MOBI, AZW, AZW3)',
+  },
 ]
 
 const EXT_TO_META = new Map<string, BookFormatMeta>()
@@ -129,34 +142,86 @@ export function bookAcceptAttribute() {
   return [...parts].join(',')
 }
 
-/** iOS mixes MIME types into the photo picker; extensions-only opens Files. */
+/**
+ * iOS greys out or errors on uncommon extensions (EPUB, Kindle, FB2) when
+ * `accept` is extensions only. `application/octet-stream` lets Files hand
+ * those books over. image/* and application/pdf pull in the photo library.
+ */
 export function bookFileInputAccept() {
-  if (typeof navigator !== 'undefined') {
-    const ua = navigator.userAgent
-    const ios = /iphone|ipad|ipod/i.test(ua)
-      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
-    if (ios) {
-      const parts = new Set<string>()
-      for (const meta of BOOK_FORMATS) {
-        for (const ext of meta.extensions) parts.add(`.${ext}`)
-      }
-      return [...parts].join(',')
-    }
+  const extensions: string[] = []
+  for (const meta of BOOK_FORMATS) {
+    for (const ext of meta.extensions) extensions.push(`.${ext}`)
+  }
+  if (typeof navigator !== 'undefined' && isIosWebKit()) {
+    return ['application/octet-stream', ...extensions].join(',')
   }
   return bookAcceptAttribute()
 }
 
 /** Short UI helper under the drop zone. */
 export function bookFormatsHelpText() {
-  return 'PDF, EPUB, DOCX, ODT, RTF, FB2, HTML, Markdown, TXT, CSV, JSON…'
+  return 'PDF, EPUB, Kindle (MOBI, AZW, AZW3), DOCX, ODT, RTF, FB2, HTML, TXT…'
 }
 
 export function unsupportedBookMessage() {
   return (
-    'Unsupported format. Try PDF, EPUB, Word (DOCX), OpenDocument (ODT), RTF, '
-    + 'FictionBook (FB2), HTML, Markdown, TXT, CSV, or JSON. '
-    + 'Old .doc and Kindle (.mobi/.azw) are not supported — convert to DOCX or EPUB first.'
+    'Unsupported format. Try PDF, EPUB, Kindle (MOBI, AZW, AZW3), Word (DOCX), '
+    + 'OpenDocument (ODT), RTF, FictionBook (FB2), HTML, Markdown, or TXT. '
+    + 'DRM-locked Kindle files, old Word (.doc), and KFX need to be exported as EPUB first.'
   )
+}
+
+const ZIP_EXTENSIONS = new Set(['zip', 'fbz', 'fb2.zip'])
+
+export function isZipContainerName(name: string) {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.fb2.zip')) return true
+  const ext = extensionFor(lower)
+  return ZIP_EXTENSIONS.has(ext)
+}
+
+/** Magic-byte kind when iOS drops the extension or labels the file octet-stream. */
+export function sniffBookKind(bytes: Uint8Array): BookFormatKind | 'zip' | 'doc' | null {
+  if (bytes.length >= 5 && asciiAt(bytes, 0, 5) === '%PDF-') return 'pdf'
+  if (bytes.length >= 5 && asciiAt(bytes, 0, 5) === '{\\rtf') return 'rtf'
+  if (bytes.length >= 68) {
+    const ident = asciiAt(bytes, 60, 8)
+    if (ident === 'BOOKMOBI' || ident === 'TEXtREAd') return 'mobi'
+  }
+  if (
+    bytes.length >= 4
+    && bytes[0] === 0x50
+    && bytes[1] === 0x4b
+    && (bytes[2] === 0x03 || bytes[2] === 0x05 || bytes[2] === 0x07)
+  ) {
+    return 'zip'
+  }
+  if (bytes.length >= 8 && bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0) {
+    return 'doc'
+  }
+  const head = asciiAt(bytes, 0, Math.min(bytes.length, 240)).trimStart().toLowerCase()
+  if (head.startsWith('<!doctype html') || head.startsWith('<html') || head.startsWith('<head')) return 'html'
+  if (head.includes('<fictionbook')) return 'fb2'
+  if (head.startsWith('{') || head.startsWith('[')) return 'json'
+  return null
+}
+
+function asciiAt(bytes: Uint8Array, offset: number, length: number) {
+  let out = ''
+  const end = Math.min(bytes.length, offset + length)
+  for (let i = offset; i < end; i += 1) out += String.fromCharCode(bytes[i] ?? 0)
+  return out
+}
+
+export function looksLikePlainText(bytes: Uint8Array) {
+  if (bytes.length < 8) return false
+  const sample = bytes.subarray(0, Math.min(bytes.length, 4096))
+  let weird = 0
+  for (const b of sample) {
+    if (b === 0) return false
+    if (b < 9 || (b > 13 && b < 32)) weird += 1
+  }
+  return weird / sample.length < 0.02
 }
 
 /** Map extension → Content-Type for any future binary upload path. */

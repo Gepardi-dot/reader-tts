@@ -38,7 +38,11 @@ export function UploadRoute() {
     const applyLaunchFiles = () => {
       const launched = takeLaunchFiles()
       if (!launched.length) return
-      const next = launched.find((item) => isSupportedBookFile(item))
+      const next = launched.find((item) => {
+        const ext = item.name.includes('.') ? (item.name.split('.').pop()?.toLowerCase() ?? '') : ''
+        if (/^(png|jpe?g|gif|webp|heic|mp3|m4a|wav|mp4|mov)$/.test(ext)) return false
+        return isSupportedBookFile(item) || item.size > 0
+      })
       if (next) {
         setFile(next)
         setError('')
@@ -101,7 +105,14 @@ export function UploadRoute() {
     setDrag(false)
     const dropped = e.dataTransfer.files[0]
     if (!dropped) return
-    if (isSupportedBookFile(dropped)) {
+    const ext = dropped.name.includes('.')
+      ? (dropped.name.split('.').pop()?.toLowerCase() ?? '')
+      : ''
+    if (/^(png|jpe?g|gif|webp|heic|mp3|m4a|wav|mp4|mov)$/.test(ext)) {
+      setError(unsupportedBookMessage())
+      return
+    }
+    if (isSupportedBookFile(dropped) || dropped.size > 0) {
       setFile(dropped)
       setError('')
     } else {
@@ -117,15 +128,14 @@ export function UploadRoute() {
         your browser, then opened for reading and TTS.
       </p>
 
-      {/* Drop zone */}
-      <button
-        type="button"
-        onClick={() => inputRef.current?.click()}
+      {/* Drop zone. The input covers the control so iOS receives the tap directly.
+          A scripted click on a clipped input fails for EPUB, Kindle, and FB2. */}
+      <div
         onDragOver={(e) => { e.preventDefault(); setDrag(true) }}
         onDragLeave={() => setDrag(false)}
         onDrop={onDrop}
         className={cn(
-          'w-full rounded-xl border-2 border-dashed p-12 flex flex-col items-center gap-4 transition-colors cursor-pointer',
+          'relative w-full rounded-xl border-2 border-dashed p-12 flex flex-col items-center gap-4 transition-colors cursor-pointer',
           drag ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/40 hover:bg-muted/50',
           file && 'border-primary/40 bg-primary/5',
         )}
@@ -149,28 +159,31 @@ export function UploadRoute() {
             </div>
           </>
         )}
-      </button>
-
-      <input
-        ref={inputRef}
-        type="file"
-        accept={bookFileInputAccept()}
-        className="sr-only"
-        onChange={(e) => {
-          const selected = e.target.files?.[0] ?? null
-          if (!selected) {
-            setFile(null)
-            return
-          }
-          if (isSupportedBookFile(selected)) {
+        <input
+          ref={inputRef}
+          type="file"
+          accept={bookFileInputAccept()}
+          aria-label="Choose a book file"
+          className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+          onChange={(e) => {
+            const selected = e.target.files?.[0] ?? null
+            e.target.value = ''
+            if (!selected) return
+            const ext = selected.name.includes('.')
+              ? (selected.name.split('.').pop()?.toLowerCase() ?? '')
+              : ''
+            // Photos and audio are never books. Missing or uncommon extensions
+            // stay selected so Kindle/EPUB/FB2 can be sniffed after iOS renames them.
+            if (/^(png|jpe?g|gif|webp|heic|mp3|m4a|wav|mp4|mov)$/.test(ext)) {
+              setFile(null)
+              setError(unsupportedBookMessage())
+              return
+            }
             setFile(selected)
             setError('')
-          } else {
-            setFile(null)
-            setError(unsupportedBookMessage())
-          }
-        }}
-      />
+          }}
+        />
+      </div>
 
       {error && <p className="text-sm text-destructive mt-3">{error}</p>}
 
