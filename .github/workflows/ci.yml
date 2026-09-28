@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check server/app.py
-        run: python -m py_compile server/app.py server/page_numbers.py
+        run: python -m py_compile server/app.py server/page_numbers.py server/kokoro_speech.py
       - name: Check pdf_to_audio.py
         run: python -m py_compile pdf_to_audio.py
 

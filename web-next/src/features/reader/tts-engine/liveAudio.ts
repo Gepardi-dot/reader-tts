@@ -1,6 +1,7 @@
 import { guessAudioMime, typedAudioBlob } from '@/lib/browser'
 import { request, requestBlob } from '@/shared/api/client'
 import { speechTextWithoutPageNumbers } from '@/shared/books/pageNumbers'
+import { prepareKokoroSpeech } from '@/shared/speech/kokoroSpeech'
 import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 
 export interface LiveAudioPayload {
@@ -83,7 +84,9 @@ function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
     payload.sentence_silence,
     payload.start,
     payload.end,
-    speechTextWithoutPageNumbers(payload.text),
+    payload.provider === 'kokoro'
+      ? prepareKokoroSpeech(speechTextWithoutPageNumbers(payload.text))
+      : speechTextWithoutPageNumbers(payload.text),
   ])
 }
 

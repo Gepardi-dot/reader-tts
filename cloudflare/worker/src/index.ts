@@ -1,5 +1,6 @@
 import { resolveDictionary, normalizeDictionaryTerm } from './dictionary'
 import { speechTextWithoutPageNumbers } from './pageNumbers'
+import { prepareKokoroSpeech } from '../../../web-next/src/shared/speech/kokoroSpeech'
 import {
   NotionHttpError,
   disconnectNotion,
@@ -1814,7 +1815,7 @@ async function synthesizeKokoroRemoteOnce(
       method: 'POST',
       headers,
       body: JSON.stringify({
-        text: input.text,
+        text: prepareKokoroSpeech(input.text),
         voice,
         speed,
       }),
@@ -1899,7 +1900,8 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
   }
 
   const spokenText = speechTextWithoutPageNumbers(selectedText)
-  const synthesisText = spokenText.trim()
+  const speechText = provider === 'kokoro' ? prepareKokoroSpeech(spokenText) : spokenText
+  const synthesisText = speechText.trim()
   if (!selectedText.trim()) throw new ApiError(400, 'Live audio selection cannot be empty.')
 
   const lengthScale = Number(body.length_scale ?? body.lengthScale ?? 1)
@@ -1913,7 +1915,7 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
     ? configuredGeminiVoice(stringField(body.voice) || null)
     : configuredKokoroVoice(stringField(body.voice) || null)
   const narrationStyle = stringField(body.narration_style ?? body.narrationStyle)
-  const normalizedText = normalizeSelectionText(spokenText)
+  const normalizedText = normalizeSelectionText(speechText)
   const cacheDigest = await geminiLiveAudioCacheDigest({
     bookId,
     provider,
@@ -2075,7 +2077,7 @@ async function testProvider(request: Request, env: Env, ctx: ExecutionContext) {
     provider,
     voice: voiceField || '',
     model: modelField || '',
-    text: sampleText,
+    text: provider === 'kokoro' ? prepareKokoroSpeech(sampleText) : sampleText,
     lengthScale: safeLengthScale,
     sentenceSilence: safeSentenceSilence,
     narrationStyle: narrationStyle || '',

@@ -259,7 +259,7 @@ describe('audio playback startup plan', () => {
   it('keeps provider metadata explicit', () => {
     expect(isChunking('google')).toBe(true)
     expect(isChunking(BROWSER_TTS_PROVIDER_ID)).toBe(false)
-    expect(pacingFor('kokoro')).toEqual({ lengthScale: 0.93, sentenceSilence: 0.38 })
+    expect(pacingFor('kokoro')).toEqual({ lengthScale: 1, sentenceSilence: 0.42 })
     expect(pacingFor('google')).toEqual({ lengthScale: 1.0, sentenceSilence: 0.20 })
   })
 })

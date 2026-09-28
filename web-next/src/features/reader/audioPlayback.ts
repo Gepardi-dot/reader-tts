@@ -253,7 +253,8 @@ export function isChunking(provider: string): boolean {
 
 // Provider-tuned pacing
 export function pacingFor(provider: string): { lengthScale: number; sentenceSilence: number } {
-  if (provider === 'kokoro') return { lengthScale: 0.93, sentenceSilence: 0.38 }
+  // 1.0 is Kokoro's natural rate. 0.93 was about 8% fast and made narration feel rushed.
+  if (provider === 'kokoro') return { lengthScale: 1, sentenceSilence: 0.42 }
   return { lengthScale: 1.0, sentenceSilence: 0.20 }
 }
 

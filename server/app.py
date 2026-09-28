@@ -142,6 +142,7 @@ def env_float_value(name: str, default: float) -> float:
         return default
 
 import pdf_to_audio
+from server.kokoro_speech import prepare_kokoro_speech
 from server.page_numbers import speech_text_without_page_numbers, write_silent_wav
 from server.gemma_provider import (
     build_gemma_answer_coach,
@@ -3113,34 +3114,9 @@ def kokoro_configured() -> bool:
     return bool(KOKORO_REMOTE_URL)
 
 
-_KOKORO_ABBREVS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r'\bMr\.(?=\s)', re.IGNORECASE), 'Mister'),
-    (re.compile(r'\bMrs\.(?=\s)', re.IGNORECASE), 'Misses'),
-    (re.compile(r'\bMs\.(?=\s)', re.IGNORECASE), 'Miss'),
-    (re.compile(r'\bDr\.(?=\s)', re.IGNORECASE), 'Doctor'),
-    (re.compile(r'\bProf\.(?=\s)', re.IGNORECASE), 'Professor'),
-    (re.compile(r'\bSt\.(?=\s)', re.IGNORECASE), 'Saint'),
-    (re.compile(r'\bvs\.', re.IGNORECASE), 'versus'),
-    (re.compile(r'\betc\.', re.IGNORECASE), 'et cetera'),
-    (re.compile(r'\be\.g\.', re.IGNORECASE), 'for example'),
-    (re.compile(r'\bi\.e\.', re.IGNORECASE), 'that is'),
-]
-
-
 def preprocess_kokoro_text(text: str) -> str:
-    """Expand abbreviations and normalize punctuation for more natural Kokoro output."""
-    for pattern, replacement in _KOKORO_ABBREVS:
-        text = pattern.sub(replacement, text)
-    # Em-dash / en-dash → natural comma pause
-    text = re.sub(r'\s*[—–]\s*', ', ', text)
-    # Ellipsis → single comma (preserves pace without an abrupt stop)
-    text = re.sub(r'\.{2,}', ',', text)
-    # Curly quotes → ASCII quotes
-    text = text.replace('“', '"').replace('”', '"')
-    text = text.replace('‘', "'").replace('’', "'")
-    # Miscellaneous unicode bullets / middle-dots → period
-    text = text.replace('·', '.').replace('•', '.').replace('…', ',')
-    return text
+    """Years, punctuation pauses, and titles, in words Kokoro will not spell digit by digit."""
+    return prepare_kokoro_speech(text)
 
 
 def _concat_wavs(wav_paths: list[Path], output_path: Path, *, silence_seconds: float = 0.3) -> None:
@@ -3804,7 +3780,10 @@ def build_audio_manifest_payload(book_id: str, request: AudioManifestRequest) ->
     manifest_chunks: list[dict[str, Any]] = []
     ready_chunks = 0
     for idx, chunk in enumerate(chunks):
-        canonical_text = normalize_highlight_text(speech_text_without_page_numbers(chunk["text"]))
+        chunk_speech = speech_text_without_page_numbers(chunk["text"])
+        if request.provider == "kokoro":
+            chunk_speech = prepare_kokoro_speech(chunk_speech)
+        canonical_text = normalize_highlight_text(chunk_speech)
         identity = build_live_audio_cache_identity(
             book_id=book_id,
             provider_id=request.provider,
@@ -5064,7 +5043,8 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         raise HTTPException(status_code=400, detail="Live audio text does not match the selected range.")
 
     spoken_text = speech_text_without_page_numbers(selected_text)
-    synthesis_text = spoken_text.strip()
+    speech_text = prepare_kokoro_speech(spoken_text) if request.provider == "kokoro" else spoken_text
+    synthesis_text = speech_text.strip()
     page_number_only = not synthesis_text
     if not selected_text.strip():
         raise HTTPException(status_code=400, detail="Live audio selection cannot be only whitespace.")
@@ -5093,7 +5073,7 @@ def build_live_audio_payload(book_id: str, request: LiveAudioRequest) -> dict[st
         "sentenceSilence": request.sentence_silence,
         "start": request.start,
         "end": request.end,
-        "textHash": hashlib.sha256(normalize_highlight_text(spoken_text).encode("utf-8")).hexdigest(),
+        "textHash": hashlib.sha256(normalize_highlight_text(speech_text).encode("utf-8")).hexdigest(),
     }
     digest = hashlib.sha1(json.dumps(cache_key, sort_keys=True).encode("utf-8")).hexdigest()[:20]
     client_cache_key = f"live-audio:v{LIVE_AUDIO_CACHE_VERSION}:{digest}"
