@@ -13,6 +13,7 @@
 // the bytes downloaded by any prior tab without re-fetching.
 
 import { silentSpeechWav, speechTextWithoutPageNumbers } from '../books/pageNumbers'
+import { prepareKokoroSpeech } from '../speech/kokoroSpeech'
 
 export type ModelStatus = 'idle' | 'downloading' | 'warming' | 'ready' | 'error'
 
@@ -324,7 +325,7 @@ export function synthesizeLocalStreaming(
 export const LOCAL_KOKORO_CACHE_VERSION = 1
 
 export async function localKokoroCacheKey(voice: string, speed: number, text: string): Promise<string> {
-  const spoken = speechTextWithoutPageNumbers(text)
+  const spoken = prepareKokoroSpeech(speechTextWithoutPageNumbers(text))
   const encoder = new TextEncoder()
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode(spoken))
   const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')

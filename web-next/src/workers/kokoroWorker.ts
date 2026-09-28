@@ -2,7 +2,8 @@
 // Web Worker — runs Kokoro TTS inference off the main thread.
 //
 // Lifecycle:
-//   1. Main posts { type: 'warmup' } → worker downloads the model (~82 MB, q8),
+//   1. Main posts { type: 'warmup' } → worker downloads the full-quality model
+//      (fp32 on WebGPU, fp16 on WASM; q8 only if those fail to load),
 //      then runs a dummy synth so WASM kernels are compiled and tensors allocated.
 //      Posts 'progress', 'warming', 'ready' in that order.
 //   2. Main posts { type: 'synthesize' } → worker streams sentence-level PCM
@@ -13,6 +14,7 @@
 
 import { KokoroTTS } from 'kokoro-js'
 import { env } from '@huggingface/transformers'
+import { prepareKokoroSpeech } from '../shared/speech/kokoroSpeech'
 
 declare const self: DedicatedWorkerGlobalScope
 
@@ -90,6 +92,37 @@ async function pickDevice(): Promise<'webgpu' | 'wasm'> {
   }
 }
 
+type KokoroDtype = 'fp32' | 'fp16' | 'q8'
+
+/** q8 is the small 8-bit model and sounds dull. Prefer the full weights. */
+function qualityDtypes(device: 'webgpu' | 'wasm'): KokoroDtype[] {
+  return device === 'webgpu' ? ['fp32', 'fp16', 'q8'] : ['fp16', 'q8']
+}
+
+async function loadKokoro(device: 'webgpu' | 'wasm') {
+  let lastError: unknown
+  for (const dtype of qualityDtypes(device)) {
+    try {
+      return await KokoroTTS.from_pretrained(MODEL_ID, {
+        dtype,
+        device,
+        progress_callback: (data: { progress?: number; file?: string; status?: string }) => {
+          if (typeof data.progress === 'number') {
+            post({
+              type: 'progress',
+              progress: Math.max(0, Math.min(100, Math.round(data.progress))),
+              file: data.file,
+            })
+          }
+        },
+      })
+    } catch (err) {
+      lastError = err
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Kokoro model failed to load.')
+}
+
 async function warmup() {
   if (pipeline) {
     post({ type: 'ready' })
@@ -102,19 +135,7 @@ async function warmup() {
   warmupPromise = (async () => {
     const device = await pickDevice()
     try {
-      pipeline = await KokoroTTS.from_pretrained(MODEL_ID, {
-        dtype: 'q8',
-        device,
-        progress_callback: (data: { progress?: number; file?: string; status?: string }) => {
-          if (typeof data.progress === 'number') {
-            post({
-              type: 'progress',
-              progress: Math.max(0, Math.min(100, Math.round(data.progress))),
-              file: data.file,
-            })
-          }
-        },
-      })
+      pipeline = await loadKokoro(device)
       // Model bytes in memory ≠ ready to play. The first generate() call still
       // pays WASM-kernel compilation + tensor-buffer allocation (~1–3 s on cold
       // hardware). Run a throwaway synth here so the first real user request
@@ -195,7 +216,7 @@ async function synthesize(msg: SynthIn) {
     const collected: Float32Array[] = []
     let sampleRate = 24000
 
-    const iterator = pipeline.stream(msg.text, {
+    const iterator = pipeline.stream(prepareKokoroSpeech(msg.text), {
       voice: msg.voice as never,
       speed: msg.speed as never,
     })
