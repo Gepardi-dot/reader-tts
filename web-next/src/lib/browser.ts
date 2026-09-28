@@ -2,6 +2,12 @@
  * WebKit / Safari helpers. iOS Chrome and Firefox are WebKit too.
  */
 
+export function isAndroid(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+) {
+  return /android/i.test(userAgent)
+}
+
 export function isIosWebKit(
   userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
   maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints,

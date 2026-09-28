@@ -115,6 +115,10 @@ export class KokoroEngine {
   }
 
   constructor() {
+    this.clock.setTransport({
+      play: () => this.resume(),
+      pause: () => this.pause(),
+    })
     this.unsubModel = subscribeModelStatus(() => {
       if (this.phase === 'buffering' || this.pendingPlay) this.hooks.onSnapshot()
     })
