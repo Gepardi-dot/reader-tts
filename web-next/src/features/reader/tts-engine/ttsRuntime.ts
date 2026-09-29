@@ -18,6 +18,7 @@ import { KokoroEngine, PREHEAT_SEGMENTS } from './kokoroEngine'
 import { audioErrorMessage } from './liveAudio'
 import { warmLiveAudioFromOffset } from './liveAudioWarm'
 import { buildTtsChunks } from './segmenter'
+import { screenWakeForPhase } from './screenWakeLock'
 import { FirstAudioGate } from './sessionTelemetry'
 import type {
   TtsAudioChunk,
@@ -278,11 +279,13 @@ export class TtsRuntime {
 
   resume() {
     if (this.usingKokoroEngine) {
+      screenWakeForPhase('playing')
       this.kokoro.resume()
       this.emit()
       return
     }
     if (this.phase !== 'paused') return
+    screenWakeForPhase('playing')
     this.clock.unlock()
     void this.clock.resume()
     this.phase = 'playing'
@@ -302,6 +305,9 @@ export class TtsRuntime {
 
   async start(params: TtsRuntimeStartParams) {
     this.stop()
+    // Same tap as Play, before unlock() starts audio. stop() just scheduled
+    // the wake lock to drop; buffering cancels that so the screen stays on.
+    screenWakeForPhase('buffering')
     // Must run in the originating tap/keydown stack — before any await —
     // or Safari/Chrome will refuse ctx.resume() and playback stays silent.
     this.clock.unlock()
@@ -677,6 +683,7 @@ export class TtsRuntime {
   }
 
   private emit() {
+    screenWakeForPhase(this.getSnapshot().phase)
     for (const listener of this.listeners) {
       try {
         listener()
