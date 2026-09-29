@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react'
 import { audioSelectionKey } from '../audioPlayback'
+import { screenWakeForPhase } from './screenWakeLock'
 import { TtsRuntime } from './ttsRuntime'
 import type { TtsAudioChunk, TtsGridChunk, TtsPhase } from './types'
 
@@ -116,6 +117,8 @@ export function useTtsSessionController({
     startOffset: number,
     reason?: 'voice-switch',
   ) => {
+    // Before unlock starts audio, so this tap can still grant the screen lock.
+    screenWakeForPhase('buffering')
     ensureRuntime().unlockAudio()
     await ensureRuntime().start({
       word,
