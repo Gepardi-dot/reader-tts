@@ -9,6 +9,11 @@
  * narrator takes a breath. The model has no breath sound, so this does not
  * insert an inhale.
  *
+ * A comma after a number is Kokoro's short pause. It is added only when the
+ * next word would otherwise start immediately — a title ("page 431 Appendix")
+ * or a word glued on with no space ("457Appendix"). A number inside a
+ * sentence ("in 1984 the war", "turned 12 yesterday") is left alone.
+ *
  * The function is safe to run twice. Plain sentences come back unchanged so
  * audio cache keys stay put when nothing about the speech changed.
  */
@@ -180,6 +185,28 @@ function verbalizeNumbers(text: string): string {
   return next
 }
 
+const ORDINAL_SUFFIX = /^(?:st|nd|rd|th)(?![A-Za-z])/i
+const DECADE_SUFFIX = /^s(?![A-Za-z])/i
+
+function pauseAfterNumbers(text: string): string {
+  return text.replace(
+    /(\d+)([ \t\n]*)(?=[A-Za-z])/g,
+    (full, digits: string, gap: string, offset: number, whole: string) => {
+      const rest = whole.slice(offset + full.length)
+      const glued = gap.length === 0
+      if (glued && ORDINAL_SUFFIX.test(rest)) return full
+      if (glued && DECADE_SUFFIX.test(rest) && /^(?:1[0-9]|20)\d0$/.test(digits)) return full
+      const next = rest[0] ?? ''
+      const title = !glued && next >= 'A' && next <= 'Z'
+      const gluedWord = glued && /^[A-Za-z]{2,}/.test(rest)
+      if (!title && !gluedWord) return full
+      const lineBreak = gap.match(/\n+/)
+      if (lineBreak) return `${digits},${lineBreak[0]}`
+      return `${digits}, `
+    },
+  )
+}
+
 function shapePauses(text: string): string {
   let next = text.replace(/\r\n/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n')
   next = next.replace(/[“”]/g, '"').replace(/[‘’]/g, "'")
@@ -203,6 +230,6 @@ function quietShouting(text: string): string {
 
 export function prepareKokoroSpeech(text: string): string {
   if (!text) return text
-  const shaped = shapePauses(verbalizeNumbers(expandAbbreviations(quietShouting(text))))
+  const shaped = shapePauses(verbalizeNumbers(pauseAfterNumbers(expandAbbreviations(quietShouting(text)))))
   return shaped === text ? text : shaped
 }

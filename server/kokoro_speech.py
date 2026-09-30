@@ -177,6 +177,38 @@ def _verbalize_numbers(text: str) -> str:
     return text
 
 
+_ORDINAL_SUFFIX = re.compile(r"^(?:st|nd|rd|th)(?![A-Za-z])", re.IGNORECASE)
+_DECADE_SUFFIX = re.compile(r"^s(?![A-Za-z])", re.IGNORECASE)
+_DECADE_DIGITS = re.compile(r"^(?:1[0-9]|20)\d0$")
+_NUMBER_THEN_WORD = re.compile(r"(\d+)([ \t\n]*)(?=[A-Za-z])")
+_LINE_BREAK = re.compile(r"\n+")
+
+
+def _pause_after_numbers(text: str) -> str:
+    """Comma pause when the next word would run straight on from a number."""
+
+    def repl(match: re.Match[str]) -> str:
+        digits = match.group(1)
+        gap = match.group(2)
+        rest = text[match.end() :]
+        glued = gap == ""
+        if glued and _ORDINAL_SUFFIX.match(rest):
+            return match.group(0)
+        if glued and _DECADE_SUFFIX.match(rest) and _DECADE_DIGITS.match(digits):
+            return match.group(0)
+        nxt = rest[0] if rest else ""
+        title = (not glued) and ("A" <= nxt <= "Z")
+        glued_word = glued and len(rest) >= 2 and rest[0].isalpha() and rest[1].isalpha()
+        if not title and not glued_word:
+            return match.group(0)
+        line_break = _LINE_BREAK.search(gap)
+        if line_break:
+            return f"{digits},{line_break.group(0)}"
+        return f"{digits}, "
+
+    return _NUMBER_THEN_WORD.sub(repl, text)
+
+
 def _shape_pauses(text: str) -> str:
     text = text.replace("\r\n", "\n")
     text = re.sub(r"[ \t]+\n", "\n", text)
@@ -202,5 +234,5 @@ def _quiet_shouting(text: str) -> str:
 def prepare_kokoro_speech(text: str) -> str:
     if not text:
         return text
-    shaped = _shape_pauses(_verbalize_numbers(_expand_abbreviations(_quiet_shouting(text))))
+    shaped = _shape_pauses(_verbalize_numbers(_pause_after_numbers(_expand_abbreviations(_quiet_shouting(text)))))
     return text if shaped == text else shaped
