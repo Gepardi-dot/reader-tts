@@ -31,6 +31,21 @@ describe('prepareKokoroSpeech', () => {
     )
   })
 
+  it('pauses after a number before the next title', () => {
+    const contents =
+      'Appendix A: Seductive Environment/Seductive Time page 431 Appendix B: Soft Seduction: How to Sell Anything to the Masses page 441 Selected Bibliography • 455 Index • 457Appendix A'
+    expect(prepareKokoroSpeech(contents)).toBe(
+      'Appendix A: Seductive Environment/Seductive Time page 431, Appendix B: Soft Seduction: How to Sell Anything to the Masses page 441, Selected Bibliography. 455, Index. 457, Appendix A',
+    )
+    expect(prepareKokoroSpeech('page 441\nSelected Bibliography')).toBe('page 441, Selected Bibliography')
+    expect(prepareKokoroSpeech(prepareKokoroSpeech(contents))).toBe(prepareKokoroSpeech(contents))
+  })
+
+  it('leaves a number inside a sentence untouched', () => {
+    expect(prepareKokoroSpeech('He turned 12 yesterday.')).toBe('He turned 12 yesterday.')
+    expect(prepareKokoroSpeech('page 3D models')).toBe('page 3D models')
+  })
+
   it('leaves an ordinary sentence untouched', () => {
     const text = 'She opened the door.'
     expect(prepareKokoroSpeech(text)).toBe(text)
