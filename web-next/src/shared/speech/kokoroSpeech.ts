@@ -207,15 +207,23 @@ function pauseAfterNumbers(text: string): string {
   )
 }
 
+function holdPitchAtCommas(text: string): string {
+  // Kokoro finishes the melody on a comma. An em dash keeps a short open break.
+  let next = text.replace(/,[ \t]*\n{2,}/g, ' — ')
+  next = next.replace(/,(?=\s+\S)/g, ' —')
+  return next
+}
+
 function shapePauses(text: string): string {
   let next = text.replace(/\r\n/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n')
   next = next.replace(/[“”]/g, '"').replace(/[‘’]/g, "'")
   next = next.replace(/[·•]/g, '. ')
   next = next.replace(/\.{3,}|…+/g, ' … ')
+  next = holdPitchAtCommas(next)
   next = next.replace(/\s*[—–]\s*/g, ' — ')
   // A wrapped line is not a new sentence. A blank line is where a narrator breathes.
   next = next.replace(/\n{3,}/g, '\n\n')
-  next = next.replace(/([^.!?"'…—])\s*\n\n/g, '$1.\n\n')
+  next = next.replace(/([^.!?"'…—,:;])\s*\n\n/g, '$1.\n\n')
   next = next.replace(/\n\n/g, ' — ')
   next = next.replace(/\n/g, ' ')
   next = next.replace(/([.!?])([A-Za-z])/g, '$1 $2')

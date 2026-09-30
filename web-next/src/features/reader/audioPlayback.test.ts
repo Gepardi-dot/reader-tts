@@ -133,6 +133,14 @@ describe('audio playback chunking', () => {
     expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThan(CHUNK_CHARS.kokoro)
   })
 
+  it('does not end a spoken piece on a comma', () => {
+    const text = `abcdefghij klmnop, rest ${'word '.repeat(40)}done.`
+    const chunks = buildAudioChunks(text, 0, 20, 20, 20)
+    expect(chunks.map((chunk) => chunk.text).join('')).toBe(text)
+    expect(chunks[0]?.text.startsWith('abcdefghij klmnop, rest')).toBe(true)
+    expect(chunks.some((chunk) => chunk.text.trimEnd().endsWith(','))).toBe(false)
+  })
+
   it('builds progressive chunk sizes for Kokoro', () => {
     const text = [
       'Short open. ',

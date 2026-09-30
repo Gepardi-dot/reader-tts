@@ -209,6 +209,13 @@ def _pause_after_numbers(text: str) -> str:
     return _NUMBER_THEN_WORD.sub(repl, text)
 
 
+def _hold_pitch_at_commas(text: str) -> str:
+    """Kokoro finishes the melody on a comma. An em dash keeps a short open break."""
+    text = re.sub(r",[ \t]*\n{2,}", " — ", text)
+    text = re.sub(r",(?=\s+\S)", " —", text)
+    return text
+
+
 def _shape_pauses(text: str) -> str:
     text = text.replace("\r\n", "\n")
     text = re.sub(r"[ \t]+\n", "\n", text)
@@ -216,9 +223,10 @@ def _shape_pauses(text: str) -> str:
     text = text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
     text = text.replace("·", ". ").replace("•", ". ")
     text = re.sub(r"\.{3,}|…+", " … ", text)
+    text = _hold_pitch_at_commas(text)
     text = re.sub(r"\s*[—–]\s*", " — ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"([^.!?'\"…—])\s*\n\n", r"\1.\n\n", text)
+    text = re.sub(r"([^.!?'\"…—,:;])\s*\n\n", r"\1.\n\n", text)
     text = text.replace("\n\n", " — ")
     text = text.replace("\n", " ")
     text = re.sub(r"([.!?])([A-Za-z])", r"\1 \2", text)

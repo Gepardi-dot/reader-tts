@@ -185,6 +185,9 @@
     min-height: 100%;
     overflow-x: clip;
     overflow-y: auto;
+    /* Paragraphs below the fold report a guess height, then grow. Anchoring
+       walks the viewport on every correction, which is the refresh jump. */
+    overflow-anchor: none;
   }
   html.reader-window-scroll #root {
     height: auto;

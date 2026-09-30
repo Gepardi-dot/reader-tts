@@ -103,6 +103,7 @@ import {
   resolveLayoutSwitchOffset,
   scrollDeltaToPinRect,
   scrollPctFromOffset,
+  initialReadingOffset,
   type PagedLayoutCacheKey,
   type OverlayRect,
   type ReaderLayout,
@@ -2092,6 +2093,7 @@ export function ReaderRoute() {
   const [sheet,         setSheet]         = useState<'none' | 'appearance' | 'audio' | 'chat'>('none')
   const [scrollPct,     setScrollPct]     = useState(0)
   const [pageIndex,     setPageIndex]     = useState(0)
+  const [readingPlaceReady, setReadingPlaceReady] = useState(false)
   const [pageBreaks,    setPageBreaks]    = useState<ReaderPageBreak[]>([])
   const [pagedLayoutAll, setPagedLayoutAll] = useState(false)
   const pagedLayoutAllRef = useRef(false)
@@ -2117,7 +2119,6 @@ export function ReaderRoute() {
   const saveTimer             = useRef<ReturnType<typeof setTimeout> | null>(null)
   const justShowedMenu        = useRef(false)
   const suppressTapUntilRef   = useRef(0)
-  const scrolledToOffsetRef   = useRef(false)
   const activeAudioCueKeyRef    = useRef<string | null>(null)
   const activeAudioCueRangeRef  = useRef<{ start: number; end: number } | null>(null)
   /** True while we programmatically scroll to keep the cue in view — ignore for pause detection. */
@@ -2146,6 +2147,10 @@ export function ReaderRoute() {
   const lastPagedBreaksRef    = useRef<ReaderPageBreak[]>([])
   const lastPagedKeyRef       = useRef<PagedLayoutCacheKey | null>(null)
   const pendingPageOffsetRef  = useRef<number | null>(null)
+  const placedOffsetRef       = useRef<number | null>(null)
+  const placedBookRef         = useRef<string | null>(null)
+  const readingPlaceReadyRef  = useRef(false)
+  const didPinContinuousRef   = useRef(false)
   const prevLayoutRef         = useRef<ReaderLayout>(appearance.layout)
   const pageTurnRef           = useRef({
     tracking: false,
@@ -2198,7 +2203,7 @@ export function ReaderRoute() {
     enabled:  Boolean(bookId),
   })
 
-  const { data: progressData } = useQuery({
+  const { data: progressData, isFetched: progressFetched } = useQuery({
     queryKey: ['progress', bookId],
     queryFn:  () => api.get<ProgressPayload>(`/api/books/${bookId}/progress`),
     enabled:  Boolean(bookId),
@@ -2714,10 +2719,58 @@ export function ReaderRoute() {
     return offset == null ? null : clampReadOffset(offset, text.length)
   }
 
-  function scrollContinuousToOffset(offset: number, pin: 'start' | 'center') {
+  function markReadingPlaceReady() {
+    if (readingPlaceReadyRef.current) return
+    readingPlaceReadyRef.current = true
+    requestAnimationFrame(() => {
+      setScrollPct(latestScrollPct.current)
+      setReadingPlaceReady(true)
+    })
+  }
+
+  function seedReadingPlace() {
+    if (!payload || !progressFetched || !bookId) return false
+    if (placedBookRef.current !== bookId) {
+      const switchedBook = placedBookRef.current != null
+      placedBookRef.current = bookId
+      placedOffsetRef.current = null
+      didPinContinuousRef.current = false
+      if (switchedBook) {
+        readingPlaceReadyRef.current = false
+        setReadingPlaceReady(false)
+        return false
+      }
+    }
+    if (placedOffsetRef.current != null) return true
+    const textLength = payload.text.length
+    const params = new URLSearchParams(window.location.search)
+    const rawUrl = params.get('offset')
+    const parsedUrl = rawUrl == null ? null : parseInt(rawUrl, 10)
+    const urlOffset = parsedUrl != null && Number.isFinite(parsedUrl) && parsedUrl >= 0 ? parsedUrl : null
+    const offset = initialReadingOffset({
+      textLength,
+      urlOffset,
+      progressStart: progressData?.reading?.textStart ?? null,
+      progressLength: progressData?.reading?.textLength ?? null,
+    })
+    placedOffsetRef.current = offset
+    readOffsetRef.current = offset
+    latestScrollPct.current = scrollPctFromOffset(offset, textLength)
+    if (appearance.layout === 'paginated' && textLength > 0) pendingPageOffsetRef.current = offset
+    return true
+  }
+
+  function scrollContinuousToOffset(
+    offset: number,
+    pin: 'start' | 'center',
+    onSettled?: () => void,
+  ) {
     const root = readerTextRef.current
     const text = payload?.text ?? ''
-    if (!root || !text) return
+    if (!root || !text) {
+      onSettled?.()
+      return
+    }
     const start = clampReadOffset(offset, text.length)
     const end = Math.min(text.length, start + 1)
     const range = domRangeForSourceOffsets(start, end, root)
@@ -2747,6 +2800,7 @@ export function ReaderRoute() {
     tryPin()
     requestAnimationFrame(() => {
       tryPin()
+      onSettled?.()
       window.setTimeout(() => { programmaticScrollRef.current = false }, 80)
     })
   }
@@ -2945,7 +2999,10 @@ export function ReaderRoute() {
       return
     }
     const root = readerTextRef.current
-    if (!root || !payload?.text) return
+    if (!root || !payload?.text) {
+      markReadingPlaceReady()
+      return
+    }
 
     const prevClip = root.style.clipPath
     root.style.clipPath = 'none'
@@ -2986,9 +3043,11 @@ export function ReaderRoute() {
         applyRestingPageTransform(page)
         window.setTimeout(() => { programmaticScrollRef.current = false }, 80)
       }
+      markReadingPlaceReady()
       return
     }
     goToPage(next, pending != null ? 'restore' : 'follow')
+    markReadingPlaceReady()
   }
 
   useEffect(() => {
@@ -3055,11 +3114,21 @@ export function ReaderRoute() {
     }
   }, [sheet])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const html = document.documentElement
     html.classList.toggle('reader-window-scroll', readerUsesWindowScroll(appearance.layout))
     return () => html.classList.remove('reader-window-scroll')
   }, [appearance.layout])
+
+  useLayoutEffect(() => {
+    if (readingPlaceReady) return
+    const html = document.documentElement
+    const prev = html.style.overflow
+    html.style.overflow = 'hidden'
+    return () => {
+      html.style.overflow = prev
+    }
+  }, [readingPlaceReady])
 
   useEffect(() => {
     const themeMeta = document.querySelector('meta[name="theme-color"]')
@@ -3084,53 +3153,42 @@ export function ReaderRoute() {
     }
   }, [])
 
-  // Restore scroll position — also handles ?offset= from notes navigation
   useEffect(() => {
-    if (!payload?.text) return
+    if (placedOffsetRef.current == null) return
+    const params = new URLSearchParams(window.location.search)
+    if (!params.has('offset')) return
+    window.history.replaceState({}, '', window.location.pathname)
+  }, [payload, progressFetched])
 
-    const applyOffset = (offset: number) => {
-      const clamped = clampReadOffset(offset, payload.text.length)
-      readOffsetRef.current = clamped
-      const pct = scrollPctFromOffset(clamped, payload.text.length)
-      latestScrollPct.current = pct
-      setScrollPct(pct)
-      if (appearance.layout === 'paginated') {
-        pendingPageOffsetRef.current = clamped
-        if (pageBreaksRef.current.length > 0) {
-          const next = pageIndexForOffset(pageBreaksRef.current, clamped)
-          goToPage(next, 'restore')
-        }
-        return
-      }
-      scrollContinuousToOffset(clamped, 'start')
+  useEffect(() => {
+    if (!payload || placedOffsetRef.current == null) return
+    if (appearance.layout === 'paginated') return
+    if (didPinContinuousRef.current) {
+      markReadingPlaceReady()
+      return
     }
-
-    if (!scrolledToOffsetRef.current) {
-      const params = new URLSearchParams(window.location.search)
-      const offsetStr = params.get('offset')
-      if (offsetStr !== null) {
-        const offset = parseInt(offsetStr, 10)
-        if (!isNaN(offset) && offset >= 0) {
-          scrolledToOffsetRef.current = true
-          applyOffset(offset)
-          window.history.replaceState({}, '', window.location.pathname)
-          return
-        }
-      }
+    let cancelled = false
+    const offset = placedOffsetRef.current
+    const settle = () => {
+      if (cancelled || layoutRef.current === 'paginated') return
+      scrollContinuousToOffset(offset, 'start', () => {
+        if (cancelled) return
+        didPinContinuousRef.current = true
+        setScrollPct(latestScrollPct.current)
+        markReadingPlaceReady()
+      })
     }
-
-    if (scrolledToOffsetRef.current) return
-    if (!progressData?.reading) return
-    const { textStart, textLength } = progressData.reading
-    if (!textLength) return
-    scrolledToOffsetRef.current = true
-    applyOffset(textStart)
-  }, [progressData, payload?.text, appearance.layout])
+    const fonts = document.fonts
+    if (fonts?.ready) fonts.ready.then(settle, settle)
+    else settle()
+    return () => { cancelled = true }
+  }, [payload, progressFetched, appearance.layout])
 
   // Paginated: measure viewport pages when type, size, or book text changes.
   // ResizeObserver callbacks are the allowed setState path; do not setState
   // synchronously in this effect body (react-hooks/set-state-in-effect).
   useLayoutEffect(() => {
+    if (!seedReadingPlace()) return
     const prev = prevLayoutRef.current
     const nextLayout = appearance.layout
     prevLayoutRef.current = nextLayout
@@ -3229,6 +3287,8 @@ export function ReaderRoute() {
     appearance.align,
     appearance.theme,
     payload?.text,
+    progressFetched,
+    bookId,
     pagedLayoutAll,
   ])
 
@@ -4515,7 +4575,7 @@ export function ReaderRoute() {
             ))}
           </div>
         ) : (
-          <div ref={readerTextRef} data-reader-text="" style={{ fontFamily, fontSize: `${appearance.fontSize}px`, lineHeight: appearance.lineHeight, textAlign: appearance.align, color: colors.text, overflowWrap: 'break-word', wordBreak: 'break-word' }}>
+          <div ref={readerTextRef} data-reader-text="" style={{ fontFamily, fontSize: `${appearance.fontSize}px`, lineHeight: appearance.lineHeight, textAlign: appearance.align, color: colors.text, overflowWrap: 'break-word', wordBreak: 'break-word', overflowAnchor: 'none', visibility: readingPlaceReady ? 'visible' : 'hidden' }}>
             <ReaderParagraphs
               paragraphs={paragraphs}
               bionic={appearance.bionic}
