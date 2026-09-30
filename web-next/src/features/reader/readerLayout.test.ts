@@ -23,6 +23,7 @@ import {
   resolveLayoutSwitchOffset,
   scrollDeltaToPinRect,
   scrollPctFromOffset,
+  initialReadingOffset,
   continuousFollowBand,
   continuousSpokenFollowDelta,
 } from './readerLayout'
@@ -377,6 +378,33 @@ describe('layout switch offset', () => {
     expect(scrollPctFromOffset(900, 1800)).toBe(0.5)
     expect(scrollPctFromOffset(0, 1800)).toBe(0)
     expect(scrollPctFromOffset(1800, 1800)).toBe(1)
+  })
+
+  it('reopens at the saved character, with a note link ahead of progress', () => {
+    expect(initialReadingOffset({
+      textLength: 5000,
+      urlOffset: null,
+      progressStart: 2400,
+      progressLength: 5000,
+    })).toBe(2400)
+    expect(initialReadingOffset({
+      textLength: 5000,
+      urlOffset: 80,
+      progressStart: 2400,
+      progressLength: 5000,
+    })).toBe(80)
+    expect(initialReadingOffset({
+      textLength: 5000,
+      urlOffset: null,
+      progressStart: null,
+      progressLength: null,
+    })).toBe(0)
+    expect(initialReadingOffset({
+      textLength: 100,
+      urlOffset: null,
+      progressStart: 9000,
+      progressLength: 9000,
+    })).toBe(99)
   })
 
   it('keeps the spoken character when playback is still following', () => {

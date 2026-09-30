@@ -19,7 +19,7 @@ describe('prepareKokoroSpeech', () => {
 
   it('reads ordinals, clocks, percents, and year spans', () => {
     expect(prepareKokoroSpeech('On the 21st, at 3:05, about 12% remained.')).toBe(
-      "On the twenty-first, at three oh five, about twelve percent remained.",
+      'On the twenty-first — at three oh five — about twelve percent remained.',
     )
     expect(prepareKokoroSpeech('From 1914-1918.')).toBe('From nineteen fourteen to nineteen eighteen.')
     expect(prepareKokoroSpeech('the 1980s')).toBe('the nineteen eighties')
@@ -35,15 +35,24 @@ describe('prepareKokoroSpeech', () => {
     const contents =
       'Appendix A: Seductive Environment/Seductive Time page 431 Appendix B: Soft Seduction: How to Sell Anything to the Masses page 441 Selected Bibliography • 455 Index • 457Appendix A'
     expect(prepareKokoroSpeech(contents)).toBe(
-      'Appendix A: Seductive Environment/Seductive Time page 431, Appendix B: Soft Seduction: How to Sell Anything to the Masses page 441, Selected Bibliography. 455, Index. 457, Appendix A',
+      'Appendix A: Seductive Environment/Seductive Time page 431 — Appendix B: Soft Seduction: How to Sell Anything to the Masses page 441 — Selected Bibliography. 455 — Index. 457 — Appendix A',
     )
-    expect(prepareKokoroSpeech('page 441\nSelected Bibliography')).toBe('page 441, Selected Bibliography')
+    expect(prepareKokoroSpeech('page 441\nSelected Bibliography')).toBe('page 441 — Selected Bibliography')
     expect(prepareKokoroSpeech(prepareKokoroSpeech(contents))).toBe(prepareKokoroSpeech(contents))
   })
 
   it('leaves a number inside a sentence untouched', () => {
     expect(prepareKokoroSpeech('He turned 12 yesterday.')).toBe('He turned 12 yesterday.')
     expect(prepareKokoroSpeech('page 3D models')).toBe('page 3D models')
+  })
+
+  it('keeps a comma open instead of finishing the sentence', () => {
+    expect(prepareKokoroSpeech('She opened the door, and the room was dark.')).toBe(
+      'She opened the door — and the room was dark.',
+    )
+    expect(prepareKokoroSpeech('She waited,\n\nThen she left.')).toBe(
+      'She waited — Then she left.',
+    )
   })
 
   it('leaves an ordinary sentence untouched', () => {

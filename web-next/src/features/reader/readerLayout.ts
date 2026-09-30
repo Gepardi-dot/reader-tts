@@ -382,6 +382,33 @@ export function scrollPctFromOffset(offset: number, textLength: number): number 
 }
 
 /**
+ * Where to open the book. A note link wins, then the saved character, else the start.
+ * Pixel scroll from the last visit is not a reading place — line heights change on refresh.
+ */
+export function initialReadingOffset(options: {
+  textLength: number
+  urlOffset: number | null
+  progressStart: number | null
+  progressLength: number | null
+}): number {
+  const textLength = Math.max(0, options.textLength)
+  if (textLength <= 0) return 0
+  const url = options.urlOffset
+  if (url != null && Number.isFinite(url) && url >= 0) return clampReadOffset(url, textLength)
+  const start = options.progressStart
+  const storedLength = options.progressLength
+  if (
+    start != null
+    && Number.isFinite(start)
+    && storedLength != null
+    && storedLength > 0
+  ) {
+    return clampReadOffset(start, textLength)
+  }
+  return 0
+}
+
+/**
  * Paginated and continuous don't share a pixel coordinate system. Always move
  * by source offset: live spoken text while following playback, otherwise the
  * character currently at the reading position.

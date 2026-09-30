@@ -300,6 +300,20 @@ export function audioSliceStart(textLength: number, scrollPct: number) {
  * @param firstTargetChars chunk 0 (fast start)
  * @param secondTargetChars chunk 1 (bridge)
  */
+/** A chunk that ends on a comma is a finished utterance, so the pitch falls. */
+function extendPastTrailingComma(fullText: string, localPos: number, localEnd: number): number {
+  const trimmed = fullText.slice(localPos, localEnd).trimEnd()
+  if (!trimmed.endsWith(',')) return localEnd
+  const limit = Math.min(fullText.length, localEnd + 140)
+  for (let i = localEnd; i < limit; i += 1) {
+    if (/[.!?]/.test(fullText[i] ?? '') && /[\s"']/.test(fullText[i + 1] ?? ' ')) return i + 1
+  }
+  let i = localEnd
+  while (i < limit && /\s/.test(fullText[i] ?? '')) i += 1
+  while (i < limit && i < fullText.length && !/\s/.test(fullText[i] ?? '')) i += 1
+  return i > localEnd ? i : localEnd
+}
+
 export function buildAudioChunks(
   fullText: string,
   globalStart: number,
@@ -370,7 +384,7 @@ export function buildAudioChunks(
       ? searchStart + boundary
       : (lastSpace > currentTarget * minSpaceRatio ? lastSpace + 1 : currentTarget)
 
-    const localEnd = localPos + chunkLen
+    const localEnd = extendPastTrailingComma(fullText, localPos, localPos + chunkLen)
     const slice = fullText.slice(localPos, localEnd)
     if (slice.trim()) {
       chunks.push({ start: globalStart + localPos, end: globalStart + localEnd, text: slice })

@@ -11,9 +11,9 @@ CONTENTS = (
     "Selected Bibliography • 455 Index • 457Appendix A"
 )
 SPOKEN = (
-    "Appendix A: Seductive Environment/Seductive Time page 431, Appendix B: "
-    "Soft Seduction: How to Sell Anything to the Masses page 441, "
-    "Selected Bibliography. 455, Index. 457, Appendix A"
+    "Appendix A: Seductive Environment/Seductive Time page 431 — Appendix B: "
+    "Soft Seduction: How to Sell Anything to the Masses page 441 — "
+    "Selected Bibliography. 455 — Index. 457 — Appendix A"
 )
 
 
@@ -22,7 +22,7 @@ class KokoroSpeechTests(unittest.TestCase):
         self.assertEqual(prepare_kokoro_speech(CONTENTS), SPOKEN)
         self.assertEqual(
             prepare_kokoro_speech("page 441\nSelected Bibliography"),
-            "page 441, Selected Bibliography",
+            "page 441 — Selected Bibliography",
         )
         self.assertEqual(prepare_kokoro_speech(prepare_kokoro_speech(CONTENTS)), SPOKEN)
 
@@ -33,5 +33,13 @@ class KokoroSpeechTests(unittest.TestCase):
         self.assertEqual(prepare_kokoro_speech("the 1980s"), "the nineteen eighties")
         self.assertEqual(
             prepare_kokoro_speech("On the 21st, at 3:05, about 12% remained."),
-            "On the twenty-first, at three oh five, about twelve percent remained.",
+            "On the twenty-first — at three oh five — about twelve percent remained.",
+        )
+        self.assertEqual(
+            prepare_kokoro_speech("She opened the door, and the room was dark."),
+            "She opened the door — and the room was dark.",
+        )
+        self.assertEqual(
+            prepare_kokoro_speech("She waited,\n\nThen she left."),
+            "She waited — Then she left.",
         )
