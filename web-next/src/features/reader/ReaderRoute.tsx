@@ -2721,6 +2721,11 @@ export function ReaderRoute() {
 
   function markReadingPlaceReady() {
     if (readingPlaceReadyRef.current) return
+    const fonts = document.fonts
+    if (fonts && fonts.status !== 'loaded') {
+      fonts.ready.then(() => markReadingPlaceReady(), () => markReadingPlaceReady())
+      return
+    }
     readingPlaceReadyRef.current = true
     requestAnimationFrame(() => {
       setScrollPct(latestScrollPct.current)
