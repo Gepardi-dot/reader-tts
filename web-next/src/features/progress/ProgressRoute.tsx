@@ -1,12 +1,18 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
+import { progressPercent } from '@/shared/reading/readingProgress'
 
 interface Book {
   id: string
   title: string
   highlightCount: number
-  readingProgress: { pageNumber: number; totalPages: number } | null
+  readingProgress: {
+    pageNumber: number
+    totalPages: number
+    textStart?: number
+    textLength?: number
+  } | null
 }
 
 interface DeckSummary {
@@ -130,9 +136,7 @@ export function ProgressRoute() {
             </div>
             <div className="space-y-2.5">
               {books.map((book) => {
-                const pct = book.readingProgress
-                  ? Math.round((book.readingProgress.pageNumber / book.readingProgress.totalPages) * 100)
-                  : 0
+                const pct = progressPercent(book.readingProgress)
                 return (
                   <div key={book.id} className="p-3.5 md:p-4 rounded-[10px] border border-border bg-white">
                     <div className="flex justify-between items-start mb-2.5">

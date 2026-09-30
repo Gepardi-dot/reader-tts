@@ -102,7 +102,6 @@ import {
   snapPageToLines,
   resolveLayoutSwitchOffset,
   scrollDeltaToPinRect,
-  scrollPctFromOffset,
   initialReadingOffset,
   type PagedLayoutCacheKey,
   type OverlayRect,
@@ -110,6 +109,11 @@ import {
   type ReaderLineBox,
   type ReaderPageBreak,
 } from './readerLayout'
+import {
+  bookPageTotal,
+  pagesForOffset,
+  progressPercent,
+} from '@/shared/reading/readingProgress'
 import {
   animateTransform,
   classifyPaginatedSwipe,
@@ -133,7 +137,7 @@ import {
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface ReaderPayload {
-  book: { id: string; title: string }
+  book: { id: string; title: string; pageCount?: number }
   text: string
   highlights: Array<{
     id: string; start: number; end: number
@@ -2586,10 +2590,10 @@ export function ReaderRoute() {
 
     const textLen = payload?.text.length ?? 0
     if (reason !== 'follow') readOffsetRef.current = page.startOffset
-    const pct = scrollPctFromOffset(
-      reason === 'follow' ? readOffsetRef.current : page.startOffset,
-      textLen,
-    )
+    const pct = progressPercent({
+      textStart: reason === 'follow' ? readOffsetRef.current : page.startOffset,
+      textLength: textLen,
+    }) / 100
     latestScrollPct.current = pct
     setScrollPct(pct)
     setBarVisible(true)
@@ -2760,7 +2764,7 @@ export function ReaderRoute() {
     })
     placedOffsetRef.current = offset
     readOffsetRef.current = offset
-    latestScrollPct.current = scrollPctFromOffset(offset, textLength)
+    latestScrollPct.current = progressPercent({ textStart: offset, textLength }) / 100
     if (appearance.layout === 'paginated' && textLength > 0) pendingPageOffsetRef.current = offset
     return true
   }
@@ -3210,7 +3214,7 @@ export function ReaderRoute() {
       : null
     if (switchOffset != null) {
       readOffsetRef.current = switchOffset
-      latestScrollPct.current = scrollPctFromOffset(switchOffset, textLength)
+      latestScrollPct.current = progressPercent({ textStart: switchOffset, textLength }) / 100
       if (nextLayout === 'paginated') pendingPageOffsetRef.current = switchOffset
     }
 
@@ -3793,16 +3797,14 @@ export function ReaderRoute() {
     setAppearance(a => ({ ...a, ...patch }))
   }
 
-  function saveProgress(pct: number) {
+  function saveProgress(_pct: number) {
     if (!payload?.text || !bookId) return
     const textLength = payload.text.length
     const textStart = clampReadOffset(readOffsetRef.current, textLength)
-    const paged = layoutRef.current === 'paginated' && pageBreaksRef.current.length > 0
+    const pages = pagesForOffset(textStart, textLength, bookPageTotal(textLength, payload.book.pageCount))
     const reading: ReadingProgress = {
-      pageNumber: paged
-        ? pageIndexRef.current + 1
-        : Math.max(1, Math.round(pct * 100)),
-      totalPages: paged ? pageBreaksRef.current.length : 100,
+      pageNumber: pages.pageNumber,
+      totalPages: pages.totalPages,
       textStart,
       textEnd: Math.min(textLength, textStart + 2200),
       textLength,
@@ -3810,7 +3812,13 @@ export function ReaderRoute() {
     }
     try {
       const map = JSON.parse(localStorage.getItem(PROGRESS_KEY) ?? '{}')
-      map[bookId] = { pageNumber: reading.pageNumber, totalPages: reading.totalPages, updatedAt: reading.updatedAt }
+      map[bookId] = {
+        pageNumber: reading.pageNumber,
+        totalPages: reading.totalPages,
+        textStart: reading.textStart,
+        textLength: reading.textLength,
+        updatedAt: reading.updatedAt,
+      }
       localStorage.setItem(PROGRESS_KEY, JSON.stringify(map))
     } catch { /* swallow */ }
 
@@ -3840,14 +3848,16 @@ export function ReaderRoute() {
     function onScroll() {
       if (layoutRef.current === 'paginated') return
       const { y, max } = getReaderScrollMetrics()
-      const pct = max > 0 ? Math.min(1, y / max) : 0
-      latestScrollPct.current = pct
-      setScrollPct(pct)
+      const textLength = payload?.text.length ?? 0
       if (!(isAudioActive() && !audioFollowPausedRef.current)) {
         const pinOffset = sourceOffsetAtViewportPin()
-        if (pinOffset != null) readOffsetRef.current = pinOffset
-        else if (payload?.text) readOffsetRef.current = Math.round(pct * payload.text.length)
+        if (textLength > 0 && max > 0 && y >= max - 2) readOffsetRef.current = textLength - 1
+        else if (pinOffset != null) readOffsetRef.current = pinOffset
+        else if (textLength > 0) readOffsetRef.current = Math.round((max > 0 ? y / max : 0) * textLength)
       }
+      const pct = progressPercent({ textStart: readOffsetRef.current, textLength }) / 100
+      latestScrollPct.current = pct
+      setScrollPct(pct)
       const activeCueRange = activeAudioCueRangeRef.current
       if (activeCueRange) {
         // Inline playback mark scrolls with the page — do not re-layout on scroll.
@@ -4637,7 +4647,7 @@ export function ReaderRoute() {
           <div
             className="h-full rounded-full transition-all duration-300"
             style={{
-              width: `${paginated ? Math.round(((pageIndex + 1) / pageCount) * 100) : readPct}%`,
+              width: `${readPct}%`,
               background: colors.text,
             }}
           />

@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { api } from '@/shared/api/client'
+import { progressPercent } from '@/shared/reading/readingProgress'
 import { cn } from '@/lib/utils'
 import { loadLibraryCover } from './resolveBookCover'
 import { deleteStoredCover } from '@/shared/storage/coverCache'
@@ -30,7 +31,13 @@ interface Book {
   coverUrl?: string | null
 }
 
-interface ReadingProgress { pageNumber: number; totalPages: number; updatedAt?: string }
+interface ReadingProgress {
+  pageNumber: number
+  totalPages: number
+  textStart?: number
+  textLength?: number
+  updatedAt?: string
+}
 
 // Warm cover tints cycling across books (fallback when no internet match is found)
 const COVER_COLORS = ['#fef6ee', '#eef4fb', '#f0efe9', '#f8eef0']
@@ -149,8 +156,7 @@ function loadProgress(): Record<string, ReadingProgress> {
 }
 
 function readPct(p?: ReadingProgress | null) {
-  if (!p || !p.totalPages) return 0
-  return Math.round((p.pageNumber / p.totalPages) * 100)
+  return progressPercent(p)
 }
 
 function useBooks() {

@@ -1389,7 +1389,11 @@ async function bookReader(env: Env, user: User, bookId: string) {
   const book = await bookRow(env, user, bookId)
   const highlights = await highlightRows(env, user, bookId)
   return json({
-    book: { id: String(book.id), title: String(book.title) },
+    book: {
+      id: String(book.id),
+      title: String(book.title),
+      pageCount: Number(book.page_count ?? book.pageCount ?? 0),
+    },
     text: String(book.text ?? ''),
     highlights,
   })
