@@ -68,6 +68,20 @@ describe('audio preferences', () => {
     })
   })
 
+  it('keeps Natural Voices as a saved provider', () => {
+    const storage = installStorage()
+    storage.set('reader-audio-prefs', JSON.stringify({
+      provider: 'nvidia',
+      voice: 'Chatterbox-Multilingual.en-US.Male',
+      version: 4,
+    }))
+
+    expect(loadAudioPrefs()).toMatchObject({
+      provider: 'nvidia',
+      voice: 'Chatterbox-Multilingual.en-US.Male',
+    })
+  })
+
   it('remembers separate voices per provider', () => {
     const prefs = audioPrefsWithSelection(
       audioPrefsWithSelection(loadAudioPrefs(), { provider: 'kokoro', voice: 'am_adam' }),

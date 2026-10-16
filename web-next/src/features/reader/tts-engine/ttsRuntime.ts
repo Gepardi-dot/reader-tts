@@ -9,6 +9,7 @@ import {
   PREFETCH_AHEAD_TARGET,
   audioSelectionKey,
   clientClockRateForProvider,
+  isHostedTtsProvider,
 } from '../audioPlayback'
 import { DEFAULT_TTS_PROVIDER_ID } from '../audioProviderCatalog'
 import { AudioClock } from './audioClock'
@@ -213,7 +214,7 @@ export class TtsRuntime {
     signal?: AbortSignal
   }) {
     if (!input.bookId) return Promise.resolve()
-    if (input.provider !== 'kokoro' && input.provider !== 'google') return Promise.resolve()
+    if (!isHostedTtsProvider(input.provider)) return Promise.resolve()
     return warmLiveAudioFromOffset({
       bookId: input.bookId,
       bookText: input.bookText,
@@ -358,8 +359,8 @@ export class TtsRuntime {
     this.chunks = chunks
     this.emit()
 
-    if (params.provider !== 'kokoro' && params.provider !== 'google') {
-      this.hooks.showToast('Choose HR Voices or HR Ultra Realistic to play audio.')
+    if (!isHostedTtsProvider(params.provider)) {
+      this.hooks.showToast('Choose HR Voices, HR Ultra Realistic, or Natural Voices to play audio.')
       this.stop()
       return
     }
@@ -375,7 +376,7 @@ export class TtsRuntime {
         chunkCount: chunks.length,
         browserFallback: false,
         kokoroModelReady: isModelReady(),
-        engine: params.provider === 'kokoro' ? 'kokoro-hosted' : 'v3',
+        engine: params.provider === 'kokoro' ? 'kokoro-hosted' : params.provider === 'nvidia' ? 'nvidia' : 'v3',
       },
     })
 

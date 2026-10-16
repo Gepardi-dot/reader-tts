@@ -11,6 +11,15 @@ import {
   syncAllNotesToNotion,
   syncHighlightToNotion,
 } from './notion'
+import {
+  NVIDIA_SAMPLE_RATE,
+  NVIDIA_VOICES,
+  NvidiaSpeechError,
+  configuredNvidiaModel,
+  configuredNvidiaVoice,
+  nvidiaModelsForClient,
+  synthesizeNvidiaAudio,
+} from './nvidia-tts'
 
 type JsonValue =
   | string
@@ -65,6 +74,8 @@ interface Env {
   GEMINI_TTS_MODEL?: string
   /** Optional chat/text model for reader assistant (defaults to gemini-2.0-flash). */
   GEMINI_CHAT_MODEL?: string
+  /** NVIDIA API key for Natural Voices (Chatterbox on grpc.nvcf.nvidia.com). */
+  NVIDIA_API_KEY?: string
   /** Base URL of the hosted Kokoro FastAPI server (e.g. https://kokoro-reader.fly.dev). */
   KOKORO_REMOTE_URL?: string
   /** Shared secret matching KOKORO_API_KEY on the Kokoro server. */
@@ -1876,18 +1887,33 @@ async function synthesizeKokoroRemote(
   }
 }
 
+async function synthesizeNvidiaRequested(
+  env: Env,
+  input: { text: string; voice: string | null; model: string | null },
+) {
+  try {
+    return await synthesizeNvidiaAudio(env.NVIDIA_API_KEY, input)
+  } catch (error) {
+    if (error instanceof NvidiaSpeechError) throw new ApiError(error.status, error.message)
+    throw error
+  }
+}
+
 async function liveAudio(request: Request, env: Env, user: User, bookId: string, ctx: ExecutionContext) {
   const book = await bookRow(env, user, bookId)
   const body = await readJson<Record<string, unknown>>(request)
   const provider = stringField(body.provider)
-  if (provider !== 'google' && provider !== 'kokoro') {
-    throw new ApiError(400, 'Supported cloud audio providers: google (Gemini), kokoro (hosted).')
+  if (provider !== 'google' && provider !== 'kokoro' && provider !== 'nvidia') {
+    throw new ApiError(400, 'Supported cloud audio providers: google (Gemini), kokoro (hosted), nvidia (Natural Voices).')
   }
   if (provider === 'kokoro' && !kokoroRemoteConfigured(env)) {
     throw new ApiError(400, 'Hosted Kokoro is not configured on this API.')
   }
   if (provider === 'google' && !env.GEMINI_API_KEY?.trim()) {
     throw new ApiError(400, 'Gemini TTS is not configured on this API.')
+  }
+  if (provider === 'nvidia' && !env.NVIDIA_API_KEY?.trim()) {
+    throw new ApiError(400, 'Natural Voices are not configured on this API.')
   }
 
   const fullText = String(book.text ?? '')
@@ -1914,10 +1940,14 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
   const safeSentenceSilence = Number.isFinite(sentenceSilence) ? sentenceSilence : 0.2
   const model = provider === 'google'
     ? configuredGeminiModel(env, stringField(body.model) || null)
-    : 'kokoro-remote'
+    : provider === 'nvidia'
+      ? configuredNvidiaModel(stringField(body.model) || null).id
+      : 'kokoro-remote'
   const voice = provider === 'google'
     ? configuredGeminiVoice(stringField(body.voice) || null)
-    : configuredKokoroVoice(stringField(body.voice) || null)
+    : provider === 'nvidia'
+      ? configuredNvidiaVoice(stringField(body.voice) || null)
+      : configuredKokoroVoice(stringField(body.voice) || null)
   const narrationStyle = stringField(body.narration_style ?? body.narrationStyle)
   const normalizedText = normalizeSelectionText(speechText)
   const cacheDigest = await geminiLiveAudioCacheDigest({
@@ -1944,11 +1974,12 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
     return json({ ...durableCached, cacheHit: true, cacheStorage: 'r2' })
   }
 
+  const silentRate = provider === 'nvidia' ? NVIDIA_SAMPLE_RATE : 24_000
   const result = !synthesisText
     ? {
-      model: provider === 'google' ? model : 'kokoro-remote',
+      model,
       voice,
-      wav: pcmToWav(new Uint8Array(Math.floor(0.12 * 24000) * 2), 24000),
+      wav: pcmToWav(new Uint8Array(Math.floor(0.12 * silentRate) * 2), silentRate),
       duration: 0.12,
     }
     : provider === 'google'
@@ -1959,6 +1990,12 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
       narrationStyle,
       lengthScale: safeLengthScale,
       sentenceSilence: safeSentenceSilence,
+    })
+    : provider === 'nvidia'
+    ? await synthesizeNvidiaRequested(env, {
+      text: synthesisText,
+      voice,
+      model,
     })
     : await synthesizeKokoroRemote(env, {
       text: synthesisText,
@@ -2052,14 +2089,15 @@ async function providersWarmup(request: Request, env: Env, ctx: ExecutionContext
     voice: voice || null,
     kokoroConfigured: kokoroRemoteConfigured(env),
     geminiConfigured: Boolean(env.GEMINI_API_KEY?.trim()),
+    nvidiaConfigured: Boolean(env.NVIDIA_API_KEY?.trim()),
   })
 }
 
 async function testProvider(request: Request, env: Env, ctx: ExecutionContext) {
   const body = await readJson<Record<string, unknown>>(request)
   const provider = stringField(body.provider)
-  if (provider !== 'google' && provider !== 'kokoro') {
-    throw new ApiError(400, 'Supported previews: google, kokoro.')
+  if (provider !== 'google' && provider !== 'kokoro' && provider !== 'nvidia') {
+    throw new ApiError(400, 'Supported previews: google, kokoro, nvidia.')
   }
 
   const lengthScale = Number(body.length_scale ?? body.lengthScale ?? 1)
@@ -2099,7 +2137,11 @@ async function testProvider(request: Request, env: Env, ctx: ExecutionContext) {
       sampleText,
       audioUrl: cached.audioUrl,
       cacheHit: true,
-      message: provider === 'google' ? 'Gemini preview (cached).' : 'Hosted Kokoro preview (cached).',
+      message: provider === 'google'
+        ? 'Gemini preview (cached).'
+        : provider === 'nvidia'
+          ? 'Natural Voices preview (cached).'
+          : 'Hosted Kokoro preview (cached).',
     })
   }
 
@@ -2111,6 +2153,12 @@ async function testProvider(request: Request, env: Env, ctx: ExecutionContext) {
       narrationStyle,
       lengthScale: safeLengthScale,
       sentenceSilence: safeSentenceSilence,
+    })
+    : provider === 'nvidia'
+    ? await synthesizeNvidiaRequested(env, {
+      text: sampleText,
+      voice: voiceField,
+      model: modelField,
     })
     : await synthesizeKokoroRemote(env, {
       text: sampleText,
@@ -2126,7 +2174,11 @@ async function testProvider(request: Request, env: Env, ctx: ExecutionContext) {
     sampleText,
     audioUrl,
     cacheHit: false,
-    message: provider === 'google' ? 'Gemini preview ready.' : 'Hosted Kokoro preview ready.',
+    message: provider === 'google'
+      ? 'Gemini preview ready.'
+      : provider === 'nvidia'
+        ? 'Natural Voices preview ready.'
+        : 'Hosted Kokoro preview ready.',
   }
   writeEdgeAudioCache(ctx, `ptest:${cacheDigest}`, payload)
   return json(payload)
@@ -4086,6 +4138,19 @@ async function providers(env: Env) {
         description: geminiConfigured
           ? 'Ultra-realistic Gemini TTS for higher quality narration.'
           : 'Add GEMINI_API_KEY as a Cloudflare Worker secret to enable HR Ultra Realistic.',
+      },
+      {
+        id: 'nvidia',
+        name: 'Natural Voices',
+        available: Boolean(env.NVIDIA_API_KEY?.trim()),
+        recommended: false,
+        voices: NVIDIA_VOICES,
+        defaultVoice: configuredNvidiaVoice(null),
+        models: nvidiaModelsForClient(),
+        defaultModel: configuredNvidiaModel(null).id,
+        description: env.NVIDIA_API_KEY?.trim()
+          ? 'NVIDIA Chatterbox voices. One male voice for each language.'
+          : 'Add NVIDIA_API_KEY as a Cloudflare Worker secret to enable Natural Voices.',
       },
     ],
   })

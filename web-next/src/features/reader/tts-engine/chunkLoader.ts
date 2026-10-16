@@ -17,6 +17,7 @@ import {
 } from '@/shared/telemetry/performanceTelemetry'
 import {
   BROWSER_TTS_PROVIDER_ID,
+  isHostedTtsProvider,
   pacingFor,
   pacingForPlaybackRate,
 } from '../audioPlayback'
@@ -64,7 +65,7 @@ export function createChunkLoader(config: ChunkLoaderConfig): ChunkLoader {
     if (provider === BROWSER_TTS_PROVIDER_ID) return
 
     // Hosted Kokoro + Gemini share the Worker live-audio path (edge/R2 cache).
-    if (provider === 'kokoro' || provider === 'google') {
+    if (isHostedTtsProvider(provider)) {
       if (!config.bookId) {
         throw new Error('Open a book before playing cloud TTS.')
       }
@@ -334,7 +335,11 @@ async function loadLiveProviderChunkOnce(
       },
     })
     if (!opts.background) {
-      const label = opts.provider === 'kokoro' ? 'Kokoro' : 'Gemini'
+      const label = opts.provider === 'kokoro'
+        ? 'Kokoro'
+        : opts.provider === 'nvidia'
+          ? 'Natural Voices'
+          : 'Gemini'
       throw new Error(`${label} TTS is cooling down. Retry in ${Math.ceil(cooldownMs / 1000)}s.`)
     }
     return

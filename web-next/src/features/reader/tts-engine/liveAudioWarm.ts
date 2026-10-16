@@ -6,7 +6,7 @@
  * starts from a memory/edge hit instead of a cold synth.
  */
 
-import { pacingFor, pacingForPlaybackRate } from '../audioPlayback'
+import { isHostedTtsProvider, pacingFor, pacingForPlaybackRate } from '../audioPlayback'
 import { buildTtsChunks } from './segmenter'
 import {
   liveAudioCooldownRemainingMs,
@@ -43,7 +43,7 @@ export async function warmLiveAudioFromOffset(params: WarmLiveAudioParams): Prom
     signal,
   } = params
 
-  if (provider !== 'kokoro' && provider !== 'google') return
+  if (!isHostedTtsProvider(provider)) return
   if (!bookId || !bookText || signal?.aborted) return
   if (liveAudioCooldownRemainingMs(provider) > 0) return
 

@@ -45,6 +45,8 @@ export interface AudioTextChunk {
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
   google: 110,
   kokoro: 95,
+  // Chatterbox rejects text over 500 characters. Lookahead can add ~200.
+  nvidia: 120,
 }
 
 /** Second slice after the first; bridges until steady-state chunks arrive. */
@@ -52,11 +54,13 @@ export const SECOND_AUDIO_CHARS: Record<string, number> = {
   google: 200,
   // Slightly shorter mid-slice → faster synth so it lands before chunk 0 ends.
   kokoro: 160,
+  nvidia: 180,
 }
 
 export const CHUNK_CHARS: Record<string, number> = {
   google: 280,
   kokoro: 280,
+  nvidia: 260,
 }
 
 export const DEFAULT_FIRST_AUDIO_CHARS = 180
@@ -74,6 +78,7 @@ export const AUDIO_CONTEXT_START_LEAD_SEC = 0.008
 export const PLAYBACK_BOOTSTRAP_CHUNKS: Record<string, number> = {
   google: 2,
   kokoro: 2,
+  nvidia: 1,
 }
 
 // How many native chunks we wait for before pressing play. Set to 1 everywhere
@@ -87,6 +92,7 @@ export const START_PLAYBACK_READY_CHUNKS: Record<string, number> = {
 export const PREFETCH_AHEAD_TARGET: Record<string, number> = {
   google: 1,
   kokoro: 2,
+  nvidia: 1,
 }
 
 /** Char budget for the Nth chunk in the progressive ramp (0-based). */
@@ -249,6 +255,11 @@ export function browserSpeechQueueTarget(activeIdx: number, chunkCount: number, 
 
 export function isChunking(provider: string): boolean {
   return provider in CHUNK_CHARS
+}
+
+/** Hosted speech the Worker synthesizes: Kokoro, Gemini, and Natural Voices. */
+export function isHostedTtsProvider(provider: string): boolean {
+  return provider === 'kokoro' || provider === 'google' || provider === 'nvidia'
 }
 
 // Provider-tuned pacing

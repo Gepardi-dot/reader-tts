@@ -33,4 +33,18 @@ describe('TTS provider display names', () => {
       'HR Ultra Realistic',
     ])
   })
+
+  it('keeps Natural Voices and drops unknown engines', () => {
+    expect(displayNameForTtsProvider('nvidia')).toBe('Natural Voices')
+    const providers = normalizeTtsProviders([
+      { id: 'kokoro', name: 'Kokoro', available: true, voices: [] },
+      { id: 'nvidia', name: 'NVIDIA', available: true, voices: [] },
+      { id: 'browser', name: 'Browser', available: true, voices: [] },
+    ])
+    expect(providers.map((provider) => provider.id)).toEqual(['kokoro', 'nvidia'])
+    expect(providers.map((provider) => provider.name)).toEqual([
+      'HR Voices',
+      'Natural Voices',
+    ])
+  })
 })

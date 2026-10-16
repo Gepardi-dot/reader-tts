@@ -133,6 +133,21 @@ describe('audio playback chunking', () => {
     expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThan(CHUNK_CHARS.kokoro)
   })
 
+  it('keeps Natural Voices chunks under the Chatterbox character cap', () => {
+    expect(FIRST_AUDIO_CHARS.nvidia + 90).toBeLessThanOrEqual(500)
+    expect(SECOND_AUDIO_CHARS.nvidia + 140).toBeLessThanOrEqual(500)
+    expect(CHUNK_CHARS.nvidia + 200).toBeLessThanOrEqual(500)
+    const text = `${'sentence '.repeat(80)}end.`
+    const chunks = buildAudioChunks(
+      text,
+      0,
+      CHUNK_CHARS.nvidia,
+      FIRST_AUDIO_CHARS.nvidia,
+      SECOND_AUDIO_CHARS.nvidia,
+    )
+    expect(Math.max(...chunks.map((chunk) => chunk.text.length))).toBeLessThanOrEqual(500)
+  })
+
   it('does not end a spoken piece on a comma', () => {
     const text = `abcdefghij klmnop, rest ${'word '.repeat(40)}done.`
     const chunks = buildAudioChunks(text, 0, 20, 20, 20)
