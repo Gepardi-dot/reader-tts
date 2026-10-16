@@ -44,6 +44,7 @@ import { cn } from '@/lib/utils'
 import {
   CHUNK_CHARS,
   audioSliceStart,
+  isHostedTtsProvider,
   pacingFor,
   spokenOffsetAtTime,
 } from './audioPlayback'
@@ -3760,7 +3761,7 @@ export function ReaderRoute() {
   const aheadWarmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const didImmediateWarm = useRef(false)
   useEffect(() => {
-    if (effectiveTtsProvider !== 'kokoro' && effectiveTtsProvider !== 'google') return
+    if (!isHostedTtsProvider(effectiveTtsProvider)) return
     if (!payload?.text || !bookId || !effectiveTtsVoice) return
     if (wordAudioPhase !== 'idle') return
 
@@ -3993,7 +3994,7 @@ export function ReaderRoute() {
       // Clear native selection immediately → suppresses browser's selection toolbar
       sel.removeAllRanges()
       setSelection(state)
-      if (effectiveTtsProvider === 'kokoro' || effectiveTtsProvider === 'google') {
+      if (isHostedTtsProvider(effectiveTtsProvider)) {
         warmCloudAtOffset(state.startOffset)
       }
     } catch { /* swallow */ }
@@ -4050,7 +4051,7 @@ export function ReaderRoute() {
     // Show selection menu only — TTS starts from the Play action, not on tap.
     // Speculatively warm hosted Kokoro/Gemini so Play is often a cache hit.
     setSelection(state)
-    if (effectiveTtsProvider === 'kokoro' || effectiveTtsProvider === 'google') {
+    if (isHostedTtsProvider(effectiveTtsProvider)) {
       warmCloudAtOffset(state.startOffset)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4686,7 +4687,7 @@ export function ReaderRoute() {
             onToast={showToast}
             onPlayWord={playWord}
             onWarmAtOffset={(offset) => {
-              if (effectiveTtsProvider === 'kokoro' || effectiveTtsProvider === 'google') {
+              if (isHostedTtsProvider(effectiveTtsProvider)) {
                 warmCloudAtOffset(offset)
               }
             }}

@@ -1,5 +1,5 @@
 import { BROWSER_TTS_PROVIDER_ID, committedVoiceForDraft } from './audioPlayback'
-import { DEFAULT_TTS_PROVIDER_ID, defaultVoiceForProvider, type TtsProviderInfo } from './audioProviderCatalog'
+import { ALLOWED_TTS_PROVIDER_IDS, DEFAULT_TTS_PROVIDER_ID, defaultVoiceForProvider, type TtsProviderInfo } from './audioProviderCatalog'
 
 export const AUDIO_PREFS_KEY = 'reader-audio-prefs'
 export const AUDIO_PREFS_VERSION = 4
@@ -45,7 +45,7 @@ function normalizeProviderId(value: unknown): string {
   const raw = typeof value === 'string' && value ? value : DEFAULT_TTS_PROVIDER_ID
   // Browser speech was removed — migrate anyone still on it to Kokoro.
   if (raw === BROWSER_TTS_PROVIDER_ID || raw === 'browser') return DEFAULT_TTS_PROVIDER_ID
-  if (raw === 'kokoro' || raw === 'google') return raw
+  if (ALLOWED_TTS_PROVIDER_IDS.has(raw)) return raw
   return DEFAULT_TTS_PROVIDER_ID
 }
 

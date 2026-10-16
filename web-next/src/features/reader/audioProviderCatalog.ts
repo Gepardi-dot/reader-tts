@@ -37,14 +37,15 @@ export interface AudioProviderOption {
   defaultVoice: string | null
 }
 
-/** Book TTS is limited to hosted Kokoro + Gemini. */
-export const ALLOWED_TTS_PROVIDER_IDS = new Set(['kokoro', 'google'])
+/** Book TTS: hosted Kokoro, Gemini, and NVIDIA Natural Voices. */
+export const ALLOWED_TTS_PROVIDER_IDS = new Set(['kokoro', 'google', 'nvidia'])
 export const DEFAULT_TTS_PROVIDER_ID = 'kokoro'
 
-/** User-facing names. Internal ids stay `kokoro` / `google`. */
+/** User-facing names. Internal ids stay `kokoro` / `google` / `nvidia`. */
 export const TTS_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   kokoro: 'HR Voices',
   google: 'HR Ultra Realistic',
+  nvidia: 'Natural Voices',
 }
 
 export function displayNameForTtsProvider(id: string, fallback?: string | null): string {
@@ -68,6 +69,14 @@ const FALLBACK_TTS_PROVIDERS: TtsProviderInfo[] = [
     voices: [],
     defaultVoice: null,
   },
+  {
+    id: 'nvidia',
+    name: TTS_PROVIDER_DISPLAY_NAMES.nvidia,
+    available: true,
+    recommended: false,
+    voices: [],
+    defaultVoice: null,
+  },
 ]
 
 export const PROVIDER_PREVIEW_TEXT = (
@@ -75,7 +84,7 @@ export const PROVIDER_PREVIEW_TEXT = (
   + 'Read this sample with natural phrasing, steady pacing, and a warm, attentive tone.'
 )
 
-/** Filter API/catalog entries down to Kokoro + Gemini only. */
+/** Filter API/catalog entries down to the hosted voices the reader can play. */
 export function normalizeTtsProviders(providers?: TtsProviderInfo[]): TtsProviderInfo[] {
   const catalog = (providers ?? []).filter((provider) => ALLOWED_TTS_PROVIDER_IDS.has(provider.id))
   const source = catalog.length > 0 ? catalog : FALLBACK_TTS_PROVIDERS
