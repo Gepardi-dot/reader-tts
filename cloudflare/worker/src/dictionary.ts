@@ -20,7 +20,7 @@ import {
 const WIKTIONARY_UA = 'HiggsRead/1.0 (https://higgsread.com; dictionary lookup)'
 const FREE_TIMEOUT_MS = 1600
 const WIKI_TIMEOUT_MS = 2000
-const GEMINI_TIMEOUT_MS = 2200
+const DICTIONARY_GENERATE_TIMEOUT_MS = 6000
 
 export function normalizeDictionaryTerm(value: string) {
   return value
@@ -289,7 +289,7 @@ export async function resolveDictionary(
     ].join('\n')
     const text = await withTimeout(
       options.generate(system, `Define the English word: ${term}`),
-      GEMINI_TIMEOUT_MS,
+      DICTIONARY_GENERATE_TIMEOUT_MS,
     ).catch(() => null)
     if (text) {
       const gemini = payloadFromGeminiText(text, term)
