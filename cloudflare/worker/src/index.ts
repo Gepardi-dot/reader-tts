@@ -74,7 +74,7 @@ interface Env {
   GEMINI_TTS_MODEL?: string
   /** Optional chat/text model for reader assistant (defaults to gemini-2.0-flash). */
   GEMINI_CHAT_MODEL?: string
-  /** NVIDIA API key for Natural Voices (Chatterbox on grpc.nvcf.nvidia.com). */
+  /** NVIDIA API key for Natural Voices (Magpie on the hosted NVIDIA HTTP API). */
   NVIDIA_API_KEY?: string
   /** Base URL of the hosted Kokoro FastAPI server (e.g. https://kokoro-reader.fly.dev). */
   KOKORO_REMOTE_URL?: string
@@ -4149,7 +4149,7 @@ async function providers(env: Env) {
         models: nvidiaModelsForClient(),
         defaultModel: configuredNvidiaModel(null).id,
         description: env.NVIDIA_API_KEY?.trim()
-          ? 'NVIDIA Chatterbox voices. One male voice for each language.'
+          ? 'NVIDIA Magpie voices. Named speakers for twelve languages.'
           : 'Add NVIDIA_API_KEY as a Cloudflare Worker secret to enable Natural Voices.',
       },
     ],
