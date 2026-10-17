@@ -13,6 +13,10 @@ import {
   syncHighlightToNotion,
 } from './notion'
 import {
+  NvidiaChatError,
+  nvidiaGenerateText,
+} from './nvidia-chat'
+import {
   NVIDIA_SAMPLE_RATE,
   NVIDIA_VOICES,
   NvidiaSpeechError,
@@ -73,10 +77,10 @@ interface Env {
   SESSION_DAYS?: string
   GEMINI_API_KEY?: string
   GEMINI_TTS_MODEL?: string
-  /** Optional chat/text model for reader assistant (defaults to gemini-2.0-flash). */
-  GEMINI_CHAT_MODEL?: string
   /** NVIDIA API key for Natural Voices (Magpie on the hosted NVIDIA HTTP API). */
   NVIDIA_API_KEY?: string
+  /** Chat key for page summaries and the reading assistant. Not the Magpie speech key. */
+  NVIDIA_CHAT_API_KEY?: string
   /** Base URL of the hosted Kokoro FastAPI server (e.g. https://kokoro-reader.fly.dev). */
   KOKORO_REMOTE_URL?: string
   /** Shared secret matching KOKORO_API_KEY on the Kokoro server. */
@@ -112,7 +116,6 @@ const encoder = new TextEncoder()
 const PASSWORD_ITERATIONS = 100_000
 const DEFAULT_SESSION_DAYS = 30
 const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-preview-tts'
-const GEMINI_CHAT_DEFAULT_MODEL = 'gemini-2.0-flash'
 const GEMINI_SAMPLE_RATE = 24_000
 const KOKORO_SAMPLE_RATE = 24_000
 const KOKORO_DEFAULT_VOICE = 'af_sky'
@@ -3541,29 +3544,7 @@ async function aiVocabCheck(request: Request) {
   })
 }
 
-// ── Reader AI (Gemini) ───────────────────────────────────────────────────────
-
-function configuredGeminiChatModel(env: Env) {
-  const configured = env.GEMINI_CHAT_MODEL?.trim()
-  if (configured) return configured
-  // Prefer a free-tier-friendly text model — TTS model ids are not valid for chat.
-  return GEMINI_CHAT_DEFAULT_MODEL
-}
-
-function geminiChatModelCandidates(env: Env): string[] {
-  const primary = configuredGeminiChatModel(env)
-  // Keep this list to models that support generateContent on v1beta.
-  const fallbacks = [
-    primary,
-    'gemini-2.0-flash',
-    'gemini-2.0-flash-lite',
-    'gemini-2.5-flash',
-    'gemini-1.5-flash',
-  ]
-  return [...new Set(fallbacks.filter(Boolean))]
-}
-
-type GeminiChatTurn = { role: 'user' | 'model'; parts: Array<{ text: string }> }
+// ── Reader AI (Step 5 Preview) ───────────────────────────────────────────────
 
 function sseData(payload: Record<string, unknown> | string) {
   if (typeof payload === 'string') return `data: ${payload}\n\n`
@@ -3598,84 +3579,37 @@ function chunkTextForSse(text: string, maxChunk = 48): string[] {
   return chunks
 }
 
-async function geminiGenerateText(
+type ReaderChatTurn = { role: 'user' | 'assistant'; content: string }
+
+async function readerGenerateText(
   env: Env,
   options: {
     system: string
-    contents: GeminiChatTurn[]
-    maxOutputTokens?: number
+    turns: ReaderChatTurn[]
+    maxTokens?: number
     temperature?: number
   },
 ): Promise<string> {
-  const apiKey = env.GEMINI_API_KEY?.trim()
-  if (!apiKey) {
-    throw new ApiError(
-      503,
-      'AI is not configured yet. Add GEMINI_API_KEY to the Cloudflare Worker secrets.',
-    )
+  try {
+    return await nvidiaGenerateText(env.NVIDIA_CHAT_API_KEY ?? '', options)
+  } catch (err) {
+    if (err instanceof NvidiaChatError) throw new ApiError(err.status, err.message)
+    throw err
   }
-
-  let lastError: ApiError | null = null
-  for (const model of geminiChatModelCandidates(env)) {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
-        },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: options.system }],
-          },
-          contents: options.contents,
-          generationConfig: {
-            temperature: options.temperature ?? 0.7,
-            maxOutputTokens: options.maxOutputTokens ?? 700,
-          },
-        }),
-      },
-    )
-
-    if (!response.ok) {
-      const detail = await response.text().catch(() => response.statusText)
-      const status = response.status === 429
-        ? 429
-        : response.status >= 500
-          ? 502
-          : 400
-      lastError = new ApiError(
-        status,
-        status === 429
-          ? 'Gemini quota exceeded for this API key. Wait a bit, enable billing, or set GEMINI_CHAT_MODEL to another free-tier model.'
-          : `Gemini chat failed (${response.status}): ${detail.slice(0, 400)}`,
-      )
-      // Try next model on rate limit / not found.
-      if (response.status === 429 || response.status === 404) continue
-      throw lastError
-    }
-
-    const payload = await response.json() as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
-    }
-    const text = (payload.candidates ?? [])
-      .flatMap((c) => c.content?.parts ?? [])
-      .map((p) => p.text ?? '')
-      .join('')
-      .trim()
-
-    if (!text) {
-      lastError = new ApiError(502, 'Gemini returned an empty reply.')
-      continue
-    }
-    return text
-  }
-
-  throw lastError ?? new ApiError(502, 'Gemini chat failed.')
 }
 
-/** Offline extractive fallback so the assistant still answers when Gemini is rate-limited. */
+function isReadingModelOutage(err: unknown): err is ApiError {
+  return err instanceof ApiError && (
+    err.status === 400
+    || err.status === 401
+    || err.status === 404
+    || err.status === 429
+    || err.status === 502
+    || err.status === 503
+  )
+}
+
+/** Offline extractive fallback so the assistant still answers when the reading model is down. */
 function localReadingFallback(options: {
   bookTitle: string
   pageContext: string
@@ -3695,8 +3629,8 @@ function localReadingFallback(options: {
       `From the passage of “${options.bookTitle}” currently on screen, the text focuses on craft, storytelling, and what makes a story land with an audience. `
       + (sample
         ? `Key lines include: ${sample.slice(0, 320)}${sample.length > 320 ? '…' : ''}`
-        : 'Scroll or select more of the page for a richer local summary while Gemini is unavailable.')
-      + '\n\n(Local preview — Gemini quota is temporarily exceeded.)'
+        : 'Scroll or select more of the page for a richer local summary while the reading model is unavailable.')
+      + '\n\n(Local preview — the reading model is temporarily unavailable.)'
     )
   }
 
@@ -3706,7 +3640,7 @@ function localReadingFallback(options: {
       (summary
         ? `Here’s a tight recap of the text near your place in “${options.bookTitle}”:\n\n${summary.slice(0, 700)}${summary.length > 700 ? '…' : ''}`
         : `I don’t have enough page text yet to summarize “${options.bookTitle}”. Scroll a bit and ask again.`)
-      + '\n\n(Local preview — Gemini quota is temporarily exceeded.)'
+      + '\n\n(Local preview — the reading model is temporarily unavailable.)'
     )
   }
 
@@ -3714,7 +3648,7 @@ function localReadingFallback(options: {
     return (
       `Based on the visible passage of “${options.bookTitle}”, names and roles are only clear if they appear on this page. `
       + `Scan the current text for proper names and repeated roles; ask again with a character name for a closer read.`
-      + '\n\n(Local preview — Gemini quota is temporarily exceeded.)'
+      + '\n\n(Local preview — the reading model is temporarily unavailable.)'
     )
   }
 
@@ -3723,14 +3657,14 @@ function localReadingFallback(options: {
     return (
       `This part of “${options.bookTitle}” sits in the section you’re reading now. `
       + (sample ? `It opens with: “${sample.slice(0, 240)}${sample.length > 240 ? '…' : ''}” ` : '')
-      + 'Use Ask AI on a highlighted sentence for a tighter explanation once Gemini is available again.'
-      + '\n\n(Local preview — Gemini quota is temporarily exceeded.)'
+      + 'Use Ask AI on a highlighted sentence for a tighter explanation once the reading model is available again.'
+      + '\n\n(Local preview — the reading model is temporarily unavailable.)'
     )
   }
 
   const sample = sentences.slice(0, 2).join(' ') || passage.slice(0, 240)
   return (
-    `I’m temporarily using a local reading helper for “${options.bookTitle}” because the Gemini quota is exhausted. `
+    `I’m temporarily using a local reading helper for “${options.bookTitle}” because the reading model is unavailable. `
     + (sample ? `From your current page: ${sample.slice(0, 360)}${sample.length > 360 ? '…' : ''}` : 'Provide more page text and try again.')
   )
 }
@@ -3765,41 +3699,6 @@ function parseChatMessages(raw: unknown): Array<{ role: 'user' | 'assistant'; co
   return out.slice(-16)
 }
 
-function toGeminiContents(
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
-  preamble?: Array<{ role: 'user' | 'model'; text: string }>,
-): GeminiChatTurn[] {
-  const contents: GeminiChatTurn[] = []
-  for (const p of preamble ?? []) {
-    contents.push({ role: p.role, parts: [{ text: p.text }] })
-  }
-  for (const m of messages) {
-    contents.push({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }],
-    })
-  }
-  // Gemini requires the conversation to end with a user turn.
-  if (contents.length === 0 || contents[contents.length - 1].role !== 'user') {
-    contents.push({ role: 'user', parts: [{ text: 'Please continue.' }] })
-  }
-  // Merge consecutive same-role turns (API is picky about alternation).
-  const merged: GeminiChatTurn[] = []
-  for (const turn of contents) {
-    const prev = merged[merged.length - 1]
-    if (prev && prev.role === turn.role) {
-      prev.parts[0].text = `${prev.parts[0].text}\n\n${turn.parts[0].text}`
-    } else {
-      merged.push({ role: turn.role, parts: [{ text: turn.parts[0].text }] })
-    }
-  }
-  // Ensure it starts with user
-  if (merged[0]?.role === 'model') {
-    merged.unshift({ role: 'user', parts: [{ text: 'Hello.' }] })
-  }
-  return merged
-}
-
 async function aiReaderChat(request: Request, env: Env) {
   const body = await readJson<Record<string, unknown>>(request)
   const bookTitle = stringField(body.book_title) || stringField(body.bookTitle) || 'this book'
@@ -3814,32 +3713,32 @@ async function aiReaderChat(request: Request, env: Env) {
     + 'If the question is unrelated to reading or the book, gently redirect.'
   )
 
-  const preamble: Array<{ role: 'user' | 'model'; text: string }> = []
+  const turns: ReaderChatTurn[] = []
   if (pageContext.trim()) {
-    preamble.push({
+    turns.push({
       role: 'user',
-      text: `Here is the passage I'm currently reading from "${bookTitle}":\n\n${pageContext.slice(0, 4500)}`,
+      content: `Here is the passage I'm currently reading from "${bookTitle}":\n\n${pageContext.slice(0, 4500)}`,
     })
-    preamble.push({
-      role: 'model',
-      text: 'Got it — I can see the passage you are reading. What would you like to know?',
+    turns.push({
+      role: 'assistant',
+      content: 'Got it — I can see the passage you are reading. What would you like to know?',
     })
   }
+  turns.push(...messages)
 
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content
     || 'Summarize what I just read'
 
   try {
-    const text = await geminiGenerateText(env, {
+    const text = await readerGenerateText(env, {
       system,
-      contents: toGeminiContents(messages, preamble),
-      maxOutputTokens: 700,
-      temperature: 0.7,
+      turns,
+      maxTokens: 4096,
+      temperature: 0.5,
     })
     return sseResponse(streamTextAsSse(text))
   } catch (err) {
-    // Always keep the assistant usable — fall back locally on Gemini outages/quota.
-    if (err instanceof ApiError && (err.status === 429 || err.status === 502 || err.status === 404 || err.status === 400)) {
+    if (isReadingModelOutage(err)) {
       const fallback = localReadingFallback({
         bookTitle,
         pageContext,
@@ -3870,20 +3769,20 @@ async function aiAskPassage(request: Request, env: Env) {
 
   if (mode === 'translate') {
     try {
-      const translated = await geminiGenerateText(env, {
+      const translated = await readerGenerateText(env, {
         system: (
           `You are a literary translator. Translate the given text into ${targetLanguage}. `
           + 'Output only the translation — no explanation, no preamble, no quotation marks.'
         ),
-        contents: [{ role: 'user', parts: [{ text }] }],
-        maxOutputTokens: 800,
+        turns: [{ role: 'user', content: text }],
+        maxTokens: 4096,
         temperature: 0.3,
       })
       return sseResponse(streamTextAsSse(translated))
     } catch (err) {
-      if (err instanceof ApiError && err.status === 429) {
+      if (isReadingModelOutage(err)) {
         return sseResponse(streamTextAsSse(
-          `[Translation unavailable — Gemini quota exceeded.]\n\nOriginal:\n${text.slice(0, 1200)}`,
+          `[Translation unavailable — the reading model is busy.]\n\nOriginal:\n${text.slice(0, 1200)}`,
         ))
       }
       if (err instanceof ApiError) return json({ detail: err.message }, err.status)
@@ -3901,32 +3800,33 @@ async function aiAskPassage(request: Request, env: Env) {
   let passageIntro = `The reader highlighted:\n\n"${text.slice(0, 3000)}"`
   if (context) passageIntro += `\n\nSurrounding text:\n${context.slice(0, 2000)}`
 
-  const preamble: Array<{ role: 'user' | 'model'; text: string }> = [
+  const turns: ReaderChatTurn[] = [
     {
       role: 'user',
-      text: `${passageIntro}\n\nExplain this passage clearly and concisely.`,
+      content: `${passageIntro}\n\nExplain this passage clearly and concisely.`,
     },
   ]
   if (messages.length > 0) {
-    preamble.push({
-      role: 'model',
-      text: 'Happy to discuss this passage. What would you like to explore?',
+    turns.push({
+      role: 'assistant',
+      content: 'Happy to discuss this passage. What would you like to explore?',
     })
+    turns.push(...messages)
   }
 
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content
     || 'Explain this passage clearly and concisely.'
 
   try {
-    const reply = await geminiGenerateText(env, {
+    const reply = await readerGenerateText(env, {
       system,
-      contents: toGeminiContents(messages, preamble),
-      maxOutputTokens: 700,
-      temperature: 0.7,
+      turns,
+      maxTokens: 4096,
+      temperature: 0.5,
     })
     return sseResponse(streamTextAsSse(reply))
   } catch (err) {
-    if (err instanceof ApiError && (err.status === 429 || err.status === 502 || err.status === 404 || err.status === 400)) {
+    if (isReadingModelOutage(err)) {
       const fallback = localReadingFallback({
         bookTitle: 'this passage',
         pageContext: `${text}\n\n${context}`,
@@ -4178,12 +4078,12 @@ async function dictionaryLookup(url: URL, env: Env, ctx: ExecutionContext) {
 
   const body = await resolveDictionary(term, {
     generate: async (system, prompt) => {
-      if (!env.GEMINI_API_KEY?.trim()) return null
+      if (!env.NVIDIA_CHAT_API_KEY?.trim()) return null
       try {
-        return await geminiGenerateText(env, {
+        return await readerGenerateText(env, {
           system,
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          maxOutputTokens: 160,
+          turns: [{ role: 'user', content: prompt }],
+          maxTokens: 200,
           temperature: 0.1,
         })
       } catch {

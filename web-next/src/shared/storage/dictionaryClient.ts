@@ -238,7 +238,7 @@ async function fetchBackendDictionary(term: string): Promise<DictionaryResponse 
   try {
     const raw = await request<DictionaryResponse>(
       `/api/dictionary/lookup?term=${encodeURIComponent(term)}`,
-      { signal: AbortSignal.timeout(8000) },
+      { signal: AbortSignal.timeout(14_000) },
     )
     const normalized = normalizeDictionaryPayload(raw, term)
     if (!normalized) return null
