@@ -20,7 +20,8 @@ import {
 const WIKTIONARY_UA = 'HiggsRead/1.0 (https://higgsread.com; dictionary lookup)'
 const FREE_TIMEOUT_MS = 1600
 const WIKI_TIMEOUT_MS = 2000
-const DICTIONARY_GENERATE_TIMEOUT_MS = 6000
+/** Step 5 reasons before the definition. A short one took about six seconds. */
+const DICTIONARY_GENERATE_TIMEOUT_MS = 8000
 
 export function normalizeDictionaryTerm(value: string) {
   return value
