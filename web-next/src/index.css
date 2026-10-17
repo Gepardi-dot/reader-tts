@@ -185,8 +185,8 @@
     min-height: 100%;
     overflow-x: clip;
     overflow-y: auto;
-    /* Paragraphs below the fold report a guess height, then grow. Anchoring
-       walks the viewport on every correction, which is the refresh jump. */
+    /* Paragraph heights are real. Anchoring stays off so a late reflow
+       cannot walk the reading line. */
     overflow-anchor: none;
   }
   html.reader-window-scroll #root {
@@ -299,9 +299,16 @@ html.pwa-standalone [data-reader-layout="continuous"]:not([data-reader-sheet-loc
   touch-action: pan-y !important;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  overflow-anchor: none;
 }
 [data-reader-layout="continuous"] [data-reader-text] {
   clip-path: none !important;
+}
+/* A guessed content-visibility height changes as each paragraph reaches the
+   screen, so the page jumps while scrolling and again after refresh. */
+[data-reader-layout="continuous"] [data-reader-text] p {
+  content-visibility: visible !important;
+  overflow-anchor: none;
 }
 [data-reader-layout="continuous"] .reader-page-inner,
 [data-reader-layout="continuous"] .reader-page-current {

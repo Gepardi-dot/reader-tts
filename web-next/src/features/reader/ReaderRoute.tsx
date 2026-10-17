@@ -93,11 +93,13 @@ import {
   mergeRectsIntoLineWashes,
   pageBreaksFromLineBoxes,
   pageClipRange,
+  pageIndexAfterMeasure,
   pageIndexForOffset,
   PAGINATED_BOTTOM_CLEARANCE,
   pagedParagraphWindow,
   pageTopFromInnerScroll,
   paginatedTextViewHeight,
+  readerParagraphsVirtualized,
   readerScrollerStyle,
   readerUsesWindowScroll,
   snapPageToLines,
@@ -372,17 +374,14 @@ function splitParagraphByHighlights(
 // React.memo means audio/scroll re-renders skip the entire paragraph subtree as long as
 // `paragraphs` / `bionic` / `highlights` keep stable references.
 //
-// `content-visibility: auto` is the actual heavy-lift fix for bionic mode: the browser skips
-// layout AND paint for paragraphs that are far from the viewport and treats them as
-// `contain-intrinsic-size`-sized placeholders. Without it, every paragraph in the entire book
-// pays full layout/paint cost — and bionic's per-word inline boxes make that cost ~3× higher.
-// `auto 6em` is a per-paragraph height estimate; the `auto` keyword tells the browser to remember
-// each paragraph's measured size after first render so the scrollbar stops jumping.
+// Paginated first paint may skip distant paragraphs while the column is hidden.
+// Continuous must not: a guessed height changes as each paragraph reaches the
+// screen, and the page jumps.
 const ReaderParagraphs = memo(function ReaderParagraphs({
   paragraphs,
   bionic,
   highlights,
-  virtualize = true,
+  virtualize = false,
   layoutStart = 0,
   layoutEnd = 0,
 }: {
@@ -2804,7 +2803,7 @@ export function ReaderRoute() {
       return true
     }
 
-    // Force content-visibility to lay out this paragraph before measuring.
+    // Bring a far paragraph into layout, then correct to the reading line.
     programmaticScrollRef.current = true
     el?.scrollIntoView({ block: pin === 'center' ? 'center' : 'start', behavior: 'auto' })
     tryPin()
@@ -3018,6 +3017,7 @@ export function ReaderRoute() {
     root.style.clipPath = 'none'
     const lines = collectReaderLineBoxes(root)
     const pages = pageBreaksFromLineBoxes(lines, getPageViewHeight())
+    const previousPageStart = pageBreaksRef.current[pageIndexRef.current]?.startOffset ?? null
     const unchanged = pages.length === pageBreaksRef.current.length
       && pages.every((page, i) => {
         const prev = pageBreaksRef.current[i]
@@ -3036,23 +3036,22 @@ export function ReaderRoute() {
     const pending = pendingPageOffsetRef.current
     if (pending != null) pendingPageOffsetRef.current = null
     const followPlayback = isAudioActive() && !audioFollowPausedRef.current
-    const offset = pending
-      ?? (followPlayback ? (spokenOffsetRef.current ?? activeAudioCueRangeRef.current?.start) : null)
-      ?? readOffsetRef.current
-      ?? Math.round(latestScrollPct.current * payload.text.length)
-    const next = pageIndexForOffset(pages, offset)
+    const moveToOffset = pending
+      ?? (followPlayback
+        ? (spokenOffsetRef.current ?? activeAudioCueRangeRef.current?.start ?? null)
+        : null)
+    const next = pageIndexAfterMeasure({
+      pages,
+      currentIndex: pageIndexRef.current,
+      currentPageStart: previousPageStart,
+      moveToOffset,
+    })
     if (pageTurnRef.current.tracking || pageTurnRef.current.animating) {
       if (prevClip) root.style.clipPath = prevClip
       return
     }
 
     if (unchanged && next === pageIndexRef.current) {
-      const page = pages[next]
-      if (page) {
-        programmaticScrollRef.current = true
-        applyRestingPageTransform(page)
-        window.setTimeout(() => { programmaticScrollRef.current = false }, 80)
-      }
       markReadingPlaceReady()
       return
     }
@@ -3130,16 +3129,6 @@ export function ReaderRoute() {
     return () => html.classList.remove('reader-window-scroll')
   }, [appearance.layout])
 
-  useLayoutEffect(() => {
-    if (readingPlaceReady) return
-    const html = document.documentElement
-    const prev = html.style.overflow
-    html.style.overflow = 'hidden'
-    return () => {
-      html.style.overflow = prev
-    }
-  }, [readingPlaceReady])
-
   useEffect(() => {
     const themeMeta = document.querySelector('meta[name="theme-color"]')
     if (!themeMeta) return
@@ -3193,6 +3182,47 @@ export function ReaderRoute() {
     else settle()
     return () => { cancelled = true }
   }, [payload, progressFetched, appearance.layout])
+
+  // A late reflow (fonts finishing, a scrollbar) must put the same character
+  // back. Stop once the reader scrolls, and never yank playback follow.
+  useEffect(() => {
+    if (!readingPlaceReady || appearance.layout !== 'continuous') return
+    const root = readerTextRef.current
+    if (!root) return
+    let userMoved = false
+    let corrections = 0
+    const onScroll = () => {
+      if (!programmaticScrollRef.current) userMoved = true
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    const scroller = readerScrollRef.current
+    scroller?.addEventListener('scroll', onScroll, { passive: true })
+    const ro = new ResizeObserver(() => {
+      if (userMoved || corrections >= 2 || layoutRef.current !== 'continuous') return
+      if (isAudioActive() && !audioFollowPausedRef.current) return
+      const offset = placedOffsetRef.current
+      if (offset == null || !didPinContinuousRef.current) return
+      const start = clampReadOffset(offset, payload?.text.length ?? 0)
+      const end = Math.min(payload?.text.length ?? 0, start + 1)
+      const live = root.isConnected ? domRangeForSourceOffsets(start, end, root) : null
+      if (!live) return
+      const rect = live.getBoundingClientRect()
+      if (rect.width === 0 && rect.height === 0) return
+      const delta = scrollDeltaToPinRect(rect.top, continuousReadingPinY())
+      if (delta === 0) return
+      corrections += 1
+      programmaticScrollRef.current = true
+      scrollReaderBy(delta, 'auto')
+      window.setTimeout(() => { programmaticScrollRef.current = false }, 80)
+    })
+    ro.observe(root)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('scroll', onScroll)
+      scroller?.removeEventListener('scroll', onScroll)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readingPlaceReady, appearance.layout])
 
   // Paginated: measure viewport pages when type, size, or book text changes.
   // ResizeObserver callbacks are the allowed setState path; do not setState
@@ -4596,7 +4626,7 @@ export function ReaderRoute() {
               paragraphs={paragraphs}
               bionic={appearance.bionic}
               highlights={readerHighlights}
-              virtualize={!paginated || !pagedLayoutAll}
+              virtualize={readerParagraphsVirtualized(appearance.layout, pagedLayoutAll)}
               layoutStart={pagedWindow.start}
               layoutEnd={pagedWindow.end}
             />

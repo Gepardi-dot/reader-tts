@@ -244,6 +244,40 @@ export function clampPageIndex(index: number, pageCount: number): number {
 }
 
 /**
+ * Continuous reading lays every paragraph out. A guessed height changes as
+ * the paragraph reaches the screen, and the page jumps. Paginated mode may
+ * skip distant paragraphs only until the first full measure, while the
+ * column is still hidden.
+ */
+export function readerParagraphsVirtualized(
+  layout: ReaderLayout,
+  fullPagedLayout: boolean,
+): boolean {
+  return layout === 'paginated' && !fullPagedLayout
+}
+
+/**
+ * A resize remeasure must keep the character already on screen.
+ * `moveToOffset` is only for a saved place or the spoken line.
+ */
+export function pageIndexAfterMeasure(options: {
+  pages: ReadonlyArray<{ startOffset: number }>
+  currentIndex: number
+  currentPageStart: number | null
+  moveToOffset: number | null
+}): number {
+  const count = options.pages.length
+  if (count === 0) return 0
+  if (options.moveToOffset != null && Number.isFinite(options.moveToOffset)) {
+    return pageIndexForOffset(options.pages, options.moveToOffset)
+  }
+  if (options.currentPageStart != null && Number.isFinite(options.currentPageStart)) {
+    return pageIndexForOffset(options.pages, options.currentPageStart)
+  }
+  return clampPageIndex(options.currentIndex, count)
+}
+
+/**
  * Keep a playback highlight inside one page. A `<mark>` that straddles the
  * paginated clip-path often paints nothing (clip + box-decoration-break).
  */
