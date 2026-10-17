@@ -140,7 +140,7 @@ export function AudioSettingsRoute() {
               <p className="text-xs text-muted-foreground">{currentProvider.description}</p>
             )}
             <p className="text-xs text-muted-foreground">
-              HR Voices is the default. HR Ultra Realistic and Natural Voices are available when configured on the server.
+              Natural Voices is the default. HR Ultra Realistic and HR Voices are available when configured on the server.
             </p>
           </div>
 

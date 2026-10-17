@@ -10,6 +10,7 @@ import {
   audioSelectionKey,
   clientClockRateForProvider,
   isHostedTtsProvider,
+  naturalVoiceSentenceJoinSec,
 } from '../audioPlayback'
 import { DEFAULT_TTS_PROVIDER_ID } from '../audioProviderCatalog'
 import { AudioClock } from './audioClock'
@@ -484,6 +485,10 @@ export class TtsRuntime {
         cues: frame.cues,
         objectUrl: frame.url ?? undefined,
         objectMime: 'audio/wav',
+        leadSilenceSec: naturalVoiceSentenceJoinSec(
+          this.provider,
+          chunkIndex > 0 ? this.chunks[chunkIndex - 1]?.text : '',
+        ),
       })
       // Resume after a boundary underrun as soon as the next buffer lands.
       if (this.phase === 'buffering' || this.phase === 'idle') {
@@ -640,6 +645,10 @@ export class TtsRuntime {
           cues: chunk.cues,
           objectUrl: chunk.url ?? undefined,
           objectMime: 'audio/wav',
+          leadSilenceSec: naturalVoiceSentenceJoinSec(
+            this.provider,
+            index > 0 ? this.chunks[index - 1]?.text : '',
+          ),
         })
         scheduled += 1
       }
