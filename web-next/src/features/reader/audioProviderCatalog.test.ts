@@ -17,9 +17,10 @@ describe('TTS provider display names', () => {
       { id: 'google', name: 'google', available: true, voices: [] },
     ])
     expect(options.map((option) => ({ id: option.id, label: option.label }))).toEqual([
-      { id: 'kokoro', label: 'HR Voices' },
       { id: 'google', label: 'HR Ultra Realistic' },
+      { id: 'kokoro', label: 'HR Voices' },
     ])
+    expect(options.map((option) => option.recommended)).toEqual([false, false])
   })
 
   it('keeps internal ids unchanged', () => {
@@ -27,10 +28,10 @@ describe('TTS provider display names', () => {
       { id: 'kokoro', name: 'Kokoro TTS', available: true, voices: [] },
       { id: 'google', name: 'Gemini TTS', available: true, voices: [] },
     ])
-    expect(providers.map((provider) => provider.id)).toEqual(['kokoro', 'google'])
+    expect(providers.map((provider) => provider.id)).toEqual(['google', 'kokoro'])
     expect(providers.map((provider) => provider.name)).toEqual([
-      'HR Voices',
       'HR Ultra Realistic',
+      'HR Voices',
     ])
   })
 
@@ -41,10 +42,11 @@ describe('TTS provider display names', () => {
       { id: 'nvidia', name: 'NVIDIA', available: true, voices: [] },
       { id: 'browser', name: 'Browser', available: true, voices: [] },
     ])
-    expect(providers.map((provider) => provider.id)).toEqual(['kokoro', 'nvidia'])
+    expect(providers.map((provider) => provider.id)).toEqual(['nvidia', 'kokoro'])
     expect(providers.map((provider) => provider.name)).toEqual([
-      'HR Voices',
       'Natural Voices',
+      'HR Voices',
     ])
+    expect(providers.map((provider) => provider.recommended)).toEqual([true, false])
   })
 })

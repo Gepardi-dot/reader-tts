@@ -29,10 +29,22 @@ afterEach(() => {
 })
 
 describe('voice onboarding', () => {
-  it('requires onboarding when no kokoro voice is saved', () => {
+  it('does not ask for an HR Voice when Natural Voices is the default', () => {
     installStorage()
-    expect(needsVoiceOnboarding('user-1')).toBe(true)
-    expect(hasCompletedVoiceOnboarding('user-1')).toBe(false)
+    expect(needsVoiceOnboarding('user-1')).toBe(false)
+    expect(hasCompletedVoiceOnboarding('user-1')).toBe(true)
+  })
+
+  it('asks for an HR Voice only when that provider is selected and no voice is saved', () => {
+    const storage = installStorage()
+    storage.set('reader-audio-prefs', JSON.stringify({
+      provider: 'kokoro',
+      voice: null,
+      voicesByProvider: {},
+      version: 5,
+    }))
+    expect(needsVoiceOnboarding('user-hr')).toBe(true)
+    expect(hasCompletedVoiceOnboarding('user-hr')).toBe(false)
   })
 
   it('commits a voice and marks onboarding complete', () => {
@@ -62,7 +74,7 @@ describe('voice onboarding', () => {
       provider: 'kokoro',
       voice: 'bf_emma',
       voicesByProvider: { kokoro: 'bf_emma' },
-      version: 4,
+      version: 5,
     }))
 
     expect(needsVoiceOnboarding('user-3')).toBe(false)

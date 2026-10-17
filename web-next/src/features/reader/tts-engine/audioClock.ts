@@ -10,6 +10,7 @@ import {
 import {
   audioBufferScheduledEndTime,
   audioBufferSourceStartTime,
+  NATURAL_VOICE_SENTENCE_JOIN_WAV,
   SILENT_WAV_DATA_URL,
 } from '../audioPlayback'
 
@@ -24,6 +25,8 @@ export interface ClockUnitMeta {
   objectUrl?: string
   /** MIME for `objectUrl` (blob: URLs have no extension; iOS needs the type). */
   objectMime?: string
+  /** Silence before this clip. Used when the previous Natural Voices clip ended a sentence. */
+  leadSilenceSec?: number
 }
 
 export interface ScheduledClockUnit {
@@ -37,6 +40,9 @@ export interface ScheduledClockUnit {
   objectUrl?: string
   objectMime?: string
   ownsObjectUrl?: boolean
+  leadSilenceSec?: number
+  leadDone?: boolean
+  leadHandoff?: boolean
 }
 
 export interface AudioClockHandlers {
@@ -124,6 +130,8 @@ export class AudioClock {
   private htmlQueue: ScheduledClockUnit[] = []
   private htmlQueueIndex = -1
   private htmlPlayGeneration = 0
+  /** True while the HTML lane is playing the sentence-join gap, not the speech clip. */
+  private htmlLeadPlaying = false
 
   get isActive() {
     if (this.useHtmlLane()) {
@@ -359,6 +367,7 @@ export class AudioClock {
   stop() {
     this.sessionToken += 1
     this.htmlPlayGeneration += 1
+    this.htmlLeadPlaying = false
     this.stopProgress()
     this.stopKeepAlive()
     for (const source of this.sources) {
@@ -415,7 +424,8 @@ export class AudioClock {
     const seekSeconds = Math.max(0, Math.min(buffer.duration, meta.seekSeconds ?? 0))
     const chainedEnd = this.scheduled[this.scheduled.length - 1]?.endAt
       ?? (this.horizon > ctx.currentTime ? this.horizon : ctx.currentTime)
-    const startAt = audioBufferSourceStartTime(ctx.currentTime, chainedEnd)
+    const lead = Math.max(0, Number.isFinite(meta.leadSilenceSec) ? (meta.leadSilenceSec ?? 0) : 0)
+    const startAt = audioBufferSourceStartTime(ctx.currentTime, chainedEnd) + lead
     // Always schedule as rate 1 on Web Audio — pitch stays natural.
     const endAt = audioBufferScheduledEndTime({
       startAt,
@@ -476,6 +486,7 @@ export class AudioClock {
       objectUrl,
       objectMime: meta.objectMime ?? 'audio/wav',
       ownsObjectUrl,
+      leadSilenceSec: Math.max(0, Number.isFinite(meta.leadSilenceSec) ? (meta.leadSilenceSec ?? 0) : 0),
     }
     this.htmlQueue.push(unit)
     this.active = true
@@ -513,6 +524,38 @@ export class AudioClock {
 
     if (!unit.objectUrl) {
       void this.playHtmlAt(index + 1)
+      return
+    }
+
+    if ((unit.leadSilenceSec ?? 0) > 0 && !unit.leadDone) {
+      unit.leadDone = true
+      this.htmlLeadPlaying = true
+      try {
+        this.pauseUnlockHtml()
+        audio.loop = false
+        audio.onended = null
+        audio.onerror = null
+        setHtmlMediaSrc(audio, NATURAL_VOICE_SENTENCE_JOIN_WAV, 'audio/wav')
+        applyPreservesPitch(audio, this.rate)
+        const finishLead = () => {
+          if (gen !== this.htmlPlayGeneration || this.paused || unit.leadHandoff) return
+          unit.leadHandoff = true
+          this.htmlLeadPlaying = false
+          void this.playHtmlAt(index)
+        }
+        audio.onended = finishLead
+        audio.onerror = finishLead
+        if (this.paused || gen !== this.htmlPlayGeneration) {
+          this.htmlLeadPlaying = false
+          audio.pause()
+          return
+        }
+        await audio.play()
+      } catch {
+        this.htmlLeadPlaying = false
+        if (gen !== this.htmlPlayGeneration || this.paused) return
+        void this.playHtmlAt(index)
+      }
       return
     }
 
@@ -583,6 +626,7 @@ export class AudioClock {
   }
 
   private stopHtmlLane(revokeUrls: boolean) {
+    this.htmlLeadPlaying = false
     if (this.htmlAudio) {
       pauseHtmlMediaElement(this.htmlAudio)
       // Park on a valid silent clip BEFORE revoking blob URLs. Leaving src on a
@@ -747,13 +791,22 @@ export class AudioClock {
         return
       }
       const unit = this.htmlQueueIndex >= 0 ? this.htmlQueue[this.htmlQueueIndex] : null
-      if (unit && this.htmlAudio && !this.htmlAudio.paused) {
+      if (this.htmlLeadPlaying && this.htmlAudio && !this.paused && (this.htmlAudio.ended || this.htmlAudio.error)) {
+        const leadUnit = this.htmlQueue[this.htmlQueueIndex]
+        if (leadUnit && !leadUnit.leadHandoff) {
+          leadUnit.leadHandoff = true
+          this.htmlLeadPlaying = false
+          void this.playHtmlAt(this.htmlQueueIndex)
+        }
+        return
+      }
+      if (unit && this.htmlAudio && !this.htmlAudio.paused && !this.htmlLeadPlaying) {
         if (this.activeUnitId !== unit.unitId) {
           this.activeUnitId = unit.unitId
           this.handlers.onUnitStart?.(unit)
         }
         this.handlers.onProgress?.(unit, this.htmlAudio.currentTime)
-      } else if (unit && this.htmlAudio && !this.paused && (this.htmlAudio.ended || this.htmlAudio.error)) {
+      } else if (unit && this.htmlAudio && !this.paused && !this.htmlLeadPlaying && (this.htmlAudio.ended || this.htmlAudio.error)) {
         void this.playHtmlAt(this.htmlQueueIndex + 1)
         return
       }

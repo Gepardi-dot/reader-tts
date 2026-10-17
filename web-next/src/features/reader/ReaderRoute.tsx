@@ -2224,7 +2224,7 @@ export function ReaderRoute() {
   const fallbackProviderInfo = providersData?.providers
     ? pickFallbackProvider(providerCatalog)
     : null
-  // Prefer Kokoro by default; only fall back when the selected engine is missing/unavailable.
+  // Natural Voices is the default. Fall back only when that engine is missing.
   const useProviderFallback = Boolean(
     providersData?.providers
     && fallbackProviderInfo

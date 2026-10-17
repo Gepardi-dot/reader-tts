@@ -2,7 +2,7 @@ import { BROWSER_TTS_PROVIDER_ID, committedVoiceForDraft } from './audioPlayback
 import { ALLOWED_TTS_PROVIDER_IDS, DEFAULT_TTS_PROVIDER_ID, defaultVoiceForProvider, type TtsProviderInfo } from './audioProviderCatalog'
 
 export const AUDIO_PREFS_KEY = 'reader-audio-prefs'
-export const AUDIO_PREFS_VERSION = 4
+export const AUDIO_PREFS_VERSION = 5
 
 export interface AudioPrefs {
   provider: string
@@ -43,7 +43,7 @@ function normalizedVoiceMap(value: unknown): Record<string, string | null> {
 
 function normalizeProviderId(value: unknown): string {
   const raw = typeof value === 'string' && value ? value : DEFAULT_TTS_PROVIDER_ID
-  // Browser speech was removed — migrate anyone still on it to Kokoro.
+  // Browser speech was removed. Send it to the current default voice.
   if (raw === BROWSER_TTS_PROVIDER_ID || raw === 'browser') return DEFAULT_TTS_PROVIDER_ID
   if (ALLOWED_TTS_PROVIDER_IDS.has(raw)) return raw
   return DEFAULT_TTS_PROVIDER_ID
@@ -51,14 +51,20 @@ function normalizeProviderId(value: unknown): string {
 
 export function normalizeAudioPrefs(raw: unknown): AudioPrefs {
   const parsed = raw && typeof raw === 'object' ? raw as Partial<AudioPrefs> : {}
-  const provider = normalizeProviderId(parsed.provider)
+  const storedVersion = typeof parsed.version === 'number' ? parsed.version : 0
+  let provider = normalizeProviderId(parsed.provider)
   const voicesByProvider = normalizedVoiceMap(parsed.voicesByProvider)
   const voice = normalizedVoice(parsed.voice)
   if (voice) voicesByProvider[provider] = voice
+  // Version 5 is when Natural Voices became the default. Older saves that were
+  // still on HR Voices move once. A later version bump must not do this again.
+  if (storedVersion < 5 && provider === 'kokoro') {
+    provider = DEFAULT_TTS_PROVIDER_ID
+  }
 
   return {
     provider,
-    voice: voicesByProvider[provider] ?? voice,
+    voice: voicesByProvider[provider] ?? null,
     voicesByProvider,
     version: AUDIO_PREFS_VERSION,
   }

@@ -4122,18 +4122,20 @@ async function providers(env: Env) {
   const kokoroConfigured = kokoroRemoteConfigured(env)
   return json({
     defaultNarrationStyle: 'warm',
-    defaultProvider: 'kokoro',
+    defaultProvider: 'nvidia',
     providers: [
       {
-        id: 'kokoro',
-        name: 'HR Voices',
-        available: kokoroConfigured,
+        id: 'nvidia',
+        name: 'Natural Voices',
+        available: Boolean(env.NVIDIA_API_KEY?.trim()),
         recommended: true,
-        voices: KOKORO_VOICES,
-        defaultVoice: KOKORO_DEFAULT_VOICE,
-        description: kokoroConfigured
-          ? 'Default neural voices with cached audio.'
-          : 'Set KOKORO_REMOTE_URL on the Worker to enable HR Voices (see docs/hosted-kokoro.md).',
+        voices: NVIDIA_VOICES,
+        defaultVoice: configuredNvidiaVoice(null),
+        models: nvidiaModelsForClient(),
+        defaultModel: configuredNvidiaModel(null).id,
+        description: env.NVIDIA_API_KEY?.trim()
+          ? 'Default narration. Named speakers for twelve languages.'
+          : 'Add NVIDIA_API_KEY as a Cloudflare Worker secret to enable Natural Voices.',
       },
       {
         id: 'google',
@@ -4149,17 +4151,15 @@ async function providers(env: Env) {
           : 'Add GEMINI_API_KEY as a Cloudflare Worker secret to enable HR Ultra Realistic.',
       },
       {
-        id: 'nvidia',
-        name: 'Natural Voices',
-        available: Boolean(env.NVIDIA_API_KEY?.trim()),
+        id: 'kokoro',
+        name: 'HR Voices',
+        available: kokoroConfigured,
         recommended: false,
-        voices: NVIDIA_VOICES,
-        defaultVoice: configuredNvidiaVoice(null),
-        models: nvidiaModelsForClient(),
-        defaultModel: configuredNvidiaModel(null).id,
-        description: env.NVIDIA_API_KEY?.trim()
-          ? 'NVIDIA Magpie voices. Named speakers for twelve languages.'
-          : 'Add NVIDIA_API_KEY as a Cloudflare Worker secret to enable Natural Voices.',
+        voices: KOKORO_VOICES,
+        defaultVoice: KOKORO_DEFAULT_VOICE,
+        description: kokoroConfigured
+          ? 'Neural voices with cached audio.'
+          : 'Set KOKORO_REMOTE_URL on the Worker to enable HR Voices (see docs/hosted-kokoro.md).',
       },
     ],
   })

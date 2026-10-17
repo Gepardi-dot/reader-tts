@@ -39,7 +39,15 @@ export interface AudioProviderOption {
 
 /** Book TTS: hosted Kokoro, Gemini, and NVIDIA Natural Voices. */
 export const ALLOWED_TTS_PROVIDER_IDS = new Set(['kokoro', 'google', 'nvidia'])
-export const DEFAULT_TTS_PROVIDER_ID = 'kokoro'
+export const DEFAULT_TTS_PROVIDER_ID = 'nvidia'
+
+/** Picker order. Natural Voices is the default. HR Voices is last. */
+export const TTS_PROVIDER_ORDER = ['nvidia', 'google', 'kokoro'] as const
+
+function providerRank(id: string): number {
+  const index = TTS_PROVIDER_ORDER.indexOf(id as (typeof TTS_PROVIDER_ORDER)[number])
+  return index === -1 ? TTS_PROVIDER_ORDER.length : index
+}
 
 /** User-facing names. Internal ids stay `kokoro` / `google` / `nvidia`. */
 export const TTS_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
@@ -54,8 +62,8 @@ export function displayNameForTtsProvider(id: string, fallback?: string | null):
 
 const FALLBACK_TTS_PROVIDERS: TtsProviderInfo[] = [
   {
-    id: 'kokoro',
-    name: TTS_PROVIDER_DISPLAY_NAMES.kokoro,
+    id: 'nvidia',
+    name: TTS_PROVIDER_DISPLAY_NAMES.nvidia,
     available: true,
     recommended: true,
     voices: [],
@@ -70,8 +78,8 @@ const FALLBACK_TTS_PROVIDERS: TtsProviderInfo[] = [
     defaultVoice: null,
   },
   {
-    id: 'nvidia',
-    name: TTS_PROVIDER_DISPLAY_NAMES.nvidia,
+    id: 'kokoro',
+    name: TTS_PROVIDER_DISPLAY_NAMES.kokoro,
     available: true,
     recommended: false,
     voices: [],
@@ -88,10 +96,13 @@ export const PROVIDER_PREVIEW_TEXT = (
 export function normalizeTtsProviders(providers?: TtsProviderInfo[]): TtsProviderInfo[] {
   const catalog = (providers ?? []).filter((provider) => ALLOWED_TTS_PROVIDER_IDS.has(provider.id))
   const source = catalog.length > 0 ? catalog : FALLBACK_TTS_PROVIDERS
-  return source.map((provider) => ({
-    ...provider,
-    name: displayNameForTtsProvider(provider.id, provider.name),
-  }))
+  return source
+    .map((provider) => ({
+      ...provider,
+      name: displayNameForTtsProvider(provider.id, provider.name),
+      recommended: provider.id === DEFAULT_TTS_PROVIDER_ID,
+    }))
+    .sort((a, b) => providerRank(a.id) - providerRank(b.id))
 }
 
 /** @deprecated Use normalizeTtsProviders — kept for older imports. */
@@ -119,9 +130,9 @@ export function defaultVoiceForProvider(
 export function pickFallbackProvider(providers: TtsProviderInfo[]) {
   const available = normalizeTtsProviders(providers).filter((provider) => provider.available)
   return (
-    available.find((provider) => provider.id === 'kokoro') ??
-    available.find((provider) => provider.recommended) ??
+    available.find((provider) => provider.id === DEFAULT_TTS_PROVIDER_ID) ??
     available.find((provider) => provider.id === 'google') ??
+    available.find((provider) => provider.id === 'kokoro') ??
     available[0] ??
     null
   )

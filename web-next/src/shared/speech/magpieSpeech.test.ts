@@ -16,6 +16,18 @@ describe('prepareMagpieSpeech', () => {
     )
   })
 
+  it('turns a semicolon or a colon into a breath, and leaves a clock alone', () => {
+    expect(prepareMagpieSpeech('She waited; the room was still.')).toBe(
+      'She waited, the room was still.',
+    )
+    expect(prepareMagpieSpeech('He said: the door was open.')).toBe(
+      'He said, the door was open.',
+    )
+    expect(prepareMagpieSpeech('The train leaves at 3:45.')).toBe(
+      'The train leaves at 3:45.',
+    )
+  })
+
   it('leaves a number range alone', () => {
     expect(prepareMagpieSpeech('From 1914–1918 the war went on.')).toBe(
       'From 1914–1918 the war went on.',

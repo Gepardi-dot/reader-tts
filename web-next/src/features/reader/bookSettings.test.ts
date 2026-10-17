@@ -43,7 +43,7 @@ describe('bookSettings', () => {
       provider: 'kokoro',
       voice: 'am_adam',
       voicesByProvider: { kokoro: 'am_adam' },
-      version: 4,
+      version: 5,
     }))
 
     const settings = loadBookSettings('book-a')
@@ -94,7 +94,7 @@ describe('bookSettings', () => {
       provider: 'google',
       voice: 'Puck',
       voicesByProvider: { google: 'Puck' },
-      version: 4,
+      version: 5,
     }))
 
     expect(loadBookSettings('book-a').audioPrefs).toMatchObject({
@@ -136,7 +136,7 @@ describe('bookSettings', () => {
       provider: 'kokoro',
       voice: 'am_adam',
       voicesByProvider: { kokoro: 'am_adam' },
-      version: 4,
+      version: 5,
     }))
     loadBookSettings('book-a')
 

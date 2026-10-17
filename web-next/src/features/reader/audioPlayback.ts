@@ -31,6 +31,22 @@ function makeSilentWavDataUrl(durationSec = 0.05, sampleRate = 44_100) {
 
 export const SILENT_WAV_DATA_URL = makeSilentWavDataUrl()
 
+/**
+ * Magpie's period is about 0.6s inside one clip. The edge of a separate clip
+ * is only about 0.1s, so the next sentence used to start immediately.
+ * This gap is played between clips. It is not written into the cached file.
+ */
+export const NATURAL_VOICE_SENTENCE_JOIN_SEC = 0.5
+export const NATURAL_VOICE_SENTENCE_JOIN_WAV = makeSilentWavDataUrl(NATURAL_VOICE_SENTENCE_JOIN_SEC)
+
+/** Silence to leave before the next Natural Voices clip when the previous one ended a sentence. */
+export function naturalVoiceSentenceJoinSec(provider: string, previousText: string | null | undefined): number {
+  if (provider !== 'nvidia') return 0
+  const trimmed = previousText?.trim() ?? ''
+  if (!/[.!?…]['"')\]]?$/.test(trimmed)) return 0
+  return NATURAL_VOICE_SENTENCE_JOIN_SEC
+}
+
 export interface AudioTextChunk {
   start: number
   end: number

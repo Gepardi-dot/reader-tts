@@ -2,10 +2,11 @@
  * Shape book text for Magpie the way current Gemini and ElevenLabs
  * audiobook guides shape a transcript: the punctuation is the pause.
  *
- * Measured on Magpie Aria: a comma adds a breath, a period is a full stop,
- * and an em dash does not. Gemini and Eleven v3/v4 use that dash as a beat,
- * so it is written as a comma here. Commas that are already in the book stay
- * commas. Kokoro cannot do that, and its em-dash rewrite is not used.
+ * Measured on Magpie Aria: a comma is a short breath (~0.2s) and a period is a
+ * full stop (~0.6s). An em dash, a semicolon, and a colon are held even longer
+ * than a period, which makes narration halt. Those become commas. A clock
+ * (`3:45`) stays. Commas that are already in the book stay commas. Kokoro
+ * cannot do that, and its em-dash rewrite is not used.
  *
  * A blank line with no sentence ending gets a period, because a bare line
  * break is the same length as no break. An ellipsis stays one weighted pause.
@@ -39,8 +40,11 @@ export function prepareMagpieSpeech(text: string): string {
   next = next.replace(/[·•]/g, '. ')
   next = expandTitles(next)
   next = next.replace(/\.{3,}|…+/g, ' … ')
-  // A dash between words is a beat. A dash between numbers is a range.
+  // A dash, semicolon, or colon between words is a breath. A dash or colon
+  // between numbers is a range or a clock, and stays.
   next = next.replace(/(?<!\d)\s*(?:--|[–—])\s*(?!\d)/g, ', ')
+  next = next.replace(/\s*;\s*/g, ', ')
+  next = next.replace(/(?<!\d)\s*:\s*(?!\d)/g, ', ')
   next = next.replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n')
   next = next.replace(/\n{3,}/g, '\n\n')
   next = next.replace(/([^.!?"'…,:;])\s*\n\n/g, '$1.\n\n')

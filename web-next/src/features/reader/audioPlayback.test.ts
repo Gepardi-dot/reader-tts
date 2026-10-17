@@ -22,6 +22,8 @@ import {
   isChunking,
   patchAudioChunk,
   pacingFor,
+  naturalVoiceSentenceJoinSec,
+  NATURAL_VOICE_SENTENCE_JOIN_SEC,
   shouldBridgeNativeAudioGap,
   shouldPrimeNativeAudio,
   nativePrefetchStartIndexForFallback,
@@ -284,6 +286,15 @@ describe('audio playback startup plan', () => {
     expect(isChunking(BROWSER_TTS_PROVIDER_ID)).toBe(false)
     expect(pacingFor('kokoro')).toEqual({ lengthScale: 1, sentenceSilence: 0.42 })
     expect(pacingFor('google')).toEqual({ lengthScale: 1.0, sentenceSilence: 0.20 })
+  })
+
+  it('waits before the next Natural Voices clip only after a sentence', () => {
+    expect(naturalVoiceSentenceJoinSec('nvidia', 'She opened the door.')).toBe(NATURAL_VOICE_SENTENCE_JOIN_SEC)
+    expect(naturalVoiceSentenceJoinSec('nvidia', 'Did she?')).toBe(NATURAL_VOICE_SENTENCE_JOIN_SEC)
+    expect(naturalVoiceSentenceJoinSec('nvidia', 'She said "Go."')).toBe(NATURAL_VOICE_SENTENCE_JOIN_SEC)
+    expect(naturalVoiceSentenceJoinSec('nvidia', 'She opened the door and')).toBe(0)
+    expect(naturalVoiceSentenceJoinSec('kokoro', 'She opened the door.')).toBe(0)
+    expect(naturalVoiceSentenceJoinSec('nvidia', '')).toBe(0)
   })
 })
 

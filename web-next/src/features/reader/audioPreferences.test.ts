@@ -28,12 +28,44 @@ afterEach(() => {
 })
 
 describe('audio preferences', () => {
-  it('defaults to kokoro', () => {
+  it('defaults to Natural Voices', () => {
     installStorage()
     expect(loadAudioPrefs()).toMatchObject({
-      provider: 'kokoro',
+      provider: 'nvidia',
       voice: null,
+      version: 5,
+    })
+  })
+
+  it('moves an old HR Voices default to Natural Voices and keeps the HR voice', () => {
+    const storage = installStorage()
+    storage.set('reader-audio-prefs', JSON.stringify({
+      provider: 'kokoro',
+      voice: 'am_adam',
+      voicesByProvider: { kokoro: 'am_adam' },
       version: 4,
+    }))
+
+    expect(loadAudioPrefs()).toMatchObject({
+      provider: 'nvidia',
+      voice: null,
+      voicesByProvider: { kokoro: 'am_adam' },
+      version: 5,
+    })
+  })
+
+  it('keeps HR Voices when that choice was saved after Natural Voices became the default', () => {
+    const storage = installStorage()
+    storage.set('reader-audio-prefs', JSON.stringify({
+      provider: 'kokoro',
+      voice: 'am_adam',
+      voicesByProvider: { kokoro: 'am_adam' },
+      version: 5,
+    }))
+
+    expect(loadAudioPrefs()).toMatchObject({
+      provider: 'kokoro',
+      voice: 'am_adam',
     })
   })
 
@@ -46,14 +78,14 @@ describe('audio preferences', () => {
     }))
 
     expect(loadAudioPrefs()).toMatchObject({
-      provider: 'kokoro',
-      voice: 'am_adam',
+      provider: 'nvidia',
+      voice: null,
       voicesByProvider: { kokoro: 'am_adam' },
-      version: 4,
+      version: 5,
     })
   })
 
-  it('migrates browser speech prefs to kokoro', () => {
+  it('migrates browser speech prefs to Natural Voices', () => {
     const storage = installStorage()
     storage.set('reader-audio-prefs', JSON.stringify({
       provider: 'browser',
@@ -62,9 +94,9 @@ describe('audio preferences', () => {
     }))
 
     expect(loadAudioPrefs()).toMatchObject({
-      provider: 'kokoro',
+      provider: 'nvidia',
       voice: null,
-      version: 4,
+      version: 5,
     })
   })
 
@@ -73,7 +105,7 @@ describe('audio preferences', () => {
     storage.set('reader-audio-prefs', JSON.stringify({
       provider: 'nvidia',
       voice: 'Magpie-Multilingual.EN-US.Aria',
-      version: 4,
+      version: 5,
     }))
 
     expect(loadAudioPrefs()).toMatchObject({
@@ -118,7 +150,7 @@ describe('audio preferences', () => {
     expect(JSON.parse(storage.get('reader-audio-prefs') ?? '{}')).toMatchObject({
       provider: 'kokoro',
       voice: 'af_heart',
-      version: 4,
+      version: 5,
     })
   })
 })
