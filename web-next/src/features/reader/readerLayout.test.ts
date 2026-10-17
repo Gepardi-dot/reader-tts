@@ -17,6 +17,8 @@ import {
   pagedParagraphWindow,
   pageTopFromInnerScroll,
   paginatedTextViewHeight,
+  pageIndexAfterMeasure,
+  readerParagraphsVirtualized,
   readerScrollerStyle,
   readerUsesWindowScroll,
   snapPageToLines,
@@ -37,6 +39,55 @@ describe('normalizeReaderLayout', () => {
 
   it('accepts paginated', () => {
     expect(normalizeReaderLayout('paginated')).toBe('paginated')
+  })
+})
+
+describe('readerParagraphsVirtualized', () => {
+  it('lays out every continuous paragraph so scrolling cannot change its height', () => {
+    expect(readerParagraphsVirtualized('continuous', false)).toBe(false)
+    expect(readerParagraphsVirtualized('continuous', true)).toBe(false)
+  })
+
+  it('skips distant paragraphs only before the paginated measure', () => {
+    expect(readerParagraphsVirtualized('paginated', false)).toBe(true)
+    expect(readerParagraphsVirtualized('paginated', true)).toBe(false)
+  })
+})
+
+describe('pageIndexAfterMeasure', () => {
+  const pages = [{ startOffset: 0 }, { startOffset: 900 }, { startOffset: 1800 }]
+
+  it('opens a saved character on its page', () => {
+    expect(pageIndexAfterMeasure({
+      pages,
+      currentIndex: 0,
+      currentPageStart: null,
+      moveToOffset: 1900,
+    })).toBe(2)
+  })
+
+  it('stays with the current page when a resize remeasures', () => {
+    expect(pageIndexAfterMeasure({
+      pages,
+      currentIndex: 0,
+      currentPageStart: 900,
+      moveToOffset: null,
+    })).toBe(1)
+  })
+
+  it('clamps when there is no anchor yet', () => {
+    expect(pageIndexAfterMeasure({
+      pages: [],
+      currentIndex: 4,
+      currentPageStart: null,
+      moveToOffset: null,
+    })).toBe(0)
+    expect(pageIndexAfterMeasure({
+      pages,
+      currentIndex: 9,
+      currentPageStart: null,
+      moveToOffset: null,
+    })).toBe(2)
   })
 })
 
