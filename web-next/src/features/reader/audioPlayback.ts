@@ -45,7 +45,7 @@ export interface AudioTextChunk {
 export const FIRST_AUDIO_CHARS: Record<string, number> = {
   google: 110,
   kokoro: 95,
-  // Chatterbox rejects text over 500 characters. Lookahead can add ~200.
+  // Magpie rejects a hosted response over about 4 MB. Lookahead can add ~200.
   nvidia: 120,
 }
 
@@ -60,7 +60,7 @@ export const SECOND_AUDIO_CHARS: Record<string, number> = {
 export const CHUNK_CHARS: Record<string, number> = {
   google: 280,
   kokoro: 280,
-  nvidia: 260,
+  nvidia: 200,
 }
 
 export const DEFAULT_FIRST_AUDIO_CHARS = 180

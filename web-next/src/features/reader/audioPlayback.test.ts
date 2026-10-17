@@ -133,7 +133,7 @@ describe('audio playback chunking', () => {
     expect(FIRST_AUDIO_CHARS.kokoro).toBeLessThan(CHUNK_CHARS.kokoro)
   })
 
-  it('keeps Natural Voices chunks under the Chatterbox character cap', () => {
+  it('keeps Natural Voices chunks under the Magpie response cap', () => {
     expect(FIRST_AUDIO_CHARS.nvidia + 90).toBeLessThanOrEqual(500)
     expect(SECOND_AUDIO_CHARS.nvidia + 140).toBeLessThanOrEqual(500)
     expect(CHUNK_CHARS.nvidia + 200).toBeLessThanOrEqual(500)

@@ -72,13 +72,13 @@ describe('audio preferences', () => {
     const storage = installStorage()
     storage.set('reader-audio-prefs', JSON.stringify({
       provider: 'nvidia',
-      voice: 'Chatterbox-Multilingual.en-US.Male',
+      voice: 'Magpie-Multilingual.EN-US.Aria',
       version: 4,
     }))
 
     expect(loadAudioPrefs()).toMatchObject({
       provider: 'nvidia',
-      voice: 'Chatterbox-Multilingual.en-US.Male',
+      voice: 'Magpie-Multilingual.EN-US.Aria',
     })
   })
 
