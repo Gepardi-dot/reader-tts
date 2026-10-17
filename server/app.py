@@ -55,6 +55,7 @@ RUNTIME_ENV_NAMES = (
     "GEMMA_TIMEOUT_SECONDS",
     "VOCAB_CONTEXT_PROVIDER",
     "NVIDIA_API_KEY",
+    "NVIDIA_CHAT_API_KEY",
     "KOKORO_REMOTE_URL",
     "KOKORO_REMOTE_API_KEY",
     "KOKORO_REMOTE_TIMEOUT_SECONDS",
@@ -5613,6 +5614,34 @@ def kickoff_auto_presynth(book_id: str) -> None:
         ).start()
 
 
+NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+NVIDIA_CHAT_MODEL = "stepfun-ai/step-5-preview"
+
+
+def nvidia_chat_api_key() -> str | None:
+    """Chat key for summaries and the reading assistant. Falls back to the older chat env name."""
+    return env_value("NVIDIA_CHAT_API_KEY") or env_value("NVIDIA_API_KEY")
+
+
+def nvidia_chat_payload(
+    messages: list[dict],
+    *,
+    max_tokens: int,
+    temperature: float,
+    stream: bool,
+) -> dict:
+    return {
+        "model": NVIDIA_CHAT_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "stream": stream,
+        "temperature": temperature,
+        "top_p": 1,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+    }
+
+
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
@@ -5629,12 +5658,12 @@ class AskAIRequest(BaseModel):
 @app.post("/api/ai/ask")
 async def ask_ai(req: AskAIRequest):
     """
-    Stream a Gemma 4 answer from the NVIDIA API.
+    Stream a Step 5 Preview answer from the NVIDIA integrate chat API.
     mode=explain: explain/discuss the passage (chat-capable).
     mode=translate: translate the passage into target_language.
     Returns text/event-stream: data: {"delta": "..."}  …  data: [DONE]
     """
-    api_key = env_value("NVIDIA_API_KEY")
+    api_key = nvidia_chat_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="AI service is not configured on this server.")
 
@@ -5682,19 +5711,18 @@ async def ask_ai(req: AskAIRequest):
             async with httpx.AsyncClient(timeout=60) as client:
                 async with client.stream(
                     "POST",
-                    "https://integrate.api.nvidia.com/v1/chat/completions",
+                    NVIDIA_CHAT_URL,
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                         "Accept": "text/event-stream",
                     },
-                    json={
-                        "model": "google/gemma-4-31b-it",
-                        "messages": messages,
-                        "max_tokens": 512,
-                        "temperature": 0.7,
-                        "stream": True,
-                    },
+                    json=nvidia_chat_payload(
+                        messages,
+                        max_tokens=4096,
+                        temperature=0.5,
+                        stream=True,
+                    ),
                 ) as resp:
                     async for line in resp.aiter_lines():
                         if not line or not line.startswith("data: "):
@@ -5732,7 +5760,7 @@ async def assistant_chat(req: AssistantChatRequest):
     Reading assistant: persistent chat about the book being read.
     Streams text/event-stream: data: {"delta": "..."} … data: [DONE]
     """
-    api_key = env_value("NVIDIA_API_KEY")
+    api_key = nvidia_chat_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="AI service is not configured on this server.")
 
@@ -5763,19 +5791,18 @@ async def assistant_chat(req: AssistantChatRequest):
             async with httpx.AsyncClient(timeout=60) as client:
                 async with client.stream(
                     "POST",
-                    "https://integrate.api.nvidia.com/v1/chat/completions",
+                    NVIDIA_CHAT_URL,
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                         "Accept": "text/event-stream",
                     },
-                    json={
-                        "model": "google/gemma-4-31b-it",
-                        "messages": messages,
-                        "max_tokens": 512,
-                        "temperature": 0.7,
-                        "stream": True,
-                    },
+                    json=nvidia_chat_payload(
+                        messages,
+                        max_tokens=4096,
+                        temperature=0.5,
+                        stream=True,
+                    ),
                 ) as resp:
                     async for line in resp.aiter_lines():
                         if not line or not line.startswith("data: "):
@@ -5818,7 +5845,7 @@ async def vocab_check(req: VocabCheckRequest):
     - mnemonic:   is the user's memory hook vivid and tied to the meaning?
     Returns JSON: {"verdict": "correct"|"partial"|"incorrect", "feedback": str, "suggestion"?: str}
     """
-    api_key = env_value("NVIDIA_API_KEY")
+    api_key = nvidia_chat_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="AI service is not configured on this server.")
 
@@ -5887,26 +5914,26 @@ async def vocab_check(req: VocabCheckRequest):
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                "https://integrate.api.nvidia.com/v1/chat/completions",
+                NVIDIA_CHAT_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": "google/gemma-4-31b-it",
-                    "messages": messages,
-                    "max_tokens": 220,
-                    "temperature": 0.2,
-                    "stream": False,
-                },
+                json=nvidia_chat_payload(
+                    messages,
+                    max_tokens=220,
+                    temperature=0.2,
+                    stream=False,
+                ),
             )
             resp.raise_for_status()
             payload = resp.json()
-            raw = (payload.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+            content = (payload.get("choices") or [{}])[0].get("message", {}).get("content")
+            raw = content.strip() if isinstance(content, str) else ""
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"AI check failed: {exc}")
 
-    # Strip markdown fences if Gemma wraps the JSON
+    # Strip markdown fences if the model wraps the JSON
     if raw.startswith("```"):
         lines = raw.splitlines()
         raw = "\n".join(line for line in lines if not line.strip().startswith("```"))
@@ -5956,7 +5983,7 @@ async def define_word(req: DefineWordRequest):
     Optionally uses the original book sentence to disambiguate the sense.
     Returns: {"definition": str, "partOfSpeech"?: str, "example"?: str}
     """
-    api_key = env_value("NVIDIA_API_KEY")
+    api_key = nvidia_chat_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="AI service is not configured on this server.")
 
@@ -5988,22 +6015,22 @@ async def define_word(req: DefineWordRequest):
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                "https://integrate.api.nvidia.com/v1/chat/completions",
+                NVIDIA_CHAT_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": "google/gemma-4-31b-it",
-                    "messages": messages,
-                    "max_tokens": 240,
-                    "temperature": 0.2,
-                    "stream": False,
-                },
+                json=nvidia_chat_payload(
+                    messages,
+                    max_tokens=240,
+                    temperature=0.2,
+                    stream=False,
+                ),
             )
             resp.raise_for_status()
             payload = resp.json()
-            raw = (payload.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+            content = (payload.get("choices") or [{}])[0].get("message", {}).get("content")
+            raw = content.strip() if isinstance(content, str) else ""
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"AI define failed: {exc}")
 
