@@ -2,6 +2,7 @@ import { guessAudioMime, typedAudioBlob } from '@/lib/browser'
 import { request, requestBlob } from '@/shared/api/client'
 import { speechTextWithoutPageNumbers } from '@/shared/books/pageNumbers'
 import { prepareKokoroSpeech } from '@/shared/speech/kokoroSpeech'
+import { prepareMagpieSpeech } from '@/shared/speech/magpieSpeech'
 import { getCachedAudio, putCachedAudio } from '@/shared/storage/audioCache'
 
 export interface LiveAudioPayload {
@@ -86,7 +87,9 @@ function liveAudioCacheKey(bookId: string, payload: LiveAudioPayload) {
     payload.end,
     payload.provider === 'kokoro'
       ? prepareKokoroSpeech(speechTextWithoutPageNumbers(payload.text))
-      : speechTextWithoutPageNumbers(payload.text),
+      : payload.provider === 'nvidia'
+        ? prepareMagpieSpeech(speechTextWithoutPageNumbers(payload.text))
+        : speechTextWithoutPageNumbers(payload.text),
   ])
 }
 

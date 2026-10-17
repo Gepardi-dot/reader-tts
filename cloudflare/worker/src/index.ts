@@ -1,6 +1,7 @@
 import { resolveDictionary, normalizeDictionaryTerm } from './dictionary'
 import { speechTextWithoutPageNumbers } from './pageNumbers'
 import { prepareKokoroSpeech } from '../../../web-next/src/shared/speech/kokoroSpeech'
+import { prepareMagpieSpeech } from '../../../web-next/src/shared/speech/magpieSpeech'
 import {
   NotionHttpError,
   disconnectNotion,
@@ -1930,7 +1931,11 @@ async function liveAudio(request: Request, env: Env, user: User, bookId: string,
   }
 
   const spokenText = speechTextWithoutPageNumbers(selectedText)
-  const speechText = provider === 'kokoro' ? prepareKokoroSpeech(spokenText) : spokenText
+  const speechText = provider === 'kokoro'
+    ? prepareKokoroSpeech(spokenText)
+    : provider === 'nvidia'
+      ? prepareMagpieSpeech(spokenText)
+      : spokenText
   const synthesisText = speechText.trim()
   if (!selectedText.trim()) throw new ApiError(400, 'Live audio selection cannot be empty.')
 
@@ -2119,7 +2124,11 @@ async function testProvider(request: Request, env: Env, ctx: ExecutionContext) {
     provider,
     voice: voiceField || '',
     model: modelField || '',
-    text: provider === 'kokoro' ? prepareKokoroSpeech(sampleText) : sampleText,
+    text: provider === 'kokoro'
+      ? prepareKokoroSpeech(sampleText)
+      : provider === 'nvidia'
+        ? prepareMagpieSpeech(sampleText)
+        : sampleText,
     lengthScale: safeLengthScale,
     sentenceSilence: safeSentenceSilence,
     narrationStyle: narrationStyle || '',
@@ -2156,7 +2165,7 @@ async function testProvider(request: Request, env: Env, ctx: ExecutionContext) {
     })
     : provider === 'nvidia'
     ? await synthesizeNvidiaRequested(env, {
-      text: sampleText,
+      text: prepareMagpieSpeech(sampleText),
       voice: voiceField,
       model: modelField,
     })
