@@ -81,6 +81,8 @@ export class TtsRuntime {
   private readonly objectUrls = new Set<string>()
   private readonly listeners = new Set<() => void>()
   private readonly scheduledBuffers = new WeakSet<AudioBuffer>()
+  /** One schedule per chunk per play. A second decoded copy used to speak the opening twice. */
+  private scheduledChunkIndexes = new Set<number>()
   private startedAt = 0
   private sessionId = 0
   private reason: 'voice-switch' | 'tap' = 'tap'
@@ -246,6 +248,7 @@ export class TtsRuntime {
     this.pool = null
     this.chunks = []
     this.loadingChunkIndexes.clear()
+    this.scheduledChunkIndexes.clear()
     this.firstAudio.reset()
     this.revokeObjectUrls()
     this.hooks.clearAudioFollow()
@@ -475,21 +478,8 @@ export class TtsRuntime {
     // Stream frames to the clock as soon as they arrive.
     const unsubFrames = pool.onFrame((chunkIndex, frame) => {
       if (generation !== this.generation || controller.signal.aborted) return
-      if (this.scheduledBuffers.has(frame.buffer)) return
-      this.scheduledBuffers.add(frame.buffer)
+      if (!this.enqueueChunk(chunkIndex, frame.buffer, frame.cues, frame.url)) return
       this.refreshExpectMore(chunkIndex)
-
-      this.clock.append(frame.buffer, {
-        chunkIndex,
-        seekSeconds: 0,
-        cues: frame.cues,
-        objectUrl: frame.url ?? undefined,
-        objectMime: 'audio/wav',
-        leadSilenceSec: naturalVoiceSentenceJoinSec(
-          this.provider,
-          chunkIndex > 0 ? this.chunks[chunkIndex - 1]?.text : '',
-        ),
-      })
       // Resume after a boundary underrun as soon as the next buffer lands.
       if (this.phase === 'buffering' || this.phase === 'idle') {
         this.phase = 'playing'
@@ -517,15 +507,22 @@ export class TtsRuntime {
       this.startWatchdog(generation)
       this.loadingChunkIndexes.add(0)
 
-      // Sequential first: Fly Kokoro is single-CPU; dual synths used to freeze
-      // the process (health timed out → "reading voice timed out").
+      const ahead = PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD
+      // Kokoro's machine synthesizes one clip at a time. A second request used
+      // to stall the first. Natural Voices and HR Ultra Realistic can overlap,
+      // so the next sentence is usually ready when the first one ends.
+      const overlapNext = params.provider === 'nvidia' || params.provider === 'google'
+      if (overlapNext) {
+        void pool.prefetchFrom(1, ahead, controller.signal, { parallel: true })
+      }
+
       await pool.ensure(0, controller.signal, false)
       this.loadingChunkIndexes.delete(0)
       if (generation !== this.generation) return
 
-      // As soon as first audio is playable, queue the next slice(s) one-by-one.
-      const ahead = PREFETCH_AHEAD_TARGET[params.provider] ?? DEFAULT_PREFETCH_AHEAD
-      void pool.prefetchFrom(1, ahead, controller.signal)
+      if (!overlapNext) {
+        void pool.prefetchFrom(1, ahead, controller.signal)
+      }
 
       if (this.clock.scheduledCount === 0) {
         throw new Error('Audio provider did not return playable audio.')
@@ -627,6 +624,34 @@ export class TtsRuntime {
     }
   }
 
+  /**
+   * Put a chunk on the clock once. Hosted voices emit one clip per index;
+   * a second buffer for that index is a duplicate of the opening, not more speech.
+   */
+  private enqueueChunk(
+    chunkIndex: number,
+    buffer: AudioBuffer,
+    cues: TtsAudioChunk['cues'],
+    url: string | null | undefined,
+  ): boolean {
+    if (this.scheduledChunkIndexes.has(chunkIndex)) return false
+    const unit = this.clock.append(buffer, {
+      chunkIndex,
+      seekSeconds: 0,
+      cues,
+      objectUrl: url ?? undefined,
+      objectMime: 'audio/wav',
+      leadSilenceSec: naturalVoiceSentenceJoinSec(
+        this.provider,
+        chunkIndex > 0 ? this.chunks[chunkIndex - 1]?.text : '',
+      ),
+    })
+    if (!unit) return false
+    this.scheduledBuffers.add(buffer)
+    this.scheduledChunkIndexes.add(chunkIndex)
+    return true
+  }
+
   private scheduleReadyFrom(startIndex: number): number {
     let scheduled = 0
     for (let index = Math.max(0, startIndex); index < this.chunks.length; index += 1) {
@@ -636,20 +661,8 @@ export class TtsRuntime {
         if (chunk.status === 'fetching' || chunk.status === 'idle') break
         continue
       }
-      if (!this.scheduledBuffers.has(chunk.buffer)) {
-        this.scheduledBuffers.add(chunk.buffer)
+      if (this.enqueueChunk(index, chunk.buffer, chunk.cues, chunk.url)) {
         this.refreshExpectMore(index)
-        this.clock.append(chunk.buffer, {
-          chunkIndex: index,
-          seekSeconds: 0,
-          cues: chunk.cues,
-          objectUrl: chunk.url ?? undefined,
-          objectMime: 'audio/wav',
-          leadSilenceSec: naturalVoiceSentenceJoinSec(
-            this.provider,
-            index > 0 ? this.chunks[index - 1]?.text : '',
-          ),
-        })
         scheduled += 1
       }
       if (chunk.status === 'fetching') break
