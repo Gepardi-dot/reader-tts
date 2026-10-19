@@ -425,6 +425,64 @@ describe('AudioClock', () => {
     clock.close()
   })
 
+  it('does not replay the first clip when the unlock element is already ended', async () => {
+    const fake = new FakeHtmlAudio()
+    fake.ended = true
+    const gate: { release: (() => void) | null } = { release: null }
+    fake.play = vi.fn(() => new Promise<void>((resolve) => {
+      gate.release = () => {
+        fake.paused = false
+        fake.ended = false
+        resolve()
+      }
+    }))
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      frames.push(cb)
+      return frames.length
+    })
+    vi.stubGlobal('Audio', class {
+      constructor() {
+        return fake
+      }
+    })
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:encoded'),
+      revokeObjectURL: vi.fn(),
+    })
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      maxTouchPoints: 5,
+      platform: 'Linux armv8l',
+    })
+
+    const clock = new AudioClock()
+    clock.setExpectMore(true)
+    clock.append(audioBuffer(2), { chunkIndex: 0, objectUrl: 'blob:first' })
+    for (const frame of [...frames]) frame(0)
+    expect(fake.src).toBe('blob:first')
+    expect(fake.play).toHaveBeenCalledTimes(1)
+
+    clock.append(audioBuffer(2), { chunkIndex: 1, objectUrl: 'blob:second' })
+    for (const frame of [...frames]) frame(0)
+    expect(fake.src).toBe('blob:first')
+    expect(fake.play).toHaveBeenCalledTimes(1)
+
+    gate.release?.()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(fake.src).toBe('blob:first')
+    expect(fake.play).toHaveBeenCalledTimes(1)
+
+    fake.ended = true
+    fake.paused = true
+    fake.onended?.()
+    await Promise.resolve()
+    expect(fake.src).toBe('blob:second')
+    expect(fake.play).toHaveBeenCalledTimes(2)
+    clock.close()
+  })
+
   it('pauses HTMLAudio again if play() resolves after pause', async () => {
     const fake = new FakeHtmlAudio()
     fake.play = vi.fn(async () => {
