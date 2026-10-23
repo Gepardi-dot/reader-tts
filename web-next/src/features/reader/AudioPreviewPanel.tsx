@@ -147,18 +147,18 @@ export function AudioPreviewPanel({
   const providerOptions = providerOptionsFromCatalog(providersRes?.providers)
   const initialProvider = providerOptions.some((p) => p.id === provider)
     ? provider
-    : (providerOptions.find((p) => p.recommended)?.id ?? providerOptions[0]?.id ?? 'nvidia')
+    : (providerOptions.find((p) => p.recommended)?.id ?? providerOptions[0]?.id ?? 'kokoro')
   const [draftProvider, setDraftProvider] = useState(initialProvider)
   const [draftVoice, setDraftVoice] = useState<string | null>(voice)
 
-  // If parent prefs still pointed at a removed provider, resolve to Natural Voices
+  // If parent prefs still pointed at a removed provider, resolve to HR Voices
   // without setState-in-effect (eslint react-hooks/set-state-in-effect).
   const draftProviderKnown = providerOptions.some((p) => p.id === draftProvider)
   const resolvedDraftProvider = draftProviderKnown
     ? draftProvider
     : (providerOptions.find((p) => p.recommended)?.id
       ?? providerOptions[0]?.id
-      ?? 'nvidia')
+      ?? 'kokoro')
   const activeProvider = providerOptions.find(p => p.id === resolvedDraftProvider)
   const catalogVoices = activeProvider?.voices ?? []
   const providerVoices = catalogVoices

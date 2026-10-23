@@ -157,7 +157,15 @@ export function isTransientLiveAudioError(error: unknown) {
     return false
   }
   return isDisconnectedAudioError(error)
-    || /502|503|504|timeout|timed out|unreachable|Audio fetch failed|decode|empty audio/i.test(raw)
+    || /502|503|504|timeout|timed out|unreachable|Audio fetch failed|Audio not found|decode|empty audio/i.test(raw)
+}
+
+/** Extra tries after the chunk loader's own retry, so one dead clip does not end the book. */
+export const PLAYBACK_CHUNK_RETRY_LIMIT = 4
+
+export function playbackChunkRetryDelayMs(attempt: number) {
+  const n = Number.isFinite(attempt) ? Math.max(1, Math.floor(attempt)) : 1
+  return 700 * n
 }
 
 function waitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {

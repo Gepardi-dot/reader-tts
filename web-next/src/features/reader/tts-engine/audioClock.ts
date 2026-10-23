@@ -1019,6 +1019,38 @@ export class AudioClock {
     }
   }
 
+  /**
+   * Drop PCM for clips the playhead has already left. The HTML queue used to
+   * keep every buffer for the whole book, which is what made a long listen
+   * run out of memory and stop.
+   */
+  releasePlayedUnits(chunkIndex: number) {
+    const keepFrom = chunkIndex - 1
+    const currentSrc = this.htmlAudio?.src ?? ''
+    for (const unit of this.htmlQueue) {
+      if (unit.chunkIndex >= keepFrom) continue
+      const tiny = this.tinySilentBuffer(unit.buffer)
+      if (tiny) unit.buffer = tiny
+      const url = unit.objectUrl
+      if (url && url.startsWith('blob:') && url !== currentSrc) {
+        URL.revokeObjectURL(url)
+        unit.ownsObjectUrl = false
+        unit.objectUrl = undefined
+      }
+    }
+  }
+
+  private tinySilentBuffer(sample: AudioBuffer): AudioBuffer | null {
+    if (!sample || typeof sample.length !== 'number' || sample.length <= 1) return null
+    const ctx = this.ctx
+    if (!ctx || typeof ctx.createBuffer !== 'function') return null
+    try {
+      return ctx.createBuffer(1, 1, ctx.sampleRate || sample.sampleRate || 24_000)
+    } catch {
+      return null
+    }
+  }
+
   /** Keep the phone media element playing and Web Audio out of the session. */
   private holdHtmlPlayback() {
     armNavigatorAudioSession()

@@ -55,7 +55,7 @@ export function needsVoiceOnboarding(userId: string): boolean {
   if (!userId) return false
   if (hasCompletedVoiceOnboarding(userId)) return false
   const prefs = loadAudioPrefs()
-  // Natural Voices is the reading default. The Kokoro picker is only for HR Voices.
+  // HR Voices is the reading default. The picker runs only for that provider.
   if (prefs.provider !== 'kokoro' || savedKokoroVoice()) {
     markVoiceOnboardingComplete(userId)
     return false

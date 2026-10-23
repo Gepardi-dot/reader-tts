@@ -28,16 +28,16 @@ afterEach(() => {
 })
 
 describe('audio preferences', () => {
-  it('defaults to Natural Voices', () => {
+  it('defaults to HR Voices', () => {
     installStorage()
     expect(loadAudioPrefs()).toMatchObject({
-      provider: 'nvidia',
+      provider: 'kokoro',
       voice: null,
-      version: 5,
+      version: 6,
     })
   })
 
-  it('moves an old HR Voices default to Natural Voices and keeps the HR voice', () => {
+  it('keeps an old HR Voices choice and the saved voice', () => {
     const storage = installStorage()
     storage.set('reader-audio-prefs', JSON.stringify({
       provider: 'kokoro',
@@ -47,10 +47,10 @@ describe('audio preferences', () => {
     }))
 
     expect(loadAudioPrefs()).toMatchObject({
-      provider: 'nvidia',
-      voice: null,
+      provider: 'kokoro',
+      voice: 'am_adam',
       voicesByProvider: { kokoro: 'am_adam' },
-      version: 5,
+      version: 6,
     })
   })
 
@@ -78,14 +78,14 @@ describe('audio preferences', () => {
     }))
 
     expect(loadAudioPrefs()).toMatchObject({
-      provider: 'nvidia',
-      voice: null,
+      provider: 'kokoro',
+      voice: 'am_adam',
       voicesByProvider: { kokoro: 'am_adam' },
-      version: 5,
+      version: 6,
     })
   })
 
-  it('migrates browser speech prefs to Natural Voices', () => {
+  it('migrates browser speech prefs to HR Voices', () => {
     const storage = installStorage()
     storage.set('reader-audio-prefs', JSON.stringify({
       provider: 'browser',
@@ -94,18 +94,35 @@ describe('audio preferences', () => {
     }))
 
     expect(loadAudioPrefs()).toMatchObject({
-      provider: 'nvidia',
+      provider: 'kokoro',
       voice: null,
-      version: 5,
+      version: 6,
     })
   })
 
-  it('keeps Natural Voices as a saved provider', () => {
+  it('moves the Natural Voices default back to HR Voices once', () => {
     const storage = installStorage()
     storage.set('reader-audio-prefs', JSON.stringify({
       provider: 'nvidia',
       voice: 'Magpie-Multilingual.EN-US.Aria',
+      voicesByProvider: { kokoro: 'af_sky', nvidia: 'Magpie-Multilingual.EN-US.Aria' },
       version: 5,
+    }))
+
+    expect(loadAudioPrefs()).toMatchObject({
+      provider: 'kokoro',
+      voice: 'af_sky',
+      voicesByProvider: { kokoro: 'af_sky', nvidia: 'Magpie-Multilingual.EN-US.Aria' },
+      version: 6,
+    })
+  })
+
+  it('keeps Natural Voices when that choice was saved after HR Voices became the default again', () => {
+    const storage = installStorage()
+    storage.set('reader-audio-prefs', JSON.stringify({
+      provider: 'nvidia',
+      voice: 'Magpie-Multilingual.EN-US.Aria',
+      version: 6,
     }))
 
     expect(loadAudioPrefs()).toMatchObject({
@@ -150,7 +167,7 @@ describe('audio preferences', () => {
     expect(JSON.parse(storage.get('reader-audio-prefs') ?? '{}')).toMatchObject({
       provider: 'kokoro',
       voice: 'af_heart',
-      version: 5,
+      version: 6,
     })
   })
 })

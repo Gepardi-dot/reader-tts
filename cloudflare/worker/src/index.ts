@@ -125,6 +125,10 @@ const R2_AUDIO_CACHE_PREFIX = `live-audio/v${LIVE_AUDIO_CACHE_VERSION}`
 const AUDIO_FILE_PATH_PREFIX = '/api/audio/files/'
 const liveAudioFileMemory = new Map<string, { wav: Uint8Array; duration: number | null; expiresAt: number }>()
 const LIVE_AUDIO_FILE_MEMORY_MS = 10 * 60_000
+// A long listen used to leave every WAV in this isolate. Around a quarter hour
+// that filled the memory limit, the next file fetch died, and playback stopped.
+// R2 already has the clip. Only the newest few stay here for the immediate GET.
+const LIVE_AUDIO_FILE_MEMORY_MAX = 6
 const R2_COVER_PREFIX = 'book-covers'
 const MAX_COVER_STORE_BYTES = 400_000
 const MAX_COVER_FETCH_BYTES = 2_500_000
@@ -1554,10 +1558,20 @@ function liveAudioFileUrl(cacheDigest: string) {
 }
 
 function rememberLiveAudioFile(cacheDigest: string, wav: Uint8Array, duration: number | null) {
+  const now = Date.now()
+  for (const [key, entry] of liveAudioFileMemory) {
+    if (entry.expiresAt <= now) liveAudioFileMemory.delete(key)
+  }
+  liveAudioFileMemory.delete(cacheDigest)
+  while (liveAudioFileMemory.size >= LIVE_AUDIO_FILE_MEMORY_MAX) {
+    const oldest = liveAudioFileMemory.keys().next().value
+    if (!oldest) break
+    liveAudioFileMemory.delete(oldest)
+  }
   liveAudioFileMemory.set(cacheDigest, {
     wav,
     duration,
-    expiresAt: Date.now() + LIVE_AUDIO_FILE_MEMORY_MS,
+    expiresAt: now + LIVE_AUDIO_FILE_MEMORY_MS,
   })
 }
 
@@ -4022,20 +4036,18 @@ async function providers(env: Env) {
   const kokoroConfigured = kokoroRemoteConfigured(env)
   return json({
     defaultNarrationStyle: 'warm',
-    defaultProvider: 'nvidia',
+    defaultProvider: 'kokoro',
     providers: [
       {
-        id: 'nvidia',
-        name: 'Natural Voices',
-        available: Boolean(env.NVIDIA_API_KEY?.trim()),
+        id: 'kokoro',
+        name: 'HR Voices',
+        available: kokoroConfigured,
         recommended: true,
-        voices: NVIDIA_VOICES,
-        defaultVoice: configuredNvidiaVoice(null),
-        models: nvidiaModelsForClient(),
-        defaultModel: configuredNvidiaModel(null).id,
-        description: env.NVIDIA_API_KEY?.trim()
-          ? 'Default narration. Named speakers for twelve languages.'
-          : 'Add NVIDIA_API_KEY as a Cloudflare Worker secret to enable Natural Voices.',
+        voices: KOKORO_VOICES,
+        defaultVoice: KOKORO_DEFAULT_VOICE,
+        description: kokoroConfigured
+          ? 'Default narration. Neural voices with cached audio.'
+          : 'Set KOKORO_REMOTE_URL on the Worker to enable HR Voices (see docs/hosted-kokoro.md).',
       },
       {
         id: 'google',
@@ -4051,15 +4063,17 @@ async function providers(env: Env) {
           : 'Add GEMINI_API_KEY as a Cloudflare Worker secret to enable HR Ultra Realistic.',
       },
       {
-        id: 'kokoro',
-        name: 'HR Voices',
-        available: kokoroConfigured,
+        id: 'nvidia',
+        name: 'Natural Voices',
+        available: Boolean(env.NVIDIA_API_KEY?.trim()),
         recommended: false,
-        voices: KOKORO_VOICES,
-        defaultVoice: KOKORO_DEFAULT_VOICE,
-        description: kokoroConfigured
-          ? 'Neural voices with cached audio.'
-          : 'Set KOKORO_REMOTE_URL on the Worker to enable HR Voices (see docs/hosted-kokoro.md).',
+        voices: NVIDIA_VOICES,
+        defaultVoice: configuredNvidiaVoice(null),
+        models: nvidiaModelsForClient(),
+        defaultModel: configuredNvidiaModel(null).id,
+        description: env.NVIDIA_API_KEY?.trim()
+          ? 'Named speakers for twelve languages.'
+          : 'Add NVIDIA_API_KEY as a Cloudflare Worker secret to enable Natural Voices.',
       },
     ],
   })

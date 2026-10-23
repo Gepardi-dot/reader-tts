@@ -29,10 +29,10 @@ afterEach(() => {
 })
 
 describe('voice onboarding', () => {
-  it('does not ask for an HR Voice when Natural Voices is the default', () => {
+  it('asks for an HR Voice when that is the default and none is saved', () => {
     installStorage()
-    expect(needsVoiceOnboarding('user-1')).toBe(false)
-    expect(hasCompletedVoiceOnboarding('user-1')).toBe(true)
+    expect(needsVoiceOnboarding('user-1')).toBe(true)
+    expect(hasCompletedVoiceOnboarding('user-1')).toBe(false)
   })
 
   it('asks for an HR Voice only when that provider is selected and no voice is saved', () => {

@@ -17,7 +17,12 @@ import { AudioClock } from './audioClock'
 import { BufferPool } from './bufferPool'
 import { createChunkLoader } from './chunkLoader'
 import { KokoroEngine, PREHEAT_SEGMENTS } from './kokoroEngine'
-import { audioErrorMessage } from './liveAudio'
+import {
+  audioErrorMessage,
+  isTransientLiveAudioError,
+  PLAYBACK_CHUNK_RETRY_LIMIT,
+  playbackChunkRetryDelayMs,
+} from './liveAudio'
 import { warmLiveAudioFromOffset } from './liveAudioWarm'
 import { buildTtsChunks } from './segmenter'
 import { screenWakeForPhase } from './screenWakeLock'
@@ -29,6 +34,25 @@ import type {
   TtsPlaybackLane,
   TtsSnapshot,
 } from './types'
+
+function waitForPlaybackRetry(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    const pending: { timer?: ReturnType<typeof setTimeout> } = {}
+    const onAbort = () => {
+      clearTimeout(pending.timer)
+      resolve()
+    }
+    pending.timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
 
 export interface TtsRuntimeStartParams {
   word: string
@@ -87,6 +111,7 @@ export class TtsRuntime {
   private sessionId = 0
   private reason: 'voice-switch' | 'tap' = 'tap'
   private loadingChunkIndexes = new Set<number>()
+  private chunkRetryCount = new Map<number, number>()
   private usingKokoroEngine = false
   private kokoroSegmentStarts: number[] = []
   private watchdogTimer: ReturnType<typeof setInterval> | null = null
@@ -248,6 +273,7 @@ export class TtsRuntime {
     this.pool = null
     this.chunks = []
     this.loadingChunkIndexes.clear()
+    this.chunkRetryCount.clear()
     this.scheduledChunkIndexes.clear()
     this.firstAudio.reset()
     this.revokeObjectUrls()
@@ -409,6 +435,7 @@ export class TtsRuntime {
           this.hooks.syncAudioFollowCue(chunk, 0, true)
         }
         this.releasePlayedChunks(unit.chunkIndex)
+        this.clock.releasePlayedUnits(unit.chunkIndex)
         const ahead = PREFETCH_AHEAD_TARGET[this.provider] ?? DEFAULT_PREFETCH_AHEAD
         void pool.prefetchFrom(unit.chunkIndex + 1, ahead, controller.signal)
         this.emit()
@@ -450,24 +477,7 @@ export class TtsRuntime {
           },
         })
 
-        this.loadingChunkIndexes.add(nextChunkIndex)
-        void pool.ensure(nextChunkIndex, controller.signal, false)
-          .then(() => {
-            this.loadingChunkIndexes.delete(nextChunkIndex)
-            if (generation !== this.generation) return
-            if (this.scheduleReadyFrom(nextChunkIndex) > 0) {
-              this.phase = 'playing'
-              this.lane = 'native'
-            }
-            this.refreshExpectMore(nextChunkIndex)
-            this.emit()
-          })
-          .catch((error) => {
-            this.loadingChunkIndexes.delete(nextChunkIndex)
-            if (generation !== this.generation) return
-            this.hooks.showToast(audioErrorMessage(error))
-            this.stop()
-          })
+        this.loadChunk(nextChunkIndex, generation)
       },
       onEnded: () => {
         if (generation !== this.generation) return
@@ -516,7 +526,7 @@ export class TtsRuntime {
         void pool.prefetchFrom(1, ahead, controller.signal, { parallel: true })
       }
 
-      await pool.ensure(0, controller.signal, false)
+      await this.ensureChunkZero(pool, controller, generation)
       this.loadingChunkIndexes.delete(0)
       if (generation !== this.generation) return
 
@@ -589,25 +599,86 @@ export class TtsRuntime {
     if (!chunk || chunk.status === 'fetching' || this.loadingChunkIndexes.has(next)) return
 
     this.phase = 'buffering'
-    this.loadingChunkIndexes.add(next)
     this.emit()
-    void this.pool.ensure(next, this.controller.signal, false)
+    this.loadChunk(next, generation)
+  }
+
+  /**
+   * Load one clip. A timeout or a recycled worker used to end the whole book.
+   * Transient failures stay in buffering and try again; Kokoro stays one
+   * request at a time because the index stays in `loadingChunkIndexes`.
+   */
+  private loadChunk(index: number, generation: number) {
+    const pool = this.pool
+    const controller = this.controller
+    if (!pool || !controller || generation !== this.generation) return
+    const existing = this.chunks[index]
+    if (existing?.status === 'error') existing.status = 'idle'
+    this.loadingChunkIndexes.add(index)
+    void pool.ensure(index, controller.signal, false)
       .then(() => {
-        this.loadingChunkIndexes.delete(next)
+        this.loadingChunkIndexes.delete(index)
+        this.chunkRetryCount.delete(index)
         if (generation !== this.generation) return
-        if (this.scheduleReadyFrom(next) > 0) {
+        if (this.scheduleReadyFrom(index) > 0) {
           this.phase = 'playing'
           this.lane = 'native'
         }
-        this.refreshExpectMore(next)
+        this.refreshExpectMore(index)
         this.emit()
       })
-      .catch((error) => {
-        this.loadingChunkIndexes.delete(next)
-        if (generation !== this.generation) return
+      .catch((error: unknown) => {
+        if (generation !== this.generation || controller.signal.aborted) {
+          this.loadingChunkIndexes.delete(index)
+          return
+        }
+        const attempt = (this.chunkRetryCount.get(index) ?? 0) + 1
+        this.chunkRetryCount.set(index, attempt)
+        if (attempt <= PLAYBACK_CHUNK_RETRY_LIMIT && isTransientLiveAudioError(error)) {
+          const failed = this.chunks[index]
+          if (failed?.status === 'error') failed.status = 'idle'
+          this.phase = 'buffering'
+          this.emit()
+          const waitMs = playbackChunkRetryDelayMs(attempt)
+          setTimeout(() => {
+            if (generation !== this.generation || controller.signal.aborted) {
+              this.loadingChunkIndexes.delete(index)
+              return
+            }
+            this.loadChunk(index, generation)
+          }, waitMs)
+          return
+        }
+        this.loadingChunkIndexes.delete(index)
         this.hooks.showToast(audioErrorMessage(error))
         this.stop()
       })
+  }
+
+  private async ensureChunkZero(
+    pool: BufferPool,
+    controller: AbortController,
+    generation: number,
+  ) {
+    let lastError: unknown = null
+    for (let attempt = 0; attempt <= PLAYBACK_CHUNK_RETRY_LIMIT; attempt += 1) {
+      try {
+        await pool.ensure(0, controller.signal, false)
+        this.chunkRetryCount.delete(0)
+        return
+      } catch (error) {
+        lastError = error
+        if (controller.signal.aborted || generation !== this.generation) return
+        if (attempt >= PLAYBACK_CHUNK_RETRY_LIMIT || !isTransientLiveAudioError(error)) break
+        const failed = this.chunks[0]
+        if (failed?.status === 'error') failed.status = 'idle'
+        this.phase = 'buffering'
+        this.emit()
+        await waitForPlaybackRetry(playbackChunkRetryDelayMs(attempt + 1), controller.signal)
+        if (controller.signal.aborted || generation !== this.generation) return
+      }
+    }
+    if (lastError) throw lastError
   }
 
   private releasePlayedChunks(currentIndex: number) {
