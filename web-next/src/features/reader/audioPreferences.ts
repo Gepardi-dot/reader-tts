@@ -2,7 +2,7 @@ import { BROWSER_TTS_PROVIDER_ID, committedVoiceForDraft } from './audioPlayback
 import { ALLOWED_TTS_PROVIDER_IDS, DEFAULT_TTS_PROVIDER_ID, defaultVoiceForProvider, type TtsProviderInfo } from './audioProviderCatalog'
 
 export const AUDIO_PREFS_KEY = 'reader-audio-prefs'
-export const AUDIO_PREFS_VERSION = 5
+export const AUDIO_PREFS_VERSION = 6
 
 export interface AudioPrefs {
   provider: string
@@ -56,10 +56,14 @@ export function normalizeAudioPrefs(raw: unknown): AudioPrefs {
   const voicesByProvider = normalizedVoiceMap(parsed.voicesByProvider)
   const voice = normalizedVoice(parsed.voice)
   if (voice) voicesByProvider[provider] = voice
-  // Version 5 is when Natural Voices became the default. Older saves that were
-  // still on HR Voices move once. A later version bump must not do this again.
+  // Version 5 moved older HR Voices saves onto Natural Voices once.
+  // Version 6 moves that default back to HR Voices once. A save written at
+  // version 6 or later keeps an explicit Natural Voices choice.
   if (storedVersion < 5 && provider === 'kokoro') {
-    provider = DEFAULT_TTS_PROVIDER_ID
+    provider = 'nvidia'
+  }
+  if (storedVersion < 6 && provider === 'nvidia') {
+    provider = 'kokoro'
   }
 
   return {

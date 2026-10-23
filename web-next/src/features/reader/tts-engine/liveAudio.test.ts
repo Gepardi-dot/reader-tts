@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   audioErrorMessage,
+  isTransientLiveAudioError,
   LIVE_AUDIO_FETCH_TIMEOUT_MS,
   liveAudioCooldownRemainingMs,
+  PLAYBACK_CHUNK_RETRY_LIMIT,
+  playbackChunkRetryDelayMs,
   requestLiveAudio,
   resetLiveAudioCooldownForTests,
   type LiveAudioPayload,
@@ -206,5 +209,16 @@ describe('live audio quota backoff', () => {
     expect(result.cacheStorage).toBe('indexeddb')
     expect(result.cacheHit).toBe(true)
     expect(requestMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('playback chunk retry', () => {
+  it('retries a dead clip a few times and waits a little longer each time', () => {
+    expect(PLAYBACK_CHUNK_RETRY_LIMIT).toBe(4)
+    expect(playbackChunkRetryDelayMs(1)).toBe(700)
+    expect(playbackChunkRetryDelayMs(3)).toBe(2100)
+    expect(isTransientLiveAudioError(new Error('Hosted Kokoro timed out'))).toBe(true)
+    expect(isTransientLiveAudioError(new Error('Audio not found.'))).toBe(true)
+    expect(isTransientLiveAudioError(new Error('Your session expired. Sign in again.'))).toBe(false)
   })
 })

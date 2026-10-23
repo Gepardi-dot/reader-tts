@@ -39,10 +39,10 @@ export interface AudioProviderOption {
 
 /** Book TTS: hosted Kokoro, Gemini, and NVIDIA Natural Voices. */
 export const ALLOWED_TTS_PROVIDER_IDS = new Set(['kokoro', 'google', 'nvidia'])
-export const DEFAULT_TTS_PROVIDER_ID = 'nvidia'
+export const DEFAULT_TTS_PROVIDER_ID = 'kokoro'
 
-/** Picker order. Natural Voices is the default. HR Voices is last. */
-export const TTS_PROVIDER_ORDER = ['nvidia', 'google', 'kokoro'] as const
+/** Picker order. HR Voices is the default. Natural Voices is last. */
+export const TTS_PROVIDER_ORDER = ['kokoro', 'google', 'nvidia'] as const
 
 function providerRank(id: string): number {
   const index = TTS_PROVIDER_ORDER.indexOf(id as (typeof TTS_PROVIDER_ORDER)[number])
@@ -62,8 +62,8 @@ export function displayNameForTtsProvider(id: string, fallback?: string | null):
 
 const FALLBACK_TTS_PROVIDERS: TtsProviderInfo[] = [
   {
-    id: 'nvidia',
-    name: TTS_PROVIDER_DISPLAY_NAMES.nvidia,
+    id: 'kokoro',
+    name: TTS_PROVIDER_DISPLAY_NAMES.kokoro,
     available: true,
     recommended: true,
     voices: [],
@@ -78,8 +78,8 @@ const FALLBACK_TTS_PROVIDERS: TtsProviderInfo[] = [
     defaultVoice: null,
   },
   {
-    id: 'kokoro',
-    name: TTS_PROVIDER_DISPLAY_NAMES.kokoro,
+    id: 'nvidia',
+    name: TTS_PROVIDER_DISPLAY_NAMES.nvidia,
     available: true,
     recommended: false,
     voices: [],
