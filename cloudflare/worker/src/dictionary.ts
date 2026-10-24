@@ -18,10 +18,17 @@ import {
 } from '../../../web-next/src/shared/storage/dictionaryMorphology'
 
 const WIKTIONARY_UA = 'HiggsRead/1.0 (https://higgsread.com; dictionary lookup)'
-const FREE_TIMEOUT_MS = 1600
-const WIKI_TIMEOUT_MS = 2000
-/** Step 5 reasons before the definition. A short one took about six seconds. */
-const DICTIONARY_GENERATE_TIMEOUT_MS = 8000
+const FREE_TIMEOUT_MS = 2500
+/**
+ * A cold Wiktionary definition page often takes longer than 2 seconds.
+ * Cutting it off dropped real words such as courtesan, then the miss was cached.
+ */
+const WIKI_TIMEOUT_MS = 9000
+/**
+ * Step 5 always reasons before the definition. The wait has to cover that
+ * reasoning, or the answer is discarded and Define stays empty.
+ */
+const DICTIONARY_GENERATE_TIMEOUT_MS = 12000
 
 export function normalizeDictionaryTerm(value: string) {
   return value
@@ -50,6 +57,8 @@ function miss(term: string): GlossPayload {
 
 function stripHtml(html: string) {
   return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<span[^>]*usage-label[^>]*>[\s\S]*?<\/span>/gi, '')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')

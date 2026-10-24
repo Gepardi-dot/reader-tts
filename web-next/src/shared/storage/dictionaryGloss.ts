@@ -6,7 +6,7 @@
 
 import { extractFormOfLemmaFromText, isGrammaticalFormDefinition } from './dictionaryMorphology'
 
-export const DICTIONARY_GLOSS_VERSION = 3
+export const DICTIONARY_GLOSS_VERSION = 4
 
 export interface GlossDefinition {
   definition: string
