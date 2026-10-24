@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { payloadFromWiktionary } from '../../../../cloudflare/worker/src/dictionary'
+import { dictionaryWaitMs, payloadFromWiktionary } from '../../../../cloudflare/worker/src/dictionary'
 import { authoritativeReading } from './dictionaryGloss'
 
 it('keeps the ordinary Wiktionary sense for courtesan', () => {
@@ -21,6 +21,18 @@ it('keeps the ordinary Wiktionary sense for courtesan', () => {
   if (reading?.kind !== 'sense') return
   expect(reading.definition).toBe('A female prostitute, especially one with high-status or wealthy clients.')
   expect(reading.everyday).toBe(true)
+})
+
+it('keeps a lemma follow-up and the gap-fill inside the client wait', () => {
+  expect(dictionaryWaitMs(0, 9000)).toBe(9000)
+  expect(dictionaryWaitMs(9000, 9000)).toBe(9000)
+  expect(dictionaryWaitMs(15000, 12000)).toBe(5000)
+  expect(dictionaryWaitMs(20000, 12000)).toBe(0)
+  const worst = dictionaryWaitMs(0, 9000)
+    + dictionaryWaitMs(9000, 9000)
+    + dictionaryWaitMs(18000, 12000)
+  expect(worst).toBeLessThanOrEqual(20_000)
+  expect(worst).toBeLessThan(24_000)
 })
 
 it('drops Wiktionary style tags instead of showing the CSS', () => {
