@@ -237,8 +237,9 @@ function emptyDictionary(term: string): DictionaryResponse {
 async function fetchBackendDictionary(term: string): Promise<DictionaryResponse | null> {
   try {
     const raw = await request<DictionaryResponse>(
-      `/api/dictionary/lookup?term=${encodeURIComponent(term)}`,
-      { signal: AbortSignal.timeout(14_000) },
+      `/api/dictionary/lookup?term=${encodeURIComponent(term)}&v=7`,
+      // The worker stops the whole lookup at 20s, including a lemma follow-up.
+      { signal: AbortSignal.timeout(24_000) },
     )
     const normalized = normalizeDictionaryPayload(raw, term)
     if (!normalized) return null

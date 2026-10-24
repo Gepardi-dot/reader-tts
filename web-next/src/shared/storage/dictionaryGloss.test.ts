@@ -132,7 +132,7 @@ describe('settleGlossPayload', () => {
       }],
       source: 'online',
     })
-    expect(settled.glossVersion).toBe(3)
+    expect(settled.glossVersion).toBe(4)
     expect(settled.entries?.[0]?.definitions?.map((def) => def.definition)).toEqual([
       'To fill with the urge to do something bold.',
     ])

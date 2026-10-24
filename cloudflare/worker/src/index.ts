@@ -4082,7 +4082,7 @@ async function providers(env: Env) {
 async function dictionaryLookup(url: URL, env: Env, ctx: ExecutionContext) {
   const term = normalizeDictionaryTerm(url.searchParams.get('term') ?? '')
   if (!term) throw new ApiError(400, 'Dictionary term is required.')
-  const cacheKey = `https://dictionary-cache.higgsread.internal/lookup?v=6&q=${encodeURIComponent(term)}`
+  const cacheKey = `https://dictionary-cache.higgsread.internal/lookup?v=7&q=${encodeURIComponent(term)}`
   try {
     const cached = await caches.default.match(cacheKey)
     if (cached) return cached
@@ -4097,7 +4097,8 @@ async function dictionaryLookup(url: URL, env: Env, ctx: ExecutionContext) {
         return await readerGenerateText(env, {
           system,
           turns: [{ role: 'user', content: prompt }],
-          maxTokens: 200,
+          // 200 tokens often finish during reasoning and leave the definition empty.
+          maxTokens: 2048,
           temperature: 0.1,
         })
       } catch {
@@ -4108,8 +4109,10 @@ async function dictionaryLookup(url: URL, env: Env, ctx: ExecutionContext) {
 
   const headers = body.available
     ? { 'Cache-Control': 'public, max-age=86400, s-maxage=604800' }
-    : { 'Cache-Control': 'public, max-age=600' }
+    : { 'Cache-Control': 'no-store' }
   const response = json(body as JsonValue, 200, headers)
-  ctx.waitUntil(caches.default.put(cacheKey, response.clone()).catch(() => undefined))
+  if (body.available) {
+    ctx.waitUntil(caches.default.put(cacheKey, response.clone()).catch(() => undefined))
+  }
   return response
 }
