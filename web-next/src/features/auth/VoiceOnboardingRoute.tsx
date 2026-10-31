@@ -67,9 +67,11 @@ export function VoiceOnboardingRoute() {
     const fit = () => {
       const viewport = window.visualViewport
       const top = viewport?.offsetTop ?? 0
-      const height = viewport?.height ?? window.innerHeight
+      const measured = viewport?.height ?? window.innerHeight
       shell.style.top = `${top}px`
-      shell.style.height = `${Math.max(320, Math.round(height))}px`
+      // Never grow past the visible viewport. A minimum would hide the button
+      // on a short landscape screen or a zoomed Samsung browser.
+      if (measured > 0) shell.style.height = `${Math.round(measured)}px`
     }
     fit()
     const viewport = window.visualViewport
