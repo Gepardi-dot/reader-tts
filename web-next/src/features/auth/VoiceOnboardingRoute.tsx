@@ -29,6 +29,7 @@ export function VoiceOnboardingRoute() {
   const [error, setError] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const previewGen = useRef(0)
+  const shellRef = useRef<HTMLDivElement>(null)
 
   const female = useMemo(
     () => KOKORO_VOICE_CATALOG.filter((v) => v.gender === 'female'),
@@ -55,6 +56,32 @@ export function VoiceOnboardingRoute() {
     return () => {
       previewGen.current += 1
       stopPreviewAudio()
+    }
+  }, [])
+
+  useEffect(() => {
+    // Samsung Chrome sizes this page to the layout viewport and does not
+    // scroll the document, so the shell tracks the visible viewport instead.
+    const shell = shellRef.current
+    if (!shell) return
+    const fit = () => {
+      const viewport = window.visualViewport
+      const top = viewport?.offsetTop ?? 0
+      const height = viewport?.height ?? window.innerHeight
+      shell.style.top = `${top}px`
+      shell.style.height = `${Math.max(320, Math.round(height))}px`
+    }
+    fit()
+    const viewport = window.visualViewport
+    viewport?.addEventListener('resize', fit)
+    viewport?.addEventListener('scroll', fit)
+    window.addEventListener('resize', fit)
+    window.addEventListener('orientationchange', fit)
+    return () => {
+      viewport?.removeEventListener('resize', fit)
+      viewport?.removeEventListener('scroll', fit)
+      window.removeEventListener('resize', fit)
+      window.removeEventListener('orientationchange', fit)
     }
   }, [])
 
@@ -195,63 +222,74 @@ export function VoiceOnboardingRoute() {
 
   return (
     <div
-      className="flex min-h-svh items-center justify-center bg-background px-4 py-10"
-      style={{
-        paddingTop: 'max(2.5rem, env(safe-area-inset-top, 0px))',
-        paddingBottom: 'max(2.5rem, env(safe-area-inset-bottom, 0px))',
-      }}
+      ref={shellRef}
+      className="fixed inset-x-0 top-0 z-30 flex flex-col overflow-hidden bg-background"
+      style={{ height: '100svh' }}
     >
-      <div className="w-full max-w-lg space-y-6">
-        <div className="text-center">
-          <span className="text-3xl" aria-hidden>🎙️</span>
-          <h1
-            className="mt-2 text-2xl font-semibold tracking-tight text-foreground"
-            style={{ fontFamily: '"Playfair Display", Georgia, serif' }}
-          >
-            Choose your reading voice
-          </h1>
-          <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
-            Used for books, practice words, and offline Kokoro.
-            Prefetch and cache stay locked to this voice so Play stays fast.
-          </p>
+      <div
+        className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-4"
+        style={{
+          touchAction: 'pan-y',
+          paddingTop: 'max(1.5rem, env(safe-area-inset-top, 0px))',
+          paddingBottom: '1rem',
+        }}
+      >
+        <div className="mx-auto w-full max-w-lg space-y-6">
+          <div className="text-center">
+            <span className="text-3xl" aria-hidden>🎙️</span>
+            <h1
+              className="mt-2 text-2xl font-semibold tracking-tight text-foreground"
+              style={{ fontFamily: '"Playfair Display", Georgia, serif' }}
+            >
+              Choose your reading voice
+            </h1>
+            <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+              Used for books, practice words, and offline Kokoro.
+              Prefetch and cache stay locked to this voice so Play stays fast.
+            </p>
+          </div>
+
+          <section className="space-y-2">
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground px-0.5">
+              Female
+            </h2>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {female.map((v) => (
+                <VoiceCard key={v.id} voice={v} />
+              ))}
+            </div>
+          </section>
+
+          <section className="space-y-2">
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground px-0.5">
+              Male
+            </h2>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {male.map((v) => (
+                <VoiceCard key={v.id} voice={v} />
+              ))}
+            </div>
+          </section>
         </div>
+      </div>
 
-        <section className="space-y-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground px-0.5">
-            Female
-          </h2>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {female.map((v) => (
-              <VoiceCard key={v.id} voice={v} />
-            ))}
-          </div>
-        </section>
-
-        <section className="space-y-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground px-0.5">
-            Male
-          </h2>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {male.map((v) => (
-              <VoiceCard key={v.id} voice={v} />
-            ))}
-          </div>
-        </section>
-
-        {error && (
-          <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-            {error}
-          </p>
-        )}
-
-        <div className="space-y-2">
+      <div
+        className="shrink-0 border-t border-border bg-background px-4 pt-3"
+        style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom, 0px))' }}
+      >
+        <div className="mx-auto w-full max-w-lg space-y-2">
+          {error && (
+            <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              {error}
+            </p>
+          )}
           <Button
-            className="w-full"
+            className="h-12 w-full text-base"
             size="lg"
             disabled={saving || !selected}
             onClick={handleContinue}
           >
-            {saving ? 'Saving…' : 'Continue with this voice'}
+            {saving ? 'Saving…' : 'Continue to library'}
           </Button>
           <p className="text-center text-[11px] text-muted-foreground">
             You can change this anytime in Audio settings.
